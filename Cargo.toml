@@ -23,6 +23,11 @@ slop-rhi = { path = "crates/slop-rhi" }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 
+# Linear algebra. The feature set is a determinism decision, not a performance
+# one — `scalar-math` and `libm` trade SIMD throughput for results that are
+# identical across CPU feature levels. Settle it with DESIGN.md §8 item 8.
+glam = "0.33.2"
+
 [workspace.lints.rust]
 rust_2018_idioms = { level = "warn", priority = -1 }
 missing_debug_implementations = "warn"

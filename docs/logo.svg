@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Slop Engine">
+  <title>Slop Engine</title>
+  <path fill="#0F9D8F" d="M256 108 L384 182 L256 256 L128 182 Z"/>
+  <path fill="#52B8AE" d="M384 182 L384 330 L256 404 L256 256 Z"/>
+  <path fill="#9AD6D0" d="M128 182 L128 330 L256 404 L256 256 Z"/>
+</svg>
