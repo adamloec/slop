@@ -288,6 +288,89 @@ impl CommandBuffer {
                 .cmd_pipeline_barrier2(self.handle, &dependency);
         }
     }
+
+    /// Record a barrier making prior transfer writes to `buffer` readable by the
+    /// CPU.
+    ///
+    /// Mapped memory being host-coherent means no cache maintenance is needed,
+    /// but coherence is not ordering: without this barrier the host may observe
+    /// the buffer before the copy that filled it has completed, and the read
+    /// silently returns whatever was there. Waiting on a semaphore is not a
+    /// substitute — it orders execution, and this orders memory.
+    ///
+    /// The `HOST` pipeline stage exists precisely for this, and is the only
+    /// place in the engine it should appear: everything else in a frame is
+    /// ordered GPU-side.
+    pub fn make_visible_to_host(&self, buffer: vk::Buffer) {
+        let barriers = [vk::BufferMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::HOST)
+            .dst_access_mask(vk::AccessFlags2::HOST_READ)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .buffer(buffer)
+            .offset(0)
+            .size(vk::WHOLE_SIZE)];
+
+        let dependency = vk::DependencyInfo::default().buffer_memory_barriers(&barriers);
+
+        // SAFETY: the buffer is recording, `dependency` borrows `barriers`
+        // which outlives the call, and `synchronization2` is in the required
+        // feature tier.
+        unsafe {
+            self.device
+                .raw()
+                .cmd_pipeline_barrier2(self.handle, &dependency);
+        }
+    }
+
+    /// Record a copy of a whole colour image into a buffer, tightly packed.
+    ///
+    /// This is how pixels reach the CPU. An optimally tiled image has a
+    /// driver-private memory layout, so mapping one directly is not possible —
+    /// the copy is what converts it to rows the host can read.
+    ///
+    /// The image must already be in [`ImageState::TRANSFER_SRC`], and the
+    /// buffer must be at least `width * height * bytes_per_pixel` bytes and
+    /// carry [`vk::BufferUsageFlags::TRANSFER_DST`].
+    ///
+    /// Rows are tightly packed: zero for both `bufferRowLength` and
+    /// `bufferImageHeight` means "the same as the copy extent", so the
+    /// destination has no padding between rows and `width * bytes_per_pixel`
+    /// is the stride. Anything else would have to be communicated back to the
+    /// caller, and there is no reason to want it here.
+    pub fn copy_image_to_buffer(&self, image: vk::Image, buffer: vk::Buffer, extent: vk::Extent2D) {
+        let regions = [vk::BufferImageCopy::default()
+            .buffer_offset(0)
+            .buffer_row_length(0)
+            .buffer_image_height(0)
+            .image_subresource(vk::ImageSubresourceLayers {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                mip_level: 0,
+                base_array_layer: 0,
+                layer_count: 1,
+            })
+            .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+            .image_extent(vk::Extent3D {
+                width: extent.width,
+                height: extent.height,
+                depth: 1,
+            })];
+
+        // SAFETY: the buffer is recording, `regions` outlives the call, and the
+        // image being in TRANSFER_SRC_OPTIMAL is the caller's documented
+        // obligation — one validation reports if broken.
+        unsafe {
+            self.device.raw().cmd_copy_image_to_buffer(
+                self.handle,
+                image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                buffer,
+                &regions,
+            );
+        }
+    }
 }
 
 impl std::fmt::Debug for CommandBuffer {

@@ -26,6 +26,7 @@ Types land when a consumer needs them, not before.
 |---|---|---|
 | `glam` re-export, coordinate conventions | Landed | M0 |
 | `Transform` — TRS, composition, interpolation | Landed | M0 |
+| `scalar` — platform-independent transcendentals | Landed | M0 |
 | Projection matrices, camera | Planned — binds the depth conventions | M0 |
 | `Aabb`, `Sphere`, `Plane`, `Ray` and intersections | Planned — when culling needs them | M2 |
 | `Frustum` extraction and culling tests | Planned | M2 |
@@ -67,6 +68,7 @@ aligns them and buys orders of magnitude of precision for free.
 |---|---|---|
 | `Transform` | TRS, kept decomposed | `DESIGN.md` §2.7 |
 | `UP`, `FORWARD`, `RIGHT` | World axis constants | §3 above |
+| `scalar` | `sin`, `cos`, `exp`, `powf` … via `libm`, identical on every platform | `DESIGN.md` §2.14 |
 | `glam` re-export | Vector, matrix, quaternion vocabulary | `DESIGN.md` §3.2 |
 
 ## 5. Decisions
@@ -76,7 +78,7 @@ aligns them and buys orders of magnitude of precision for free.
 | Take `glam`; do not write our own linear algebra | `DESIGN.md` §3.2 |
 | Right-handed Y-up world space, matching glTF | §3 above |
 | Reversed depth, `[0, 1]` range | §3 above — decided at M0, see below |
-| Which `glam` feature set — tied to the determinism tier | `DESIGN.md` §8 item 8 |
+| `glam` with `libm`, without `scalar-math` | `DESIGN.md` §2.14 |
 
 **Reverse-Z was decided at M0 rather than deferred to the renderer,** which is
 `DESIGN.md` §1.2 principle 6's "refactor or rewrite?" test coming out on the
@@ -95,17 +97,25 @@ land with the camera in M0 task F.
 2. **Coordinate conventions are stated once, in §3, and never assumed
    elsewhere.** Code that needs one cites it; code that contradicts it is a bug
    regardless of whether it looks right on screen.
-3. **The `glam` feature set is a determinism decision, not a performance one.**
-   SIMD paths can differ across CPU feature levels; `scalar-math` and `libm`
-   exist to trade throughput for reproducibility. Settle it with `DESIGN.md` §8
-   item 8, not independently.
-4. **`Transform` is not a matrix and must not become one.** It stays decomposed
+3. **The `glam` feature set is a determinism decision, not a performance one**
+   (`DESIGN.md` §2.14). `libm` is on, so transcendentals do not call the
+   platform C library and Windows agrees with Linux. `scalar-math` is off, and
+   deliberately: glam picks its SIMD path at compile time rather than by runtime
+   CPU detection, so one build is already one code path, and scalar maths would
+   only buy the cross-architecture tier §2.14 puts out of scope.
+4. **Loose `f32` transcendentals go through `scalar`, never `std`.** `f32::sin`
+   and its neighbours reach the platform C library, which defeats the point of
+   the previous invariant for every call that is not on a `glam` type.
+   `clippy.toml` disallows them. `sqrt`, `abs`, `floor`, `ceil`, `round`,
+   `trunc` and `mul_add` are exactly specified by IEEE-754, are already
+   identical everywhere, and must **not** be wrapped.
+5. **`Transform` is not a matrix and must not become one.** It stays decomposed
    because the scene graph, the editor, serialization, and §2.7's interpolation
    all need the parts individually — and because blending matrices is not the
    same as blending the transforms they represent.
-5. **No `Transform::inverse` returning a `Transform`.** The inverse of a TRS with
+6. **No `Transform::inverse` returning a `Transform`.** The inverse of a TRS with
    non-uniform scale is not a TRS, so such a method would be silently wrong in
    exactly the cases that matter. `inverse_matrix` returns a `Mat4` and is
    correct in every case.
-6. **`transform_vector` is not for normals.** Under non-uniform scale, normals
+7. **`transform_vector` is not for normals.** Under non-uniform scale, normals
    need the inverse transpose or they stop being perpendicular to the surface.

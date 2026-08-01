@@ -21,6 +21,36 @@
 //! Do not build on the current cost model. Assume dispatch is cheap and tasks
 //! are many, which is what will be true.
 //!
+//! # The determinism contract
+//!
+//! `docs/DESIGN.md` §2.14 requires the same build to produce the same
+//! simulation results on any machine. A thread pool is the easiest way to break
+//! that, because the pool's own behaviour is legitimately nondeterministic — how
+//! many workers exist, which one picks up which task, and what order tasks
+//! finish in all vary per run and per machine.
+//!
+//! So the contract is on **callers**, and it is one sentence:
+//!
+//! > The result of a dispatch must not depend on how many threads ran it, which
+//! > thread ran what, or the order tasks completed in.
+//!
+//! Three ways that gets broken, all of which look correct:
+//!
+//! - **Accumulating floats across tasks.** Addition is not associative in
+//!   floating point, so summing into a shared total gives a different answer
+//!   depending on completion order. Accumulate per-task into an indexed slot,
+//!   then reduce in index order on the calling thread.
+//! - **Pushing results onto a shared collection.** The order of arrival is the
+//!   order of scheduling. Write into `output[index]`, do not push.
+//! - **Reading a clock, a thread id, or a global counter inside a task.** All
+//!   three vary per run by construction.
+//!
+//! None of this is checkable by the type system, and the failure mode is a
+//! divergence that appears once in twenty runs. It is written down here, at the
+//! seam, because the pool that replaces this implementation will make the
+//! nondeterminism *more* pronounced rather than less — work stealing exists
+//! precisely to vary who does what.
+//!
 //! # What is deliberately absent
 //!
 //! `docs/DESIGN.md` §2.5 also calls for systems declaring read/write sets so the

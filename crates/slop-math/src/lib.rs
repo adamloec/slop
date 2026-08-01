@@ -41,6 +41,27 @@
 //! Nothing consumes the depth conventions yet — they bind when projection
 //! matrices land with the camera in M0 task F.
 
+//! # Determinism
+//!
+//! `docs/DESIGN.md` §2.14 commits to the same build producing the same numbers
+//! on Windows and Linux. Two things here serve that, and both are easy to
+//! undo by accident:
+//!
+//! - `glam` is built with its `libm` feature, so vector transcendentals do not
+//!   call the platform C library. That is set in the workspace manifest.
+//! - [`scalar`] provides the same for loose `f32` maths, and `clippy.toml`
+//!   disallows the `std` equivalents so the two cannot drift apart.
+//!
+//! Neither applies to the GPU. Shader maths is the driver's, and golden images
+//! are how differences there become visible.
+
+/// Platform-independent scalar transcendentals — see the module docs.
+///
+/// A public module rather than flat re-exports: `scalar::sin(x)` says at the
+/// call site that this is the deliberate one, where a bare `sin(x)` would read
+/// like an import someone chose at random.
+pub mod scalar;
+
 mod transform;
 
 pub use transform::Transform;

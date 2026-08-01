@@ -121,7 +121,8 @@ Two consequences worth carrying into M0:
 
 ## 3. Current state
 
-**M0 tasks A, B, C, E and F are done. The triangle renders.**
+**M0 tasks A, B, C, E, F and G are done. The triangle renders, and a golden
+image now guards it.**
 
 Verified on the RTX 5090: window, surface, device, swapchain, cooked Slang
 shader, graphics pipeline, and a frame loop with two frames in flight, running
@@ -129,20 +130,36 @@ with validation active and reporting no errors, and shutting down cleanly. A
 one-second run completes roughly 5,400 frames, which is the evidence that the
 frames-in-flight pipelining works rather than stalling on the GPU each frame.
 
+Task G landed with the memory work it needed:
+
+- **`gpu-allocator` integration** — `Allocator`, `Buffer`, `Image`, and
+  image-to-buffer readback. Every resource suballocates from the start.
+- **Headless rendering** — no window, no surface, no swapchain, `present_family`
+  genuinely `None`. This is the mode `DESIGN.md` §5 asks for; the golden test
+  *is* it, rather than a demo binary that would be the same program written
+  twice.
+- **`slop-verify`** — the golden-image harness: tolerance model, difference
+  reporting, diff images, and an approval mode that never runs by default.
+
+**The harness was verified by breaking the renderer on purpose.** Reversing the
+triangle's winding — bug 2 below, the one that reached a running program — makes
+the test fail with 18.09% of pixels differing and writes a diff image showing
+exactly the triangle. Restoring it returns the suite to green. A golden test that
+has never caught anything is a golden test that does not work.
+
 Remaining for M0:
 
 | Task | State |
 |---|---|
-| D — `slop-rhi` | Mostly done. `gpu-allocator`, buffers, images and descriptors remain, and are needed for the cube rather than the triangle. |
-| G — verification skeleton | Not started. Headless mode, one golden image. |
-| §4.2 exit criteria | The cube, dual-platform CI, and a golden image are all outstanding. |
+| D — `slop-rhi` | Allocator, buffers and images landed. Bindless descriptor heap and depth attachments remain, and are needed for the cube rather than the triangle. |
+| §4.2 exit criteria | The cube and dual-platform CI are outstanding. The golden image is done for the hardware tier; the lavapipe tier lands with CI. |
 
 The triangle deliberately allocates nothing — positions come from `SV_VertexID`
 — so the first render did not also depend on the allocator, buffer uploads, or
-descriptor sets being correct. Those arrive together with the cube.
+descriptor sets being correct.
 
-**Three bugs reached a running program that review did not catch**, which is the
-argument for pulling task G forward rather than leaving it last:
+**Three bugs reached a running program that review did not catch**, which was
+the argument for pulling task G forward rather than leaving it last:
 
 1. A missing `shaderDrawParameters` feature: 18 validation errors, zero test
    failures, and correct output on this driver regardless.
@@ -151,7 +168,19 @@ argument for pulling task G forward rather than leaving it last:
 3. A drop-order crash on shutdown, which only appeared when a human closed the
    window rather than when the process was killed.
 
-None of the three was visible to the type system, clippy, or the test suite.
+None of the three was visible to the type system, clippy, or the test suite. The
+golden test now catches the second directly, and the third is covered by a
+`Drop` impl the headless renderer carries for the same reason the example does.
+
+**The determinism tier is settled** — `DESIGN.md` §2.14, decided before M1
+rather than before M5. A golden image means nothing unless the frame it captures
+is reproducible, and determinism constrains ECS iteration order and job
+scheduling, both of which land at M1. Deciding it after they exist would mean
+auditing both at once. What landed: `slop_core::Rng` (seeded PCG32),
+`slop_core::FxHashMap` (`RandomState` reseeds *per process*, so a plain
+`HashMap` iterates differently on every run), `slop_math::scalar` and glam's
+`libm` feature, and `clippy.toml` entries so the `std` alternatives cannot come
+back by accident.
 
 ---
 
@@ -338,10 +367,25 @@ The cube is deliberately unambitious. Its job is integration, not looks.
 - Shaders in Slang compiled to SPIR-V. `slangc` CLI is acceptable *for M0 only*;
   §2.11 requires library integration once reflection is needed (M2/M3)
 
-**G. Verification skeleton**
+**G. Verification skeleton** — *done, see §3*
 - Headless mode that renders N frames without a window
 - One golden-image test wired into CI
 - Establishes the §5 pattern early, while it is trivial
+
+> **Note on ordering — moved ahead of the cube.** Task G was scoped last and ran
+> sixth, because three bugs had already reached a running program that review did
+> not catch (§3). Building the cube first would have meant debugging a silent
+> visual regression with no reference to compare against.
+>
+> Task G also turned out to *contain* the first half of task D's memory work:
+> readback needs an allocator, a device-local image, and a host-visible buffer.
+> Doing it in this order meant the allocator arrived with a test that exercises
+> it, rather than arriving alongside the cube and being debugged at the same
+> time as vertex buffers, descriptor sets, and depth.
+>
+> Still outstanding from the original scope: **wired into CI**. The test exists
+> and passes locally; CI itself is deferred (§2.2), and the lavapipe tier lands
+> with it.
 
 > **Decided 2026-07-31 — golden images run on lavapipe in CI.**
 >
@@ -368,8 +412,9 @@ The cube is deliberately unambitious. Its job is integration, not looks.
 
 - Lit textured cube renders on Windows and Linux
 - CI green on both
-- Validation layers clean
-- One golden-image test passing
+- Validation layers clean — **met**
+- One golden-image test passing — **met on the hardware tier**; the lavapipe tier
+  needs CI
 - No `#[allow]` suppressions hiding real problems
 
 ---

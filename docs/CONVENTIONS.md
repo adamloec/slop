@@ -627,6 +627,28 @@ lands, make it structurally impossible for the renderer to hold a `&World`.
 Structural ECS changes go through command buffers applied at explicit sync
 points, never immediately (§2.10).
 
+**Parallel results must not depend on the pool.** `DESIGN.md` §2.14 requires the
+same build to produce the same simulation on any machine, and a thread pool's
+worker count, task assignment, and completion order all legitimately vary.
+
+```rust
+// ✗ float addition is not associative, so the total depends on arrival order
+let total = Mutex::new(0.0);
+jobs.for_each(&chunks, |chunk| *total.lock() += chunk.energy());
+
+// ✗ the order of arrival is the order of scheduling
+let found = Mutex::new(Vec::new());
+jobs.for_each(&chunks, |chunk| found.lock().extend(chunk.hits()));
+
+// ✓ write into an indexed slot, reduce in index order on the caller
+let mut partials = vec![0.0; chunks.len()];
+jobs.for_each_mut(&chunks, &mut partials, |chunk, slot| *slot = chunk.energy());
+let total: f32 = partials.iter().sum();
+```
+
+Also inside a task: no clock reads, no thread ids, no global counters. All three
+vary per run by construction.
+
 ## 10. Platform portability
 
 Each rule maps to a row of `DESIGN.md` §2.13's trap table.
@@ -654,6 +676,50 @@ ash_window::create_surface(&entry, &instance, display_handle, window_handle, Non
 
 Asset paths are lowercase, enforced at cook time. Text files are LF, governed by
 `.gitattributes`, with repo-local `core.autocrlf = false`.
+
+### 10.1 Determinism
+
+`DESIGN.md` §2.14: the same build produces the same simulation on any machine,
+on Windows and on Linux. Three `std` defaults break that, all of them silently,
+and none of them at the moment the mistake is made.
+
+```rust
+// ✗ platform C library; the Windows CRT and glibc disagree in the last bit
+let offset = radius * angle.sin();
+
+// ✓ the `libm` crate — same Rust source on every target
+let offset = radius * slop_math::scalar::sin(angle);
+```
+
+```rust
+// ✗ seeds from the OS; one call anywhere ends determinism for good
+let jitter = rand::thread_rng().gen_range(-1.0..1.0);
+
+// ✓ explicit seed, explicitly passed, no thread-local to reach for
+let jitter = rng.range_f32(-1.0, 1.0);
+```
+
+```rust
+// ✗ `RandomState` reseeds per process, so this iterates differently every run
+let mut systems: HashMap<TypeId, System> = HashMap::new();
+
+// ✓ fixed seed, so the same insertions give the same iteration order
+let mut systems: FxHashMap<TypeId, System> = FxHashMap::default();
+```
+
+The first two are enforced by `clippy.toml`'s `disallowed-methods`; the third is
+not mechanically checkable and rests on review.
+
+`sqrt`, `abs`, `floor`, `ceil`, `round`, `trunc` and `mul_add` are exactly
+specified by IEEE-754 and need no wrapper — use the `std` ones.
+
+`FxHashMap` makes iteration *reproducible*, not *ordered*. Anything needing a
+defined order — a serialization format, a content hash, a list shown to a user —
+sorts, or uses a `BTreeMap`.
+
+None of this applies outside the simulation. Tools, tests, importers, and the
+editor may use whatever they like; determinism is a property of what runs the
+game, not of everything in the repository.
 
 ## 11. Documentation
 

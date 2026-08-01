@@ -403,6 +403,61 @@ than an unexplained difference.
 Primary development currently happens on Windows. That is a workflow detail, not
 a design position; the CI requirement is what keeps it from becoming one.
 
+### 2.14 Determinism: same build, any machine, either platform
+
+**Decided 2026-08-01, resolving §8 item 8.**
+
+§2.3, §2.7, §5 and §2.13 all cite determinism for different purposes, and the
+tiers differ enormously in cost. The tier we buy:
+
+| Scenario | Guaranteed |
+|---|---|
+| Same binary, two Windows machines | **yes** |
+| Same source, built on Windows and on Linux | **yes** |
+| Different architecture — ARM | no |
+| Different toolchain, or `-C target-cpu=native` | no |
+| Cross-platform lockstep for netcode | no |
+
+The middle row is why this is stronger than the provisional position §8 recorded.
+§2.13 says a Windows/Linux golden-image difference should be an actionable
+signal — that is only true if the simulation feeding the renderer is bit-identical
+across the two. A weaker tier would make every cross-platform golden failure
+ambiguous, which is the same as having no cross-platform goldens.
+
+Cross-platform lockstep stays out of scope. It is not free, `rapier` does not
+offer it — `enhanced-determinism` is scoped to identical platform and build —
+and nothing needs it until networking is scoped (§8 item 6).
+
+**What it costs.** Four things, each of which is easy to undo by accident, so
+each is enforced rather than documented:
+
+| Hazard | Answer | Enforced by |
+|---|---|---|
+| `f32::sin` and friends call the platform C library, and the Windows CRT and glibc disagree in the last bit | `slop_math::scalar`, forwarding to the `libm` crate; `glam` built with its `libm` feature | `clippy.toml` `disallowed-methods` |
+| `rand::thread_rng` seeds from the OS, so one call ends determinism silently | `slop_core::Rng` — PCG32, constructed from an explicit seed, no `Default`, no thread-local | `clippy.toml` `disallowed-methods`, listed before `rand` is even a dependency |
+| `HashMap`'s default hasher reseeds **per process**, so iteration order differs between two runs of the same binary | `slop_core::FxHashMap` / `FxHashSet`, fixed-seed | Convention; §5's replay tests are what catch a lapse |
+| A thread pool's worker count and completion order vary per run | The caller-side contract in `slop-core`'s `jobs` module docs: results must not depend on thread count, assignment, or completion order | Not mechanically checkable — this one rests on review and on replay tests |
+
+IEEE-754 already pins `+`, `-`, `*`, `/` and `sqrt` to be correctly rounded, so
+those need nothing.
+
+**What is deliberately not bought:** `glam`'s `scalar-math`. glam selects its
+SIMD path at compile time rather than by runtime CPU detection, so one build is
+one code path and results are already stable across machines of the same
+architecture. Scalar math would only buy cross-architecture agreement, which the
+table above puts out of scope, and it would cost throughput on the hottest code
+in the engine.
+
+**Scope.** This covers the CPU. Shader arithmetic is the driver's, varies by
+vendor, and is out of reach — which is exactly why §5's golden images run on
+lavapipe for the exact-match tier, and why the real-hardware tier compares with a
+tolerance.
+
+Deciding this at M0 rather than at M5 is §1.2 principle 6: determinism is not a
+feature to add later. It constrains ECS iteration order and job scheduling, both
+of which land at M1, and retrofitting it means auditing every one of them at
+once.
+
 ---
 
 ## 3. Dependency policy
@@ -469,6 +524,7 @@ slop-host       wasmtime host, module lifecycle, bulk data marshalling
 slop-app        main loop, module/plugin wiring, configuration
 slop-editor     egui-based tooling
 slop-cli        build, cook, run, inspect, test
+slop-verify     golden images, comparison, approval — §5; dev-dependency only
 ```
 
 ### 4.1 Frame structure
@@ -518,7 +574,9 @@ automated truth is the only thing preventing large volumes of subtly wrong
 architecture. The bottleneck in this project is verification, not authoring.
 
 - **Deterministic headless mode.** Run N simulation ticks with no window, seeded
-  RNG, stable iteration order. Reproducible bug reports and CI.
+  RNG, stable iteration order — the tier and its enforcement are §2.14. This is
+  a prerequisite for the golden images below, not a peer of them: a reference
+  image means nothing if the frame it captures is not reproducible.
 - **Golden-image regression tests.** Render fixed scenes at fixed frames,
   compare against approved references. Two tiers: hosted CI on both platforms
   renders through **lavapipe**, a CPU rasterizer, which is bit-deterministic and
@@ -612,24 +670,17 @@ demo:
    is why reflection matters even though networking is far out.
 7. **Naming.** "Slop" is a joke that becomes load-bearing if the project gets
    serious. Worth revisiting before any public surface exists.
-8. **Which tier of determinism we are buying.** §2.3, §2.7, and §5 each cite
-   determinism, for different purposes, and the tiers differ enormously in cost.
-   *Same-build, same-machine* determinism is nearly free and is sufficient for
-   replay, CI, and regression testing. *Cross-platform lockstep* — the tier
-   netcode would need — is not free and is not something `rapier` provides:
-   its `enhanced-determinism` feature is scoped to identical platform and build.
-   Provisional position: commit to same-build determinism only, which still
-   justifies every decision currently citing it, and treat cross-platform
-   lockstep as out of scope until networking is actually scoped (item 6).
-   **Decide before M5.**
-
-   This decision also selects `glam`'s feature set rather than merely being
-   affected by it: glam's SIMD paths can yield differing results across CPU
-   feature levels, and it ships `scalar-math` and `libm` features precisely to
-   trade throughput for reproducibility. So the question is never "glam or our
-   own math" (§3.2) — it is which glam configuration. Settle both together.
-
+8. **Golden-image granularity.** §5's golden images compare whole frames, which
+   is right for one triangle and dilutes badly for a dense scene — a 1% pixel
+   tolerance at 1080p is twenty thousand pixels, or an entire small object being
+   wrong. Three additions are anticipated and none is built: region-of-interest
+   assertions so one subject's regression cannot be diluted by another's; capture
+   of intermediates — depth, shadow atlas, G-buffer — rather than only the
+   composite; and non-image assertions for what pixels cannot see, such as a
+   culler retaining objects it should have rejected. The first two need the
+   render graph to name and expose passes. **Revisit at M3.**
 **Resolved:**
+- Determinism tier — same build, any machine, either platform, see §2.14.
 - macOS support — dropped, see §2.1.
 - Sim/render coupling — immutable render snapshot, see §2.9.
 - ECS storage strategy — archetype, see §2.10.

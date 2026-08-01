@@ -97,6 +97,51 @@ pub enum RhiError {
         length: usize,
     },
 
+    /// The memory allocator could not be constructed.
+    ///
+    /// Carries the reason as a string rather than the backing allocator's own
+    /// error type, so that replacing the allocator is not a breaking change to
+    /// this enum.
+    #[error("could not create the GPU memory allocator: {reason}")]
+    AllocatorUnavailable {
+        /// What the allocator reported.
+        reason: String,
+    },
+
+    /// A suballocation failed.
+    ///
+    /// Carries the resource name and size because "out of memory" alone is
+    /// almost never enough to act on — which resource, and how big, is.
+    #[error("could not allocate {size} bytes of GPU memory for '{name}': {reason}")]
+    Allocation {
+        /// The name the resource was created with.
+        name: String,
+        /// Bytes requested.
+        size: u64,
+        /// What the allocator reported.
+        reason: String,
+    },
+
+    /// Memory was requested from an allocator that has already been destroyed.
+    ///
+    /// Not reachable through the public API — resources hold an `Arc` to their
+    /// allocator — so this indicates a bug in this crate rather than in a
+    /// caller.
+    #[error("the GPU memory allocator has already been destroyed")]
+    AllocatorShutDown,
+
+    /// A mapping was requested for memory the CPU cannot address.
+    ///
+    /// Means the resource was created in [`MemoryLocation::DeviceOnly`], which
+    /// is correct for anything only the GPU touches and wrong for anything being
+    /// read back. Getting device-local pixels to the CPU means copying to a
+    /// buffer in [`MemoryLocation::Readback`].
+    ///
+    /// [`MemoryLocation::DeviceOnly`]: crate::MemoryLocation::DeviceOnly
+    /// [`MemoryLocation::Readback`]: crate::MemoryLocation::Readback
+    #[error("this memory is not host-visible; allocate it for upload or readback to map it")]
+    MemoryNotHostVisible,
+
     /// A Vulkan call returned a failure code.
     #[error("Vulkan call failed: {0}")]
     Vulkan(#[from] ash::vk::Result),

@@ -21,6 +21,7 @@ slop-app = { path = "crates/slop-app" }
 slop-core = { path = "crates/slop-core" }
 slop-math = { path = "crates/slop-math" }
 slop-rhi = { path = "crates/slop-rhi" }
+slop-verify = { path = "crates/slop-verify" }
 
 # Structured logging. Crates depend on the `tracing` facade only; installing a
 # subscriber is an application concern, which is why `tracing-subscriber` is
@@ -29,13 +30,40 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 
 # Linear algebra. The feature set is a determinism decision, not a performance
-# one — `scalar-math` and `libm` trade SIMD throughput for results that are
-# identical across CPU feature levels. Settle it with DESIGN.md §8 item 8.
-glam = "0.33.2"
+# one — DESIGN.md §2.14 settles which tier we buy, and this is what it costs.
+#
+# `libm` routes sin, cos, atan2, exp and friends through the Rust `libm` crate
+# instead of the platform's C library. The Windows CRT and glibc disagree in the
+# last bit on transcendentals, so without this the same build produces different
+# simulation results on the two platforms — which would make §2.13's
+# cross-platform golden images fail for a reason that is not a bug. It takes
+# precedence over `std` when both are enabled, which is the case here.
+#
+# `scalar-math` is deliberately NOT enabled. glam selects its SIMD path at
+# compile time rather than by runtime CPU detection, so one build is one code
+# path and results are already stable across machines of the same architecture.
+# Scalar math would only buy cross-architecture agreement, which §2.14 puts out
+# of scope.
+glam = { version = "0.33.2", features = ["libm"] }
+
+# The same portable maths glam is configured to use, for loose `f32` work.
+# slop-math re-exports it as `scalar`; `clippy.toml` disallows the `std`
+# equivalents so the two cannot drift.
+libm = "0.2.16"
 
 # Vulkan bindings. A thin FFI layer, not an abstraction — DESIGN.md §3.2.
 # `ash` 0.38 targets Vulkan 1.3, which is the API version slop-rhi requires.
 ash = "0.38.0"
+
+# GPU memory suballocation. Vulkan caps `vkAllocateMemory` calls at around 4096
+# on desktop drivers, so one allocation per resource is not a viable model at
+# any real asset count — DESIGN.md §2.2's transient resource aliasing needs
+# suballocation regardless. Default features are off because they pull in D3D12
+# and Metal backends this engine will never use.
+gpu-allocator = { version = "0.28.0", default-features = false, features = [
+    "std",
+    "vulkan",
+] }
 
 # Error enums for library crates. `anyhow` is for application boundaries only,
 # per CONVENTIONS.md §6.
@@ -58,6 +86,12 @@ raw-window-handle = "0.6.2"
 clap = { version = "4.6.5", features = ["derive"] }
 anyhow = "1.0.104"
 blake3 = "1.8.5"
+
+# Golden-image encoding for DESIGN.md §5. Pure Rust deliberately: a C library
+# here would add exactly the MSVC-versus-GCC build surface §2.13's trap table
+# warns about, to a crate whose entire job is making cross-platform differences
+# visible.
+png = "0.18.1"
 
 [workspace.lints.rust]
 rust_2018_idioms = { level = "warn", priority = -1 }

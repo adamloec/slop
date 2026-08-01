@@ -1,0 +1,204 @@
+//! Images: tiled GPU memory with a format, and the view that reads it.
+
+use std::sync::Arc;
+
+use ash::vk;
+use gpu_allocator::vulkan as ga;
+
+use crate::RhiError;
+use crate::resource::{Allocator, MemoryLocation};
+
+/// What an image is, and what it is for.
+///
+/// One mip, one array layer, colour aspect, optimal tiling. Mip chains, cube
+/// maps and depth formats are all coming, and each will arrive as a field here
+/// rather than as a parallel constructor — `docs/CONVENTIONS.md` §5.1's rule
+/// that configuration is a struct, so adding a knob does not fork a call graph.
+#[derive(Debug, Clone)]
+pub struct ImageConfig<'a> {
+    /// A name for validation messages and allocator reports.
+    pub name: &'a str,
+    /// Size in pixels.
+    pub extent: vk::Extent2D,
+    /// Pixel format.
+    pub format: vk::Format,
+    /// How the image will be used.
+    pub usage: vk::ImageUsageFlags,
+}
+
+/// A GPU image, the memory backing it, and a view covering all of it.
+///
+/// The view is created here rather than separately because every image this
+/// engine makes needs at least one, and an image with no view is not usable by
+/// anything. Images needing *several* views — a mip chain sampled whole and
+/// written per-level — will grow an explicit accessor; that is a real case, and
+/// not one M0 has.
+pub struct Image {
+    // Drop order: the view must be destroyed before the image it reads.
+    view: vk::ImageView,
+    handle: vk::Image,
+    // `Option` so `Drop` can move the allocation back to the allocator. Always
+    // `Some` between construction and drop.
+    allocation: Option<ga::Allocation>,
+    allocator: Arc<Allocator>,
+    extent: vk::Extent2D,
+    format: vk::Format,
+}
+
+impl Image {
+    /// Allocate an image and a view of it.
+    ///
+    /// Always [`MemoryLocation::DeviceOnly`]: an optimally tiled image has a
+    /// driver-private memory layout, so mapping one and reading it gives bytes
+    /// in no documented order. Getting pixels to the CPU means copying to a
+    /// buffer — see [`CommandBuffer::copy_image_to_buffer`].
+    ///
+    /// [`CommandBuffer::copy_image_to_buffer`]: crate::CommandBuffer::copy_image_to_buffer
+    ///
+    /// # Errors
+    ///
+    /// Fails if the driver rejects the image — an unsupported format or usage
+    /// combination is the usual cause — or if device-local memory is exhausted.
+    pub fn new(allocator: &Arc<Allocator>, config: &ImageConfig<'_>) -> Result<Self, RhiError> {
+        let device = allocator.device().raw();
+
+        let create_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(config.format)
+            .extent(vk::Extent3D {
+                width: config.extent.width,
+                height: config.extent.height,
+                depth: 1,
+            })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            // OPTIMAL, not LINEAR. Linear tiling is mappable and is the reason
+            // people reach for it, but support is narrow enough that a format
+            // working on one vendor and not another is normal, and sampling
+            // from it is slow. The staging copy is the portable path.
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(config.usage)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            // Contents start undefined, which is what every barrier in this
+            // crate transitions *from* on first use.
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+
+        // SAFETY: `create_info` is fully initialized, and the device is alive
+        // because the allocator holds an `Arc` to it.
+        let handle = unsafe { device.create_image(&create_info, None) }?;
+
+        // SAFETY: `handle` was just created from this device.
+        let requirements = unsafe { device.get_image_memory_requirements(handle) };
+
+        // Not linear: optimal tiling, so the allocator must keep this off any
+        // page shared with a buffer, per Vulkan's buffer-image granularity.
+        let allocation = match allocator.allocate(
+            config.name,
+            requirements,
+            MemoryLocation::DeviceOnly,
+            false,
+        ) {
+            Ok(allocation) => allocation,
+            Err(error) => {
+                // SAFETY: created from this device and never used.
+                unsafe { device.destroy_image(handle, None) };
+                return Err(error);
+            }
+        };
+
+        // SAFETY: the allocation satisfies `handle`'s memory requirements, the
+        // image has no memory bound yet, and the allocation outlives the image
+        // because both are owned by the value returned below.
+        let bound =
+            unsafe { device.bind_image_memory(handle, allocation.memory(), allocation.offset()) };
+
+        if let Err(error) = bound {
+            allocator.free(allocation);
+            // SAFETY: created from this device and never used.
+            unsafe { device.destroy_image(handle, None) };
+            return Err(error.into());
+        }
+
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(handle)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(config.format)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+
+        // SAFETY: `handle` has memory bound and `view_info` is fully
+        // initialized.
+        let view = match unsafe { device.create_image_view(&view_info, None) } {
+            Ok(view) => view,
+            Err(error) => {
+                allocator.free(allocation);
+                // SAFETY: created from this device and never used.
+                unsafe { device.destroy_image(handle, None) };
+                return Err(error.into());
+            }
+        };
+
+        Ok(Self {
+            view,
+            handle,
+            allocation: Some(allocation),
+            allocator: Arc::clone(allocator),
+            extent: config.extent,
+            format: config.format,
+        })
+    }
+
+    /// The underlying handle, for barriers and copies.
+    pub fn handle(&self) -> vk::Image {
+        self.handle
+    }
+
+    /// A view covering the whole image, for attachments and descriptors.
+    pub fn view(&self) -> vk::ImageView {
+        self.view
+    }
+
+    /// Size in pixels.
+    pub fn extent(&self) -> vk::Extent2D {
+        self.extent
+    }
+
+    /// Pixel format.
+    pub fn format(&self) -> vk::Format {
+        self.format
+    }
+}
+
+impl Drop for Image {
+    fn drop(&mut self) {
+        let device = self.allocator.device().raw();
+
+        // SAFETY: both were created from this device and are destroyed exactly
+        // once, view before image. The device outlives this because the
+        // allocator holds an `Arc` to it. That no GPU work still references
+        // them is the caller's obligation.
+        unsafe {
+            device.destroy_image_view(self.view, None);
+            device.destroy_image(self.handle, None);
+        }
+
+        if let Some(allocation) = self.allocation.take() {
+            self.allocator.free(allocation);
+        }
+    }
+}
+
+impl std::fmt::Debug for Image {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Image")
+            .field("extent", &self.extent)
+            .field("format", &self.format)
+            .finish_non_exhaustive()
+    }
+}

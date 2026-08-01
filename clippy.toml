@@ -3,3 +3,43 @@
 # changed and one place to be forgotten.
 #
 # Add configuration here only when a lint genuinely needs tuning.
+
+# DESIGN.md §2.14 — determinism.
+#
+# These call the platform C math library. IEEE-754 pins `+`, `-`, `*`, `/` and
+# `sqrt` to be correctly rounded, so those agree everywhere; it says nothing
+# about transcendentals, and the Windows CRT and glibc are both correct while
+# disagreeing in the last bit.
+#
+# One bit is nothing until a simulation feeds itself for ten thousand ticks, at
+# which point it is a replay that diverges and a golden image that fails on one
+# platform for a reason that is not a bug. `slop_math::scalar` forwards to the
+# `libm` crate — the same Rust source on every target, and the same one glam is
+# configured to use.
+#
+# Not listed, deliberately: sqrt, abs, floor, ceil, round, trunc, mul_add. Those
+# are exactly specified, compile to a single instruction, and are already
+# identical everywhere. Wrapping them would cost speed and buy nothing.
+disallowed-methods = [
+    { path = "f32::sin", reason = "use slop_math::scalar::sin — DESIGN.md 2.14" },
+    { path = "f32::cos", reason = "use slop_math::scalar::cos — DESIGN.md 2.14" },
+    { path = "f32::sin_cos", reason = "use slop_math::scalar::sin_cos — DESIGN.md 2.14" },
+    { path = "f32::tan", reason = "use slop_math::scalar::tan — DESIGN.md 2.14" },
+    { path = "f32::asin", reason = "use slop_math::scalar::asin — DESIGN.md 2.14" },
+    { path = "f32::acos", reason = "use slop_math::scalar::acos — DESIGN.md 2.14" },
+    { path = "f32::atan", reason = "use slop_math::scalar::atan — DESIGN.md 2.14" },
+    { path = "f32::atan2", reason = "use slop_math::scalar::atan2 — DESIGN.md 2.14" },
+    { path = "f32::exp", reason = "use slop_math::scalar::exp — DESIGN.md 2.14" },
+    { path = "f32::ln", reason = "use slop_math::scalar::ln — DESIGN.md 2.14" },
+    { path = "f32::log2", reason = "use slop_math::scalar::log2 — DESIGN.md 2.14" },
+    { path = "f32::log10", reason = "use slop_math::scalar::log10 — DESIGN.md 2.14" },
+    { path = "f32::powf", reason = "use slop_math::scalar::powf — DESIGN.md 2.14" },
+    { path = "f32::hypot", reason = "use slop_math::scalar::hypot — DESIGN.md 2.14" },
+
+    # Seeds itself from the OS, so one call anywhere in the simulation ends
+    # determinism silently. `slop_core::Rng` must be constructed from an explicit
+    # seed and passed explicitly, which is the entire point of it. Listed before
+    # `rand` is a dependency so that adding it cannot quietly reintroduce this.
+    { path = "rand::thread_rng", reason = "use slop_core::Rng with an explicit seed — DESIGN.md 2.14" },
+    { path = "rand::rng", reason = "use slop_core::Rng with an explicit seed — DESIGN.md 2.14" },
+]

@@ -33,6 +33,7 @@ flowchart TD
     reflect["slop-reflect"]
     core["slop-core"]
     math["slop-math"]
+    verify["slop-verify"]
 
     cli --> app
     editor --> app
@@ -55,12 +56,20 @@ flowchart TD
     reflect --> core
     core --> math
 
+    rhi -.-> verify
+    render -.-> verify
+
     classDef planned stroke-dasharray: 5 5
-    class cli,editor,host,abi,audio,physics,scene,render,asset,ecs,reflect planned
+    class editor,host,abi,audio,physics,scene,render,asset,ecs,reflect planned
 ```
 
-`slop-math`, `slop-core`, `slop-rhi`, and `slop-app` exist today. The rest land
-at the milestones in `DESIGN.md` §6.
+`slop-math`, `slop-core`, `slop-rhi`, `slop-app`, `slop-cli`, and `slop-verify`
+exist today. The rest land at the milestones in `DESIGN.md` §6.
+
+The dashed arrows into `slop-verify` are **dev-dependencies**, which is why they
+run upward against the layering without breaking it: nothing it contains reaches
+a shipped game, and it depends on none of the crates that depend on it. It is
+the golden-image harness (`DESIGN.md` §5), and `slop-render` picks it up at M3.
 
 ---
 

@@ -4,6 +4,12 @@
 //! without wall-clock nondeterminism. Nothing here knows what a mesh, an entity,
 //! or a GPU is. See `docs/DESIGN.md` §4 and `docs/slop-core/README.md`.
 //!
+//! Three of these exist because of `docs/DESIGN.md` §2.14: [`Rng`],
+//! [`FxHashMap`], and the caller-side contract in the `jobs` module docs. Each
+//! replaces a `std` default whose behaviour varies per run or per platform, and
+//! each is easy to bypass by accident — which is why `clippy.toml` disallows the
+//! alternatives rather than leaving it to review.
+//!
 //! | Module | Owns |
 //! |---|---|
 //! | [`handle`](Handle) | Generational handles — `docs/DESIGN.md` §2.6 |
@@ -12,6 +18,8 @@
 //! | [`FrameArena`] | Fixed-capacity bump allocator, reset per frame |
 //! | [`FixedTimestep`] | Fixed-step accumulation — `docs/DESIGN.md` §2.7 |
 //! | [`JobSystem`] | Task dispatch — `docs/DESIGN.md` §2.5 |
+//! | [`Rng`] | Seeded pseudorandom numbers — `docs/DESIGN.md` §2.14 |
+//! | [`FxHashMap`] | Hash containers with reproducible iteration — `docs/DESIGN.md` §2.14 |
 //! | [`diagnostics`] | Structured logging — `docs/CONVENTIONS.md` §13 |
 //!
 //! # Two implementations here are provisional
@@ -31,7 +39,9 @@
 mod alloc;
 mod arena;
 mod handle;
+mod hash;
 mod jobs;
+mod rng;
 mod slotmap;
 mod time;
 
@@ -47,6 +57,8 @@ pub mod prelude;
 pub use alloc::HandleAllocator;
 pub use arena::FrameArena;
 pub use handle::{Handle, RawHandle};
+pub use hash::{FxHashMap, FxHashSet, FxHasher};
 pub use jobs::{JobSystem, Scope};
+pub use rng::Rng;
 pub use slotmap::SlotMap;
 pub use time::{Clock, FixedTimestep};

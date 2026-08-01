@@ -19,10 +19,11 @@ One directory per crate, named exactly as the crate is.
 
 | Crate | Docs | Status |
 |---|---|---|
-| `slop-core` | [slop-core/](slop-core/) | Handles, storage, arena, time landed |
+| `slop-core` | [slop-core/](slop-core/) | Handles, storage, arena, time, determinism primitives landed |
 | `slop-math` | [slop-math/](slop-math/) | Stub |
 | `slop-rhi` | [slop-rhi/](slop-rhi/) | Stub |
 | `slop-app` | [slop-app/](slop-app/) | Stub |
+| `slop-verify` | [slop-verify/](slop-verify/) | Golden-image harness landed |
 
 Crates from `DESIGN.md` §4 that do not exist yet get a directory when they do,
 not before.

@@ -23,6 +23,8 @@ domain-specific, and anything requiring a dependency beyond `std`.
 | Work-stealing pool behind that API | Planned — deferred until ECS scheduling gives real requirements | M1 |
 | System read/write access declaration | Planned — no consumer exists until the ECS does | M1 |
 | String interning | Planned | M1 |
+| `Rng` — seeded PCG32 | Landed | M0 |
+| `FxHashMap` / `FxHashSet` — reproducible iteration | Landed | M0 |
 | `diagnostics` — `tracing` facade, subscriber install | Landed | M0 |
 | Profiling markers, `tracy` integration | Planned | M2 |
 
@@ -38,6 +40,8 @@ flowchart TD
     time["time.rs"]
     jobs["jobs.rs"]
     diag["diagnostics.rs"]
+    rng["rng.rs"]
+    hash["hash.rs"]
 
     lib --> handle
     lib --> slotmap
@@ -46,10 +50,16 @@ flowchart TD
     lib --> time
     lib --> jobs
     lib --> diag
+    lib --> rng
+    lib --> hash
 
     slotmap --> handle
     alloc --> handle
 ```
+
+`rng.rs` and `hash.rs` depend on nothing and are depended on by nothing here.
+They exist to be the engine's defaults, replacing `std` choices whose behaviour
+varies per run — see §6.
 
 ## 3.1 Features
 
@@ -75,6 +85,8 @@ cost of a subscriber it never installs.
 | `Clock` | The only reader of the system clock | `DESIGN.md` §5 |
 | `JobSystem` | Dispatches work across threads | `DESIGN.md` §2.5, `PLAN.md` §4.1-C |
 | `Scope` | Spawns tasks that borrow caller stack data | `DESIGN.md` §2.5 |
+| `Rng` | Seeded PCG32; no `Default`, no thread-local | `DESIGN.md` §2.14 |
+| `FxHashMap` / `FxHashSet` | Hash containers with reproducible iteration | `DESIGN.md` §2.14 |
 | `diagnostics` | `tracing` re-export, subscriber install | `CONVENTIONS.md` §13, §5.1 |
 
 ## 5. Diagrams
@@ -191,6 +203,9 @@ tasks are many, which is what will be true.
 | Fixed timestep, interpolated rendering | `DESIGN.md` §2.7 |
 | Job system: API shape at M0, work-stealing at M1 | `PLAN.md` §4.1-C |
 | No allocation in per-frame paths | `CONVENTIONS.md` §8 |
+| Determinism: same build, any machine, either platform | `DESIGN.md` §2.14 |
+| PCG32 with an explicit seed, not `rand::thread_rng` | `DESIGN.md` §2.14 |
+| Fixed-seed hasher, because `RandomState` reseeds per process | `DESIGN.md` §2.14 |
 
 ## 7. Invariants
 
@@ -224,7 +239,20 @@ tasks are many, which is what will be true.
     decision away from every application embedding it.
 12. **Log fields, not sentences**, and never above `debug` in the frame loop
     (`CONVENTIONS.md` §13).
-13. **This crate reads no environment variable and opens no file.**
+13. **`Rng` has no `Default` and no thread-local instance.** A generator whose
+    seed was never stated is the bug the type exists to prevent, and it is not
+    cryptographically secure — never use it where one is needed.
+14. **The `Rng` output sequence is pinned by a test.** Changing the algorithm is
+    a breaking change to every recorded replay and every golden image of a scene
+    that consumes randomness, not a refactor. The same holds for `FxHasher`,
+    whose output decides `FxHashMap` iteration order.
+15. **`FxHashMap` iteration is reproducible, not ordered.** Anything needing a
+    defined order sorts or uses a `BTreeMap`. Reproducible-but-arbitrary is
+    enough for determinism and not enough for a serialization format.
+16. **`FxHasher` is not resistant to a hostile key chooser.** Correct inside the
+    engine, where keys are ids the engine produced. Anything parsing untrusted
+    input keeps `std::collections::HashMap`.
+17. **This crate reads no environment variable and opens no file.**
     `diagnostics` takes a filter string; it does not look up `SLOP_LOG`. Reading
     configuration is `slop-app`'s job alone (`CONVENTIONS.md` §5.1), which is
     what lets a game, the editor, a test harness, and headless CI configure the

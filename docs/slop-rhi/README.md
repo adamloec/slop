@@ -31,9 +31,12 @@ Started. This is the bulk of M0 and the largest single body of work in it.
 | Acquire and present | Landed | M0 |
 | Shader modules from cooked SPIR-V | Landed | M0 |
 | Graphics pipelines, dynamic rendering | Landed | M0 |
-| `gpu-allocator` integration | Planned | M0 |
+| `gpu-allocator` integration — `Allocator`, suballocation, stats | Landed | M0 |
+| `Buffer`, `Image`, and image-to-buffer readback | Landed | M0 |
+| Headless rendering, verified by a golden image | Landed | M0 |
 | Bindless descriptor heap | Planned | M0 |
-| Minimal pipeline path | Planned | M0 |
+| Depth attachments, mip chains, cube maps | Planned — when the cube needs them | M0 |
+| Dedicated versus suballocated policy for large targets | Planned — needs measurements, not a guessed threshold | M1 |
 | Shader reflection, pipeline layout derivation | Planned | M2–M3 |
 | Consumer-facing RHI API extraction | Planned | M3 |
 
@@ -50,26 +53,45 @@ flowchart TD
     queues["device/queues.rs"]
     surface["surface.rs"]
     swapchain["swapchain.rs"]
+    resource["resource.rs"]
+    allocator["resource/allocator.rs"]
+    buffer["resource/buffer.rs"]
+    image["resource/image.rs"]
 
     lib --> error
     lib --> instance
     lib --> device
     lib --> surface
     lib --> swapchain
+    lib --> resource
 
     device --> physical
     device --> features
     device --> queues
+
+    resource --> allocator
+    resource --> buffer
+    resource --> image
+
+    buffer --> allocator
+    image --> allocator
 
     physical --> features
     physical --> queues
     swapchain --> surface
 ```
 
+Two directories, both by `CONVENTIONS.md` §2.3's rule — three or more modules
+sharing a subject that is already a name in the crate.
+
 `device.rs` holds the `Device` type; `device/` holds the three things that exist
 only to serve it — choosing an adapter, the feature tier it must meet, and its
 queue families. `instance.rs` stays at the top level because an instance is a
-device's *parent*, not one of its parts (`CONVENTIONS.md` §2.3).
+device's *parent*, not one of its parts.
+
+`resource/` is the memory story: something hands out device memory, and two
+kinds of object consume it. `command.rs`, `pipeline.rs` and `shader.rs` stay flat
+because each is a subject with one module, which is a file and not a directory.
 
 ## 4. Scope at M0 — primitives, not abstraction
 
@@ -305,6 +327,8 @@ overwritten.
 | Swapchain format, present mode, image count and extent | §9 above |
 | Timeline semaphores throughout; no fences | §10 above |
 | Pools reset wholesale, never per-buffer | §11 above |
+| Suballocate from day one via `gpu-allocator` | `resource.rs` module docs |
+| Resources own an allocation, not a `vk::DeviceMemory` | `resource.rs` module docs |
 | M0 ships primitives, not abstraction | `PLAN.md` §4.1-D |
 | Slang as the shading language, library-integrated | `DESIGN.md` §2.11 |
 | Which Slang Rust binding | `DESIGN.md` §8 item 2 — revisit at M3 |
@@ -374,9 +398,31 @@ overwritten.
     intuition is built on. A wrongly wound triangle vanishes silently with no
     validation complaint, so keep back-face culling on: it is the only thing
     that catches this.
-13. **Enable an extension only when it is needed and its dependencies are
+24. **Enable an extension only when it is needed and its dependencies are
     present.** A permissive driver accepting an invalid create-info is not
     evidence of correctness.
-14. **`Device::drop` waits for idle first.** Destroying objects with GPU work
+25. **`Device::drop` waits for idle first.** Destroying objects with GPU work
     still referencing them is the shutdown crash that only reproduces under
     load.
+26. **Every resource suballocates; nothing calls `vkAllocateMemory` directly.**
+    `maxMemoryAllocationCount` is commonly 4096 on desktop drivers, so one
+    device allocation per resource stops working at the first real scene — and
+    fails hard with `ERROR_TOO_MANY_OBJECTS` rather than degrading.
+27. **`Allocator` holds an `Arc<Device>`, and resources hold an
+    `Arc<Allocator>`.** Never the reverse. If `Device` owned its allocator the
+    cycle would keep both alive forever, and a resource could outlive the
+    allocator that must free it.
+28. **`linear` must match the resource kind.** Buffers are linear, optimally
+    tiled images are not. Getting it wrong is not a validation error but a
+    correctness one: Vulkan's buffer-image granularity rule says the two may not
+    share a page, and only the allocator can honour that.
+29. **Images are always device-local and optimally tiled.** A tiled image has a
+    driver-private memory layout, so mapping one yields bytes in no documented
+    order. Pixels reach the CPU by copying to a buffer, never by mapping.
+30. **Host reads after a transfer need a barrier, not just a semaphore.**
+    Coherent memory is not ordered memory. `make_visible_to_host` is what orders
+    it; waiting on a semaphore orders execution only.
+31. **A construction path that fails after creating a Vulkan object destroys it
+    on every error branch.** These types have no `Drop` until they are fully
+    built, so the leak is silent and validation reports it only at device
+    destruction, far from the cause.
