@@ -75,7 +75,7 @@ cost of a subscriber it never installs.
 | `Clock` | The only reader of the system clock | `DESIGN.md` §5 |
 | `JobSystem` | Dispatches work across threads | `DESIGN.md` §2.5, `PLAN.md` §4.1-C |
 | `Scope` | Spawns tasks that borrow caller stack data | `DESIGN.md` §2.5 |
-| `diagnostics` | `tracing` re-export, subscriber install | `CONVENTIONS.md` §13 |
+| `diagnostics` | `tracing` re-export, subscriber install | `CONVENTIONS.md` §13, §5.1 |
 
 ## 5. Diagrams
 
@@ -224,3 +224,8 @@ tasks are many, which is what will be true.
     decision away from every application embedding it.
 12. **Log fields, not sentences**, and never above `debug` in the frame loop
     (`CONVENTIONS.md` §13).
+13. **This crate reads no environment variable and opens no file.**
+    `diagnostics` takes a filter string; it does not look up `SLOP_LOG`. Reading
+    configuration is `slop-app`'s job alone (`CONVENTIONS.md` §5.1), which is
+    what lets a game, the editor, a test harness, and headless CI configure the
+    same engine differently without fighting over ambient state.

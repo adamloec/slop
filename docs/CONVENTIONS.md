@@ -417,6 +417,55 @@ fn write_transforms(&mut self, entities: &[Entity], transforms: &[Transform]);
 immutable API means the API is wrong; the borrow checker is describing real
 aliasing.
 
+### 5.1 Configuration flows downward, exactly like dependencies
+
+Three different things get called "configuration" and must not share one
+mechanism. Conflating them is what produces the god-`Settings` singleton every
+engine regrets.
+
+| Kind | Example | Lives |
+|---|---|---|
+| **Construction parameters** | `InstanceConfig`, arena capacity, thread count | Beside the type they configure |
+| **User settings** | GPU choice, resolution, volume, keybinds | Persisted, player-editable, `slop-app` |
+| **Developer knobs** | validation, log filter, forced device | Env and CLI, `slop-app` |
+
+**The rule: engine crates take parameters. Only `slop-app` reads
+configuration.**
+
+```rust
+// ✗ a library reaching for ambient configuration
+pub fn init() {
+    let filter = std::env::var("SLOP_LOG").unwrap_or_else(|_| "info".into());
+    // ...
+}
+
+// ✓ mechanism only; the caller decides
+pub fn init(filter: &str) { /* ... */ }
+```
+
+No engine crate opens a file or reads an environment variable. `slop-app` reads
+them, and constructs each subsystem's parameter struct.
+
+**There is no central `Config` type, ever.** A struct holding every subsystem's
+settings would have to name every crate's types, inverting the dependency graph
+§2 depends on, and every crate would end up depending on it. The sprawl stays
+bounded because it is bounded *by the crate graph*: each crate owns its own
+`*Config` next to the thing it configures, and `docs/<crate>/README.md` §4's
+key-types table is where you find it.
+
+```rust
+// ✗ a dependency magnet that inverts the layering
+pub struct Config { rhi: RhiSettings, ecs: EcsSettings, audio: AudioSettings }
+
+// ✓ each crate owns its own, and slop-app assembles them
+let instance = Instance::new(&InstanceConfig { validation, ..Default::default() })?;
+```
+
+**Reflection (§2.4) is what makes this scale.** Once it lands, config structs are
+reflected types, so serialization, the settings UI, the schema, and the
+documentation are all derived from one declaration rather than written per
+setting.
+
 ## 6. Errors and panics
 
 `thiserror` in libraries, `anyhow` only at application boundaries. Errors are

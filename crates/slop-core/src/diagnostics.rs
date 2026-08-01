@@ -2,16 +2,20 @@
 //!
 //! The engine emits through the [`tracing`] facade. Engine crates only ever
 //! *emit*; installing a subscriber is the application's decision, which is why
-//! `init` sits behind the optional `subscriber` feature rather than being
+//! the installer sits behind the optional `subscriber` feature rather than being
 //! always available.
 //!
-//! Note the deliberate absence of intra-doc links to `init` from anything not
-//! itself feature-gated: a link from ungated documentation into a gated item
-//! dangles in the default configuration, which `-D warnings` correctly rejects.
-//!
 //! `tracing` is re-exported here so dependent crates get the macros without
-//! adding their own dependency edge, and so the whole engine is guaranteed to
-//! be on one version of it.
+//! adding their own dependency edge, and so the whole engine is guaranteed to be
+//! on one version of it.
+//!
+//! # This module is mechanism, not policy
+//!
+//! It takes a filter string. It does not read `SLOP_LOG`, or any environment
+//! variable, or any file — `docs/CONVENTIONS.md` §5.1: engine crates take
+//! parameters, and only `slop-app` reads configuration. Where the filter comes
+//! from is the caller's business, and a test binary deciding differently from a
+//! shipped game is exactly why this is not decided here.
 //!
 //! # Emit fields, not sentences
 //!
@@ -39,32 +43,31 @@
 /// and so the engine cannot end up split across two versions of it.
 pub use tracing;
 
-/// Environment variable read by `init` to set log filtering, using the standard
-/// `tracing-subscriber` syntax — `slop_rhi=debug,warn`.
-pub const FILTER_ENV: &str = "SLOP_LOG";
-
-/// Default filter when [`FILTER_ENV`] is unset.
+/// A reasonable filter when a caller has no better idea.
 ///
 /// `info` rather than `warn`: lifecycle events — device selected, module
 /// loaded — are what make an unfamiliar machine's log useful, and they are rare
 /// enough to cost nothing.
 pub const DEFAULT_FILTER: &str = "info";
 
-/// Install the process-wide subscriber.
+/// Install the process-wide subscriber with the given filter.
 ///
-/// Call once, early, from an application — a binary, an example, or a test
-/// harness. Never from a library.
+/// `filter` uses `tracing-subscriber`'s directive syntax, such as
+/// `slop_rhi=debug,warn`. Call once, early, from an application — a binary, an
+/// example, or a test harness. Never from a library.
 ///
 /// # Panics
 ///
 /// If a global subscriber is already installed. That is a programmer error
-/// rather than a runtime condition: it means two places are each claiming to
-/// own process-wide configuration, and silently letting the first win would
-/// hide the mistake. Tests and other repeat callers want
-/// [`init_for_tests`] instead.
+/// rather than a runtime condition: it means two places are each claiming to own
+/// process-wide configuration, and silently letting the first win would hide the
+/// mistake. Repeat callers want [`try_init`] instead.
 #[cfg(feature = "subscriber")]
-pub fn init() {
-    try_init().expect("a tracing subscriber is already installed for this process");
+pub fn init(filter: &str) {
+    assert!(
+        try_init(filter),
+        "a tracing subscriber is already installed for this process"
+    );
 }
 
 /// Install the subscriber if one is not already present.
@@ -72,16 +75,12 @@ pub fn init() {
 /// Returns whether this call installed it. Intended for tests, where many cases
 /// each want logging available and only the first can win.
 #[cfg(feature = "subscriber")]
-pub fn init_for_tests() -> bool {
-    try_init().is_ok()
-}
-
-#[cfg(feature = "subscriber")]
-fn try_init() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
+pub fn try_init(filter: &str) -> bool {
     use tracing_subscriber::EnvFilter;
 
-    let filter =
-        EnvFilter::try_from_env(FILTER_ENV).unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
+    // An unparseable directive falls back rather than failing: losing log
+    // filtering should never be the reason an application cannot start.
+    let filter = EnvFilter::try_new(filter).unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
 
     tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -89,6 +88,7 @@ fn try_init() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> 
         // filtering usable.
         .with_target(true)
         .try_init()
+        .is_ok()
 }
 
 #[cfg(all(test, feature = "subscriber"))]
@@ -100,8 +100,8 @@ mod tests {
         // Whichever call wins, the second must report that it did not install.
         // A test binary shares one process, so this is the only honest thing to
         // assert about ordering here.
-        let first = init_for_tests();
-        let second = init_for_tests();
+        let first = try_init(DEFAULT_FILTER);
+        let second = try_init(DEFAULT_FILTER);
 
         assert!(
             !(first && second),
@@ -115,11 +115,17 @@ mod tests {
 
     #[test]
     fn default_filter_parses() {
-        // Guards against a typo in DEFAULT_FILTER, which would otherwise only
-        // surface as silently missing logs on a machine with SLOP_LOG unset.
+        // Guards against a typo in DEFAULT_FILTER, which would otherwise surface
+        // only as silently missing logs.
         assert!(
             tracing_subscriber::EnvFilter::try_new(DEFAULT_FILTER).is_ok(),
             "DEFAULT_FILTER must be a valid filter directive"
         );
+    }
+
+    #[test]
+    fn an_unparseable_filter_falls_back_instead_of_failing() {
+        // Losing log filtering must never be why an application cannot start.
+        try_init("this is not a valid directive!!");
     }
 }

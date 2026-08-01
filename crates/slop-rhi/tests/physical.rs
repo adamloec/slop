@@ -9,7 +9,13 @@ use slop_rhi::{DeviceKind, DeviceSelection, Instance, InstanceConfig, RhiError};
 fn instance() -> Option<Instance> {
     // Logging is what makes a failing run on someone else's machine
     // diagnosable, and the device-selection decision is logged at `info`.
-    slop_core::diagnostics::init_for_tests();
+    //
+    // This test binary is an application, so reading the environment here is
+    // correct — CONVENTIONS.md §5.1 puts that decision in the caller, which is
+    // why `diagnostics` takes a filter rather than looking one up.
+    let filter = std::env::var("SLOP_LOG")
+        .unwrap_or_else(|_| String::from(slop_core::diagnostics::DEFAULT_FILTER));
+    slop_core::diagnostics::try_init(&filter);
 
     match Instance::new(&InstanceConfig::default()) {
         Ok(instance) => Some(instance),
