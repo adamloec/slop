@@ -18,16 +18,23 @@ struct VertexOutput
 // Clip space directly — no projection matrix, so none of the depth conventions
 // in slop-math apply yet. Vulkan's NDC has +Y pointing down, which is why the
 // apex is at negative Y.
+//
+// Order matters: apex, bottom-LEFT, bottom-right. The engine's front face is
+// counter-clockwise (matching glTF), and Vulkan measures that in framebuffer
+// space where +Y points down — which inverts the sense relative to the
+// y-up convention most winding intuition is built on. Reversing these two
+// entries makes the triangle back-facing and it disappears under culling.
 static const float2 POSITIONS[3] = {
     float2(0.0, -0.6),
-    float2(0.6, 0.6),
     float2(-0.6, 0.6),
+    float2(0.6, 0.6),
 };
 
+// Per-vertex, so each corner keeps its colour after the reorder above.
 static const float3 COLORS[3] = {
     float3(1.0, 0.0, 0.0),
-    float3(0.0, 1.0, 0.0),
     float3(0.0, 0.0, 1.0),
+    float3(0.0, 1.0, 0.0),
 };
 
 [shader("vertex")]

@@ -28,8 +28,10 @@ Started. This is the bulk of M0 and the largest single body of work in it.
 | Swapchain, format and mode selection, recreation | Landed | M0 |
 | Timeline semaphores, binary semaphores | Landed | M0 |
 | Command pools, buffers, image barriers | Landed | M0 |
+| Acquire and present | Landed | M0 |
+| Shader modules from cooked SPIR-V | Landed | M0 |
+| Graphics pipelines, dynamic rendering | Landed | M0 |
 | `gpu-allocator` integration | Planned | M0 |
-| Acquire and present | Planned | M0 |
 | Bindless descriptor heap | Planned | M0 |
 | Minimal pipeline path | Planned | M0 |
 | Shader reflection, pipeline layout derivation | Planned | M2–M3 |
@@ -363,6 +365,15 @@ overwritten.
     thread-safe.
 21. **Reset the pool, not the buffer**, and only after the frame's timeline
     value has been waited on.
+22. **Wait for device idle before dropping anything that owns Vulkan objects.**
+    `Device::drop` also waits, but that is too late for objects declared before
+    the device — they are already destroyed by the time it runs. The owning
+    struct must wait in its own `Drop`, which executes before any field drops.
+23. **Front faces wind counter-clockwise in framebuffer space, where +Y points
+    down.** That inverts the sense relative to the y-up convention most winding
+    intuition is built on. A wrongly wound triangle vanishes silently with no
+    validation complaint, so keep back-face culling on: it is the only thing
+    that catches this.
 13. **Enable an extension only when it is needed and its dependencies are
     present.** A permissive driver accepting an invalid create-info is not
     evidence of correctness.

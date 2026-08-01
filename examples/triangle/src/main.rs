@@ -47,7 +47,12 @@ fn main() {
     slop_app::logging::init();
 
     let event_loop = EventLoop::new().expect("an event loop must be creatable");
-    let mut app = App::default();
+    let mut app = App {
+        frame_limit: std::env::var("SLOP_FRAMES")
+            .ok()
+            .and_then(|value| value.parse().ok()),
+        ..Default::default()
+    };
 
     event_loop.run_app(&mut app).expect("the event loop failed");
 
@@ -61,6 +66,8 @@ fn main() {
 struct App {
     renderer: Option<Renderer>,
     failure: Option<String>,
+    /// Exit after this many frames, from `SLOP_FRAMES`.
+    frame_limit: Option<u64>,
 }
 
 impl ApplicationHandler for App {
@@ -96,12 +103,29 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(renderer) = self.renderer.as_ref() else {
+            return;
+        };
+
+        // `SLOP_FRAMES=n` exits after n frames. Makes shutdown verifiable
+        // without a human closing a window, and is the shape the deterministic
+        // headless mode in `docs/DESIGN.md` §5 needs — run a fixed number of
+        // frames, then stop.
+        if let Some(limit) = self.frame_limit
+            && renderer.frame_counter >= limit
+        {
+            println!("rendered {limit} frames; exiting");
+            // Cleared so this fires once: `about_to_wait` runs again before the
+            // loop actually unwinds.
+            self.frame_limit = None;
+            event_loop.exit();
+            return;
+        }
+
         // Drive continuously rather than only on damage, so the frame loop is
         // exercised the way a game's would be.
-        if let Some(renderer) = self.renderer.as_ref() {
-            renderer.window.request_redraw();
-        }
+        renderer.window.request_redraw();
     }
 }
 
@@ -199,9 +223,11 @@ impl Renderer {
                     entry: c"fragmentMain",
                 },
                 color_format: swapchain.format(),
-                // On, deliberately: if the shader's winding disagrees with the
-                // engine's counter-clockwise convention the triangle vanishes, which
-                // is a far better failure than silently rendering both faces.
+                // On, deliberately. This is the check that the shader agrees
+                // with the engine's counter-clockwise front face: a triangle
+                // wound the wrong way vanishes silently, with no validation
+                // complaint, so leaving culling off would let the convention rot
+                // unnoticed until real geometry made it expensive.
                 cull_back_faces: true,
             },
         )
@@ -472,6 +498,22 @@ impl Renderer {
         self.dirty = false;
 
         Ok(())
+    }
+}
+
+impl Drop for Renderer {
+    fn drop(&mut self) {
+        // Every Vulkan object below is destroyed when this struct's fields drop,
+        // which happens *after* this function returns — and the GPU may still be
+        // executing the last submitted frame.
+        //
+        // `Device::drop` also waits, but that is far too late: the device field
+        // is declared after the pools and semaphores, so those are already
+        // destroyed by the time it runs. Waiting here, before any field drops,
+        // is what actually makes teardown safe.
+        if let Err(error) = self.device.wait_idle() {
+            eprintln!("waiting for the device to go idle failed during shutdown: {error}");
+        }
     }
 }
 
