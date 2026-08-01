@@ -22,7 +22,8 @@ Started. This is the bulk of M0 and the largest single body of work in it.
 | Instance, validation layers, debug messenger | Landed | M0 |
 | Physical device enumeration, scoring, selection | Landed | M0 |
 | Queue family discovery | Landed | M0 |
-| Logical device, queue creation | Planned | M0 |
+| Required feature tier, checked at selection | Landed | M0 |
+| Logical device, queue creation | Landed | M0 |
 | `gpu-allocator` integration | Planned | M0 |
 | Surface, swapchain and recreation | Planned | M0 |
 | Command pools and buffers | Planned | M0 |
@@ -146,19 +147,54 @@ images render on (`PLAN.md` §4.1-G), and selecting it by accident on real
 hardware would mean rendering thousands of times slower with nothing reporting
 it.
 
-## 7. Decisions
+## 7. One feature tier, declared once
+
+`DESIGN.md` §2.1 buys "one GPU feature tier, no capability-tier branching in the
+renderer" by targeting desktop only. That guarantee is worth nothing unless the
+tier is stated somewhere singular and checked *before* a device is accepted —
+otherwise it decays into scattered runtime checks, which is exactly the
+branching the decision exists to avoid.
+
+`features.rs` is that single place. A device either supports all of it and is
+usable, or it is rejected by name. There is no partial support and no fallback
+path.
+
+| Requirement | Why |
+|---|---|
+| `timeline_semaphore` | §2.2 — not fences plus binary semaphores |
+| `synchronization2` | §2.2 — explicit barriers, modern API |
+| `dynamic_rendering` | Removes render pass and framebuffer objects the render graph would have to cache |
+| `descriptor_indexing` + 5 related | §2.2 — what "bindless" actually means in Vulkan terms |
+| `buffer_device_address` | Shaders holding pointers, for GPU-driven passes |
+| `multi_draw_indirect`, `draw_indirect_count` | §4.2 stage B's GPU-driven pipeline |
+| `sampler_anisotropy` | Table stakes for the fidelity target |
+| `fill_mode_non_solid` | Wireframe, for the §10.2 debug UI |
+
+Rejections carry the spec's own feature names, so a report can be looked up
+directly rather than translated.
+
+**Device extensions are conditional on need.** `VK_KHR_swapchain` is enabled if
+and only if a present queue family exists — which happens exactly when a surface
+was supplied. It depends on the instance-level `VK_KHR_surface`, so requesting it
+on a headless instance is a spec violation that permissive drivers accept and
+strict ones reject. Validation caught this during bring-up; NVIDIA had been
+creating the device anyway.
+
+## 8. Decisions
 
 | Decision | Where |
 |---|---|
 | Own the RHI; Vulkan via `ash`; not `wgpu` | `DESIGN.md` §2.2 |
 | Require Vulkan 1.3, not 1.4 | §4 above |
 | Device selection by UUID, degrading to automatic | §6 above |
+| One feature tier, checked at selection, no fallbacks | §7 above |
+| `Device` holds an `Arc<Instance>` to encode lifetime ordering | `device.rs` module docs |
 | M0 ships primitives, not abstraction | `PLAN.md` §4.1-D |
 | Slang as the shading language, library-integrated | `DESIGN.md` §2.11 |
 | Which Slang Rust binding | `DESIGN.md` §8 item 2 — revisit at M3 |
 | Desktop only; one GPU feature tier | `DESIGN.md` §2.1 |
 
-## 8. Invariants
+## 9. Invariants
 
 1. **This crate and the allocator are the only sanctioned homes for `unsafe`.**
    `unsafe` anywhere else is a design discussion, not a review comment.
@@ -189,3 +225,11 @@ it.
     which errors with the reason instead.
 11. **Never select by index in player-facing paths.** Indices are not stable
     across hardware or driver changes; `deviceUUID` is.
+12. **Required features are declared only in `features.rs`.** A capability check
+    anywhere else is the capability-tier branching §2.1 exists to prevent.
+13. **Enable an extension only when it is needed and its dependencies are
+    present.** A permissive driver accepting an invalid create-info is not
+    evidence of correctness.
+14. **`Device::drop` waits for idle first.** Destroying objects with GPU work
+    still referencing them is the shutdown crash that only reproduces under
+    load.

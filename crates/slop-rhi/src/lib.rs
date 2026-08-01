@@ -26,11 +26,14 @@
 //! carries a `// SAFETY:` comment, enforced by
 //! `clippy::undocumented_unsafe_blocks`.
 
+mod device;
 mod error;
+mod features;
 mod instance;
 mod physical;
 mod queues;
 
+pub use device::{Device, Queues};
 pub use error::RhiError;
 pub use instance::{Instance, InstanceConfig, Validation};
 pub use physical::{DeviceInfo, DeviceKind, DeviceSelection, Rejection, enumerate, select};

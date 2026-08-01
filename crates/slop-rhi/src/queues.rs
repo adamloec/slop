@@ -103,6 +103,23 @@ impl QueueFamilies {
             .map(|index| index as u32)
     }
 
+    /// The distinct family indices, for logical device creation.
+    ///
+    /// Vulkan rejects a `VkDeviceCreateInfo` that names the same family twice,
+    /// so deduplicating is a correctness requirement rather than tidiness — and
+    /// families coinciding is the normal case on integrated hardware.
+    pub(crate) fn distinct(&self) -> Vec<u32> {
+        let mut indices = vec![self.graphics, self.compute, self.transfer];
+
+        if let Some(present) = self.present {
+            indices.push(present);
+        }
+
+        indices.sort_unstable();
+        indices.dedup();
+        indices
+    }
+
     /// Whether compute has its own family and can genuinely overlap graphics.
     pub fn has_async_compute(&self) -> bool {
         self.compute != self.graphics
@@ -193,6 +210,32 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn distinct_deduplicates_coinciding_families() {
+        // Vulkan rejects a create-info naming one family twice, so this is a
+        // correctness requirement. Integrated hardware hits it routinely.
+        let shared = QueueFamilies {
+            graphics: 0,
+            compute: 0,
+            transfer: 0,
+            present: Some(0),
+        };
+
+        assert_eq!(shared.distinct(), vec![0]);
+    }
+
+    #[test]
+    fn distinct_keeps_genuinely_separate_families() {
+        let split = QueueFamilies {
+            graphics: 0,
+            compute: 1,
+            transfer: 2,
+            present: Some(3),
+        };
+
+        assert_eq!(split.distinct(), vec![0, 1, 2, 3]);
     }
 
     #[test]

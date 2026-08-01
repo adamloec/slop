@@ -78,6 +78,13 @@ pub enum Rejection {
     /// the integrated GPU on a machine whose display is wired to the discrete
     /// one.
     CannotPresent,
+    /// The device lacks features the engine requires.
+    ///
+    /// Names are the Vulkan spec's own, so a report can be looked up directly.
+    /// `docs/DESIGN.md` §2.1 buys one feature tier with no capability
+    /// branching, which only holds if devices below the tier are rejected here
+    /// rather than worked around later.
+    MissingFeatures(Vec<&'static str>),
 }
 
 impl std::fmt::Display for Rejection {
@@ -88,6 +95,9 @@ impl std::fmt::Display for Rejection {
             }
             Self::NoSuitableQueues => write!(f, "no suitable queue families"),
             Self::CannotPresent => write!(f, "cannot present to this window"),
+            Self::MissingFeatures(names) => {
+                write!(f, "missing required features: {}", names.join(", "))
+            }
         }
     }
 }
@@ -229,16 +239,25 @@ fn describe(
 
     let queue_families = QueueFamilies::find(instance.raw(), handle, surface);
 
+    // Ordered deliberately. The version check comes first because the feature
+    // query below relies on Vulkan 1.2 and 1.3 structures the device would not
+    // understand otherwise, and reporting "missing features" for a device that
+    // is simply too old would be a misleading diagnosis.
     let rejection = if properties.api_version < crate::REQUIRED_API_VERSION {
         Some(Rejection::ApiVersionTooOld {
             major: vk::api_version_major(properties.api_version),
             minor: vk::api_version_minor(properties.api_version),
         })
+    } else if queue_families.is_none() {
+        Some(if surface.is_some() {
+            Rejection::CannotPresent
+        } else {
+            Rejection::NoSuitableQueues
+        })
     } else {
-        match &queue_families {
-            None if surface.is_some() => Some(Rejection::CannotPresent),
-            None => Some(Rejection::NoSuitableQueues),
-            Some(_) => None,
+        match crate::features::missing(instance.raw(), handle) {
+            missing if missing.is_empty() => None,
+            missing => Some(Rejection::MissingFeatures(missing)),
         }
     };
 
