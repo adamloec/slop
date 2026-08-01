@@ -12,6 +12,21 @@
 //! `slop-render` generalizes at M3 (`docs/PLAN.md` §4.1-D) — a renderer that
 //! takes a target rather than owning a window.
 //!
+//! # Most of this crate is engine work with nowhere to live yet
+//!
+//! Uploading a mesh, building a pipeline, and recording a draw are
+//! `slop-render`'s and `slop-asset`'s jobs. They are here because those crates
+//! do not exist until M2/M3, not because an example should contain them.
+//!
+//! At M3 `main.rs` is **deleted** and replaced by a few lines against
+//! `slop-app`, `scene.rs` is **moved** into `slop-render`, and `mesh.rs` is
+//! **deleted** in favour of a glTF asset. Nothing here has to be unpicked —
+//! which is the difference between early and hacked.
+//!
+//! `docs/PLAN.md` §6.1 is the full register of what is standing in for what,
+//! and when each is taken back. Adding something provisional here means adding
+//! a row there.
+//!
 //! # What it exercises
 //!
 //! Everything M0 built, at once: staged vertex, index and texture uploads; the

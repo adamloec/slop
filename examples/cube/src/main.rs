@@ -8,6 +8,12 @@
 //! golden test. This file owns `main()` and the frame loop, per
 //! `docs/DESIGN.md` §1.2 principle 4 — the engine supplies pieces, it does not
 //! supply a framework to sit inside.
+//!
+//! **This loop is duplicated in `examples/triangle/src/main.rs`**, and that is a
+//! known and deliberate cost — `docs/PLAN.md` §6.1 records why it is being left
+//! until M3 rather than lifted into `slop-app` now, and what would change that
+//! decision. Both copies are deleted when the frame renderer lands. A **third**
+//! copy is the signal to extract it early; do not add one silently.
 
 use std::sync::Arc;
 use std::time::Duration;

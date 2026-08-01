@@ -8,6 +8,12 @@
 //! would be designing against imagined requirements
 //! (`docs/PLAN.md` §4.1-D).
 //!
+//! **This loop is duplicated in `examples/cube/src/main.rs`**, and that is a
+//! known and deliberate cost — `docs/PLAN.md` §6.1 records why it is being left
+//! until M3 rather than lifted into `slop-app` now, and what would change that
+//! decision. Both copies are deleted when the frame renderer lands. A **third**
+//! copy is the signal to extract it early; do not add one silently.
+//!
 //! # The two synchronization subtleties
 //!
 //! **Acquire returns an index before the image is usable.** The presentation

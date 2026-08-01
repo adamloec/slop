@@ -505,6 +505,51 @@ problem later. Check work against this list.
 
 ---
 
+## 6.1 Provisional implementations — the register
+
+Everything currently standing in for something else, in one place, so that
+"temporary" stays a decision rather than becoming an accident.
+
+**The distinction this table enforces:** a *hack* is a shortcut that makes the
+right thing harder later, and there are none here. Everything below is either
+correct code living in the wrong crate (which gets **moved**), or a simple
+implementation behind a final seam (which gets **replaced** with no caller
+changing). `DESIGN.md` §1.2 principle 6 is the rule: defer implementations
+freely, never seams.
+
+| What | Where | Standing in for | Fate | When |
+|---|---|---|---|---|
+| Frame loop — acquire, submit, present, frames in flight | `examples/*/src/main.rs` | `slop-render`'s frame renderer | **Deleted.** Replaced by a handful of lines against `slop-app`. | M3 |
+| Scene setup — uploads, pipeline, draw recording | `examples/cube/src/scene.rs` | `slop-render` + `slop-asset` | **Moved** into `slop-render` and generalized. Nothing is unpicked. | M3 |
+| Cube geometry and texture, generated in code | `examples/cube/src/mesh.rs` | glTF import, texture cooking (§2.8) | **Deleted.** Replaced by an asset file. | M2 |
+| Synchronous upload — submit and wait | `examples/cube/src/scene.rs` | Async transfer queue + staging ring | **Replaced.** Correct for startup, wrong for streaming. | M2 |
+| Hard-coded `.slop/cache/...` shader paths | examples and tests | The asset VFS | **Replaced.** | M2 |
+| `slangc` invoked as a CLI | `slop-cli/src/cook.rs` | The Slang library, for reflection (§2.11) | **Replaced.** The cache layout, keying and read path all survive. | M2/M3 |
+| Coarse include digest — any include recooks everything | `slop-cli/src/cook.rs` | Per-shader dependency lists via `slangc -depfile` | **Replaced.** Correct but pessimistic; wrong would be a cache that lies. | M2 |
+| `JobSystem` backed by `std::thread::scope` | `slop-core/src/jobs.rs` | Work-stealing pool | **Replaced.** API shape is final; do not build on the cost model. | M1 |
+| `HandleAllocator` liveness in a `Vec<bool>` | `slop-core/src/alloc.rs` | A bitset | **Replaced.** Entirely behind the API. | M1 |
+| Raw `vk::Sampler`, destroyed by hand | `examples/cube/src/scene.rs` | A sampler cache in the material system | **Replaced.** | M2 |
+| Whole-frame golden comparison only | `slop-verify` | Region assertions, intermediate captures | **Extended**, not replaced (`DESIGN.md` §8 item 8). | M3 |
+| Hardware-tier golden references | `examples/cube/tests/golden/` | The lavapipe exact-match tier | **Joined by**, not replaced (§4.1-G). | M1 |
+
+**The duplication that is not on this table, because it is a genuine smell:**
+`examples/triangle/src/main.rs` and `examples/cube/src/main.rs` carry roughly
+150 lines of near-identical frame-loop plumbing. It was allowed to happen rather
+than being factored when the second copy appeared.
+
+Decided 2026-08-01 to leave it until M3 rather than lift it into `slop-app` now.
+Reason: `slop-render` is what determines the frame loop's real shape, and
+extracting an abstraction from two toy examples is designing against imagined
+requirements — §4.1-D's position, applied to the same problem one layer up. The
+cost of waiting is bounded (two copies, both deleted at M3); the cost of guessing
+wrong is a frame-loop API the renderer has to work around.
+
+**A third example before M3 changes that calculus.** Three copies is where the
+promotion rule in `CONVENTIONS.md` §2.3 says a grouping is real, and the same
+judgment applies here: if a third arrives, lift the loop into `slop-app` first.
+
+---
+
 ## 7. Conventions
 
 **Moved to `CONVENTIONS.md`, which is now authoritative for code-level
@@ -523,7 +568,9 @@ Settled here and not repeated there:
 
 ## 8. After M0
 
-`DESIGN.md` §6 has the full milestone list. Immediate outlook:
+`DESIGN.md` §6 has the full milestone list, and **§6.1 above is the register of
+what each milestone takes back** from the provisional implementations standing
+in for it today. Immediate outlook:
 
 **M1 — ECS + reflection.** Expect this to be *slower* than M0 despite less code.
 Vulkan bring-up is high-volume but well-trodden; the ECS and reflection design
