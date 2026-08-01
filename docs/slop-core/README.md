@@ -20,8 +20,8 @@ domain-specific, and anything requiring a dependency beyond `std`.
 | `FrameArena` | Landed | M0 |
 | `FixedTimestep`, `Clock` | Landed | M0 |
 | Job system — `JobSystem`, `Scope`, parallel iteration | Landed, **implementation provisional** | M0 |
-| Work-stealing pool behind that API | Planned — deferred until ECS scheduling gives real requirements | M1 |
-| System read/write access declaration | Planned — no consumer exists until the ECS does | M1 |
+| Work-stealing pool behind that API | Planned — the ECS now exists to supply the requirements §4.1-C deferred for | M1 |
+| System read/write access declaration | Planned — `slop-ecs`'s `Access` is the shape it will consume | M1 |
 | String interning | Planned | M1 |
 | `Rng` — seeded PCG32 | Landed | M0 |
 | `FxHashMap` / `FxHashSet` — reproducible iteration | Landed | M0 |

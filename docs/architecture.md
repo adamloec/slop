@@ -34,6 +34,7 @@ flowchart TD
     core["slop-core"]
     math["slop-math"]
     verify["slop-verify"]
+    derive["slop-reflect-derive"]
 
     cli --> app
     editor --> app
@@ -58,13 +59,20 @@ flowchart TD
 
     rhi -.-> verify
     render -.-> verify
+    reflect -.-> derive
 
     classDef planned stroke-dasharray: 5 5
-    class editor,host,abi,audio,physics,scene,render,asset,ecs,reflect planned
+    class editor,host,abi,audio,physics,scene,render,asset planned
 ```
 
-`slop-math`, `slop-core`, `slop-rhi`, `slop-app`, `slop-cli`, and `slop-verify`
-exist today. The rest land at the milestones in `DESIGN.md` §6.
+`slop-math`, `slop-core`, `slop-reflect`, `slop-reflect-derive`, `slop-ecs`,
+`slop-rhi`, `slop-app`, `slop-cli`, and `slop-verify` exist today. The rest land
+at the milestones in `DESIGN.md` §6.
+
+`slop-ecs` and `slop-reflect` are drawn solid as of M1. What they still lack —
+system scheduling, change detection, command buffers — is listed in their own
+documents rather than implied by the diagram; a crate existing is not a crate
+being finished.
 
 The dashed arrows into `slop-verify` are **dev-dependencies**, which is why they
 run upward against the layering without breaking it: nothing it contains reaches

@@ -1,6 +1,7 @@
 # Slop Engine — Code Conventions
 
-**Status:** Draft — pre-implementation
+**Status:** In force. Nine crates are written against these rules; a diff that
+breaks one is a bug in the diff.
 **Last updated:** 2026-08-01
 
 **`DESIGN.md` what, `PLAN.md` when, this file how.** Check diffs against it.

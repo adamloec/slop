@@ -1,7 +1,8 @@
 # Slop Engine — Design Document
 
-**Status:** Draft — pre-implementation
-**Last updated:** 2026-07-31
+**Status:** M0 complete, M1 underway. Decisions here are being implemented
+against, not proposed — see `PLAN.md` §3 for what exists.
+**Last updated:** 2026-08-01
 
 ---
 
@@ -508,6 +509,7 @@ slop-math       glam wrappers, Transform, AABB, frustum, curves, packing
 slop-core       arenas, slotmaps/handles, string interning, job system,
                 time, tracing, profiling markers
 slop-reflect    runtime type info, derive macro, serialization primitives
+                (+ slop-reflect-derive — a proc macro must be its own crate)
 slop-ecs        archetype storage, queries, change detection, relationships,
                 system scheduling, command buffers
 slop-asset      VFS, async loading, dependency graph, hot reload,

@@ -20,10 +20,14 @@ One directory per crate, named exactly as the crate is.
 | Crate | Docs | Status |
 |---|---|---|
 | `slop-core` | [slop-core/](slop-core/) | Handles, storage, arena, time, determinism primitives landed |
-| `slop-math` | [slop-math/](slop-math/) | Stub |
-| `slop-rhi` | [slop-rhi/](slop-rhi/) | Stub |
-| `slop-app` | [slop-app/](slop-app/) | Stub |
+| `slop-math` | [slop-math/](slop-math/) | Transforms, projections, portable scalars landed |
+| `slop-reflect` | [slop-reflect/](slop-reflect/) | Type model, registry, derive landed |
+| `slop-ecs` | [slop-ecs/](slop-ecs/) | Storage, world, queries landed; scheduling outstanding |
+| `slop-rhi` | [slop-rhi/](slop-rhi/) | Vulkan backend through the bindless heap landed |
+| `slop-app` | [slop-app/](slop-app/) | Window and surface only — the frame loop is M3 |
 | `slop-verify` | [slop-verify/](slop-verify/) | Golden-image harness landed |
+| `slop-cli` | — | The cook step; documented in `PLAN.md` §6.1 as provisional |
+| `slop-reflect-derive` | — | Covered by [slop-reflect/](slop-reflect/); a proc macro must be its own crate |
 
 Crates from `DESIGN.md` §4 that do not exist yet get a directory when they do,
 not before.

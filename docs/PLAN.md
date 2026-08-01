@@ -122,8 +122,43 @@ Two consequences worth carrying into M0:
 
 ## 3. Current state
 
-**M0 is functionally complete. Every task is done, and the lit textured cube
-renders with a golden image guarding it.** Only dual-platform CI remains.
+**M0 is functionally complete and M1 is underway.** The lit textured cube
+renders with a golden image guarding it, and the reflection and ECS foundations
+are built through queries.
+
+368 tests. Clippy and rustdoc clean under `-D warnings` in both feature
+configurations, Vulkan validation reporting nothing, and every crate containing
+`unsafe` passing under Miri.
+
+### 3.0 M1 so far — reflection and the ECS
+
+| Area | State |
+|---|---|
+| `slop-reflect` — `TypeInfo` as data, registry, `#[derive(Reflect)]` | Landed |
+| `slop-ecs` — `Column`, `Signature`, `Archetype`, `World`, queries | Landed |
+| Command buffers — deferred structural change | **Next.** §2.10 calls it required for parallel systems |
+| Change detection | Outstanding |
+| System scheduling from read/write sets | Outstanding — needs the work-stealing pool |
+| Query filters — `With`, `Without`, `Option` | Outstanding |
+| Work-stealing job pool behind the M0 API | Outstanding |
+| Serialization round-trip harness (§5) | Outstanding — needs serializers, which `slop-reflect` deliberately excludes |
+
+The binding constraint §2.4 named has been honoured: `TypeInfo` is a **value**,
+so a component type declared at runtime by a WASM guest is a first-class
+component rather than a second tier. A test builds an archetype and allocates a
+column for a type with no Rust type behind it.
+
+The two halves §2.10 insisted be designed together were: `Column` is both the
+array a query scans linearly and the contiguous run §2.3 hands to a guest, and
+`Transfer::Blittable` is what gates the second use.
+
+**Miri is now part of the suite.** Type-erased storage is raw pointer arithmetic
+by construction, and its failure modes — misaligned access, aliasing violations,
+deallocating with the wrong layout, double frees — are invisible to ordinary
+tests and usually invisible on x86. Verified by breaking the code on purpose;
+see §3.1.
+
+### 3.0.1 M0, for reference
 
 Verified on the RTX 5090: window, surface, device, swapchain, cooked Slang
 shader, graphics pipeline, and a frame loop with two frames in flight, running
@@ -195,11 +230,26 @@ Validation caught the first; a human caught the other two.
    changed what every dependent compiled to while leaving every stamp matching —
    a cache that was *wrong*, not merely stale.
 
-**And two more were found by breaking working code on purpose**, to check the
-tests would notice: reversing the triangle's winding (18.09% of pixels differ),
-and flipping `DEPTH_COMPARE` to `LESS_OR_EQUAL`, which made both cubes vanish
-entirely because every fragment failed against a 0.0 clear. *A golden test that
-has never caught anything is not known to work.*
+**And three were found by breaking working code on purpose**, to check the tests
+would notice:
+
+- Reversing the triangle's winding — 18.09% of pixels differ.
+- Flipping `DEPTH_COMPARE` to `LESS_OR_EQUAL`, which made both cubes vanish
+  entirely because every fragment failed against a 0.0 clear.
+- Deallocating a column with alignment 1 instead of the element's 16. **Every
+  ordinary test still passed** — real allocators do not care in practice. Miri
+  named it exactly:
+
+  ```
+  error: Undefined Behavior: incorrect layout on deallocation:
+  alloc59958 has size 64 and alignment 16, but gave size 64 and alignment 1
+    --> crates\slop-ecs\src\column.rs:378:22
+  ```
+
+*A test that has never caught anything is not known to work.* That applies to
+golden images and to Miri alike — and Miri's caveat is that it only reports
+undefined behaviour on paths a test actually executes, so it is worth precisely
+as much as the coverage of the `unsafe` code.
 
 The cube's golden also needed a design fix to be worth anything: a single convex
 cube with back-face culling renders identically whether or not depth works, so
@@ -531,6 +581,11 @@ freely, never seams.
 | Raw `vk::Sampler`, destroyed by hand | `examples/cube/src/scene.rs` | A sampler cache in the material system | **Replaced.** | M2 |
 | Whole-frame golden comparison only | `slop-verify` | Region assertions, intermediate captures | **Extended**, not replaced (`DESIGN.md` §8 item 8). | M3 |
 | Hardware-tier golden references | `examples/cube/tests/golden/` | The lavapipe exact-match tier | **Joined by**, not replaced (§4.1-G). | M1 |
+| Structural change requires `&mut World` | `slop-ecs` | Command buffers applied at a sync point (§2.10) | **Joined by.** The direct path stays for single-threaded setup; systems get the deferred one. | M1 |
+| Queries name components only — no `With`, `Without`, `Option` | `slop-ecs` | Filter types alongside `QueryData` | **Extended.** The `QueryData` trait already has the shape; filters are more impls, not a redesign. | M1 |
+| `TypeKind` models structs, primitives and opaque types only | `slop-reflect` | Enums, tuples, lists, maps | **Extended**, one variant each. A consumer's `match` fails to compile when one lands rather than silently ignoring it. | M2 |
+| `Reflect` rejects generic types | `slop-reflect-derive` | A path encoding the type arguments | **Replaced.** Rejected loudly today rather than silently giving every instantiation one id. | M2 |
+| `World::remove` drops the component rather than returning it | `slop-ecs` | A typed take that hands the value back | **Extended.** Needs a path that can name the type's Rust identity, which the erased core deliberately cannot. | M1 |
 
 **The duplication that is not on this table, because it is a genuine smell:**
 `examples/triangle/src/main.rs` and `examples/cube/src/main.rs` carry roughly
@@ -572,15 +627,26 @@ Settled here and not repeated there:
 what each milestone takes back** from the provisional implementations standing
 in for it today. Immediate outlook:
 
-**M1 — ECS + reflection.** Expect this to be *slower* than M0 despite less code.
-Vulkan bring-up is high-volume but well-trodden; the ECS and reflection design
-carries real judgment. Critically, **§2.10's archetype storage and §2.3's
-columnar WASM boundary must be designed together, not sequentially** — they want
-the same memory layout, and discovering that after the fact means rework.
+**M1 — ECS + reflection.** *Underway; see §3.0 for what has landed.* Expected to
+be slower than M0 despite less code — Vulkan bring-up is high-volume but
+well-trodden, while the ECS and reflection design carries real judgment.
+
+The critical constraint was that **§2.10's archetype storage and §2.3's columnar
+WASM boundary be designed together, not sequentially.** That has been honoured:
+`Column` is simultaneously the array a query scans and the contiguous run handed
+to a guest, and `Transfer::Blittable` gates the second use. Nothing about the
+storage would change if the boundary were built tomorrow.
+
+What remains is the scheduling half — command buffers, change detection, and
+systems declaring read/write sets so the job system can parallelize them. That
+last one is why `slop-core`'s work-stealing pool is an M1 item rather than an M0
+one: §4.1-C deferred it precisely so that ECS scheduling would supply the real
+requirements, and it now can.
 
 M1 also lands the §5 verification infrastructure properly. Do not defer it: code
 can be produced faster than it can be reviewed line by line, and automated truth
-is the only thing preventing large volumes of subtly wrong architecture.
+is the only thing preventing large volumes of subtly wrong architecture. Miri
+joined that suite with the ECS storage layer and belongs to it permanently.
 
 **M2 — Content + debug UI.** The debug UI is pulled forward deliberately;
 renderer bring-up without inspection tooling is the largest avoidable time sink

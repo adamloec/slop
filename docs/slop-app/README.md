@@ -13,15 +13,21 @@ in `examples/`, and the editor embeds this crate exactly as a shipping game does
 
 ## 2. Status
 
-Stub.
+The smallest crate in the workspace, and deliberately so — its main job arrives
+with `slop-render` at M3.
 
 | Area | State | Milestone |
 |---|---|---|
 | `logging` — log filter policy, `SLOP_LOG` | Landed | M0 |
 | `window` — creation, and the winit-to-Vulkan seam | Landed | M0 |
-| Main loop wiring sim and render | Planned | M0 |
+| Main loop wiring sim and render | Planned — the frame loop's shape is `slop-render`'s to determine | M3 |
 | Configuration file, CLI arguments | Planned | M2 |
 | Module and plugin wiring | Planned | M4 |
+
+**The examples currently own the frame loop**, and two of them carry roughly 150
+lines of near-identical plumbing. That is a known and deliberate cost recorded in
+`PLAN.md` §6.1, along with what would change the decision: a third copy is the
+signal to lift it here early rather than waiting for M3.
 
 ## 3. The three consumers
 
