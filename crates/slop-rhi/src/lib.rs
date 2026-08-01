@@ -25,3 +25,9 @@
 //! This crate is the sanctioned home for `unsafe` (`docs/PLAN.md` §7); every block
 //! carries a `// SAFETY:` comment, enforced by
 //! `clippy::undocumented_unsafe_blocks`.
+
+mod error;
+mod instance;
+
+pub use error::RhiError;
+pub use instance::{Instance, InstanceConfig, Validation};

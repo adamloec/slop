@@ -15,11 +15,11 @@ semaphores, async compute, and ray tracing (`DESIGN.md` §2.2).
 
 ## 2. Status
 
-Stub. This is the bulk of M0 and the largest single body of work in it.
+Started. This is the bulk of M0 and the largest single body of work in it.
 
 | Area | State | Milestone |
 |---|---|---|
-| Instance, validation layers | Planned | M0 |
+| Instance, validation layers, debug messenger | Landed | M0 |
 | Physical device selection and scoring | Planned | M0 |
 | Logical device, queue families | Planned | M0 |
 | `gpu-allocator` integration | Planned | M0 |
@@ -65,17 +65,51 @@ flowchart TD
 Get the left side right and the M3 extraction is a refactor. Get it wrong and it
 is a rewrite.
 
-## 4. Decisions
+## 4. Vulkan 1.3 is the required API version
+
+Not 1.4, despite the development machine reporting 1.4.341. Everything §2.2
+commits to is core in 1.3:
+
+| Feature | Core since |
+|---|---|
+| Timeline semaphores | 1.2 |
+| Descriptor indexing (bindless) | 1.2 |
+| Dynamic rendering | 1.3 |
+| `synchronization2` — explicit barriers | 1.3 |
+
+Requiring 1.4 would narrow supported hardware without buying anything the design
+needs. The version is checked at instance creation and reported as a typed error
+naming both the required and found versions, since "update your driver" is only
+actionable with numbers.
+
+## 5. Validation
+
+Enabled automatically in debug builds, off in release — validation costs
+substantial CPU per call and has no place in a shipping frame loop.
+
+Requesting it explicitly and not getting it is an **error, not a downgrade**. A
+developer who asked for validation and silently did not receive it would be
+debugging undefined behaviour with the one tool that reports it switched off.
+`Validation::Automatic` does fall back with a warning, so a machine without the
+SDK can still run a debug build.
+
+Validation output is routed into `tracing` rather than stdout, so it obeys the
+same filtering as everything else and appears in captured logs. Vulkan's `INFO`
+severity maps to `debug` here, keeping `CONVENTIONS.md` §13's rule that `info`
+stays meaningful.
+
+## 6. Decisions
 
 | Decision | Where |
 |---|---|
 | Own the RHI; Vulkan via `ash`; not `wgpu` | `DESIGN.md` §2.2 |
+| Require Vulkan 1.3, not 1.4 | §4 above |
 | M0 ships primitives, not abstraction | `PLAN.md` §4.1-D |
 | Slang as the shading language, library-integrated | `DESIGN.md` §2.11 |
 | Which Slang Rust binding | `DESIGN.md` §8 item 2 — revisit at M3 |
 | Desktop only; one GPU feature tier | `DESIGN.md` §2.1 |
 
-## 5. Invariants
+## 7. Invariants
 
 1. **This crate and the allocator are the only sanctioned homes for `unsafe`.**
    `unsafe` anywhere else is a design discussion, not a review comment.
@@ -91,3 +125,13 @@ is a rewrite.
 6. **The FFI seam stays in one place.** Wrapping `ash` and the Slang bindings
    behind a narrow internal interface is what keeps swapping or vendoring them
    contained (`DESIGN.md` §2.11).
+7. **Struct field order is drop order, and it is load-bearing.** Vulkan objects
+   must be destroyed before whatever created them — the debug messenger before
+   its instance, the instance before the entry that loaded the library.
+   Reordering fields to look tidier is a use-after-free.
+8. **The instance knows nothing about windows.** Surface extensions are supplied
+   by the caller, so one code path serves both a windowed application and the
+   headless mode `DESIGN.md` §5 requires.
+9. **GPU-dependent tests live in `tests/` and skip only on a missing loader.**
+   Any other failure is reported. Skipping on every error would make the suite
+   worthless the first time it mattered.

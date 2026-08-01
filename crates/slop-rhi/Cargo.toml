@@ -7,6 +7,12 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+ash = { workspace = true }
+slop-core = { workspace = true }
+thiserror = { workspace = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+ash.workspace = true
