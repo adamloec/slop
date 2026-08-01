@@ -46,16 +46,32 @@ slop/
 │
 ├── tools/                  dev scripts, CI helpers, cook utilities
 │
+├── docs/                   all documentation except the root README
+│   ├── README.md           index, and the conventions these docs follow
+│   ├── DESIGN.md           what — architectural decisions
+│   ├── PLAN.md             when — milestones and task breakdown
+│   ├── CONVENTIONS.md      how — this file
+│   ├── architecture.md     cross-crate diagrams
+│   └── slop-<name>/        one directory per crate, named exactly as the crate
+│       └── README.md       purpose, status, module map, diagrams, invariants
+│
 ├── .slop/                  tool-owned local state — gitignored
 │   └── cache/              cooked assets, keyed by content hash (§2.8)
 │
 ├── target/                 cargo output — gitignored
 │
-├── DESIGN.md  PLAN.md  CONVENTIONS.md  README.md
+├── README.md               landing page only; points at docs/
 ├── Cargo.toml              workspace root
 ├── rust-toolchain.toml  rustfmt.toml  clippy.toml  .gitattributes
 └── .github/workflows/
 ```
+
+**Documentation lives under `docs/`, one directory per crate.** The root README
+is a landing page and nothing more. Per-crate docs carry what rustdoc cannot:
+why a crate is shaped as it is, how its parts relate, and the diagrams. See
+[docs/README.md](README.md) for the template every crate document follows and
+the diagram conventions — Mermaid only, one diagram per question, consistent
+shapes across the docset.
 
 Four of these are decisions rather than obvious defaults:
 

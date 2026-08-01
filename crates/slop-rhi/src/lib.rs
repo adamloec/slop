@@ -1,6 +1,6 @@
 //! Render hardware interface — Vulkan backend via `ash`.
 //!
-//! See `DESIGN.md` §2.2. The RHI is designed against the modern explicit model:
+//! See `docs/DESIGN.md` §2.2. The RHI is designed against the modern explicit model:
 //! explicit barriers, timeline semaphores, bindless descriptor heaps, transient
 //! resource aliasing, and multiple queues.
 //!
@@ -22,6 +22,6 @@
 //! - Physical device selection scoring on device type — the primary development
 //!   machine also exposes an integrated GPU, so index 0 is not the discrete one
 //!
-//! This crate is the sanctioned home for `unsafe` (`PLAN.md` §7); every block
+//! This crate is the sanctioned home for `unsafe` (`docs/PLAN.md` §7); every block
 //! carries a `// SAFETY:` comment, enforced by
 //! `clippy::undocumented_unsafe_blocks`.

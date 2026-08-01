@@ -1,8 +1,8 @@
 //! Foundational primitives shared by every other Slop crate.
 //!
-//! Arenas, generational-index slotmaps and handles (`DESIGN.md` §2.6), string
+//! Arenas, generational-index slotmaps and handles (`docs/DESIGN.md` §2.6), string
 //! interning, the job system (§2.5), time and frame pacing, and tracing and
-//! profiling markers. See `DESIGN.md` §4.
+//! profiling markers. See `docs/DESIGN.md` §4.
 //!
 //! # Job system
 //!

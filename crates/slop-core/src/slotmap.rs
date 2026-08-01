@@ -1,4 +1,4 @@
-//! Owning generational-index storage — `DESIGN.md` §2.6.
+//! Owning generational-index storage — `docs/DESIGN.md` §2.6.
 //!
 //! [`SlotMap<T>`] holds values and hands out [`Handle<T>`]s to them. It is the
 //! container for engine-owned resources with an obvious owner: GPU objects,
@@ -7,7 +7,7 @@
 //! It is deliberately *not* the ECS entity store. Component data lives in
 //! archetype columns (§2.10), so entities need generation bookkeeping without a
 //! payload — that is [`HandleAllocator`](crate::HandleAllocator), a separate
-//! type sharing the same [`Handle`]. See `PLAN.md` §4.1-C.
+//! type sharing the same [`Handle`]. See `docs/PLAN.md` §4.1-C.
 
 use std::num::NonZeroU32;
 
@@ -80,7 +80,7 @@ impl<T> SlotMap<T> {
     /// # Panics
     ///
     /// If the map would exceed `u32::MAX` slots. The index field is 32 bits by
-    /// design (`PLAN.md` §4.1-C); exhausting it is resource exhaustion, not a
+    /// design (`docs/PLAN.md` §4.1-C); exhausting it is resource exhaustion, not a
     /// recoverable condition.
     pub fn insert(&mut self, value: T) -> Handle<T> {
         match self.free_head {
@@ -115,7 +115,7 @@ impl<T> SlotMap<T> {
     ///
     /// Returns `None` for a stale handle rather than panicking — releasing
     /// something another subsystem still references is normal during hot reload
-    /// and in the editor (`CONVENTIONS.md` §6).
+    /// and in the editor (`docs/CONVENTIONS.md` §6).
     pub fn remove(&mut self, handle: Handle<T>) -> Option<T> {
         if !self.contains(handle) {
             return None;
@@ -195,7 +195,7 @@ impl<T> SlotMap<T> {
     /// Iterate live values with their handles, in slot order.
     ///
     /// Slot order is stable for a given sequence of operations, which is what
-    /// the deterministic headless mode in `DESIGN.md` §5 requires.
+    /// the deterministic headless mode in `docs/DESIGN.md` §5 requires.
     pub fn iter(&self) -> impl Iterator<Item = (Handle<T>, &T)> {
         self.slots
             .iter()

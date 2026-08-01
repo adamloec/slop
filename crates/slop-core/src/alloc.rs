@@ -1,4 +1,4 @@
-//! Generation bookkeeping without storage — `DESIGN.md` §2.6.
+//! Generation bookkeeping without storage — `docs/DESIGN.md` §2.6.
 //!
 //! [`HandleAllocator<T>`] issues and validates [`Handle<T>`]s for things whose
 //! data lives somewhere else. The motivating case is ECS entities: an entity is
@@ -9,7 +9,7 @@
 //! generations bump on free, and a slot at the last generation is retired rather
 //! than wrapped. The two types are deliberately separate rather than one type
 //! with an optional payload, because the ECS would pay for a payload it never
-//! uses on every entity. See `PLAN.md` §4.1-C.
+//! uses on every entity. See `docs/PLAN.md` §4.1-C.
 
 use std::fmt;
 use std::marker::PhantomData;
@@ -145,7 +145,7 @@ impl<T> HandleAllocator<T> {
     }
 
     /// Iterate live handles in slot order, which is stable for a given sequence
-    /// of operations (`DESIGN.md` §5).
+    /// of operations (`docs/DESIGN.md` §5).
     pub fn iter(&self) -> impl Iterator<Item = Handle<T>> + '_ {
         self.live
             .iter()

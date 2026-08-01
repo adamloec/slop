@@ -1,4 +1,4 @@
-//! Frame-scoped bump allocation — `CONVENTIONS.md` §8.
+//! Frame-scoped bump allocation — `docs/CONVENTIONS.md` §8.
 //!
 //! [`FrameArena`] is a fixed block of memory with a bump pointer. Allocation is
 //! an add and a bounds check; there is no per-value free. The whole block is
@@ -15,7 +15,7 @@
 //! heap, because an arena that silently grows hides exactly the per-frame
 //! allocation it was introduced to eliminate — the frame would still hitch, and
 //! nothing would say so. A hard limit turns that into a loud, reproducible
-//! failure with a number attached, which is what `DESIGN.md` §5's budget
+//! failure with a number attached, which is what `docs/DESIGN.md` §5's budget
 //! discipline needs.
 //!
 //! # Why values are not dropped
@@ -37,7 +37,7 @@ const BLOCK_ALIGN: usize = 64;
 /// A fixed-capacity bump allocator, reset once per frame.
 ///
 /// Allocation takes `&self` rather than `&mut self` — the exception to
-/// `CONVENTIONS.md` §5, and the reason is that an allocator handing out one
+/// `docs/CONVENTIONS.md` §5, and the reason is that an allocator handing out one
 /// borrow at a time would be useless. Each call returns a disjoint region, so
 /// there is no aliasing to hide. [`reset`](FrameArena::reset) takes `&mut self`,
 /// which is what makes this sound: the borrow checker will not let a frame end

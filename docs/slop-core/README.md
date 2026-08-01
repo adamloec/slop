@@ -1,0 +1,179 @@
+# slop-core
+
+**Last updated:** 2026-08-01
+
+## 1. Purpose
+
+Foundational primitives every other crate depends on. Nothing here knows what a
+mesh, an entity, or a GPU is — this is the layer that makes the layers above
+possible: identity without pointers, memory without per-frame allocation, and
+time without wall-clock nondeterminism.
+
+It deliberately does not contain: math (that is `slop-math`), anything
+domain-specific, and anything requiring a dependency beyond `std`.
+
+## 2. Status
+
+| Area | State | Milestone |
+|---|---|---|
+| Handles, `SlotMap`, `HandleAllocator` | Landed | M0 |
+| `FrameArena` | Landed | M0 |
+| `FixedTimestep`, `Clock` | Landed | M0 |
+| Job system | API shape only, plain thread pool behind it | M0 |
+| Work-stealing scheduler | Planned — deferred until ECS scheduling gives real requirements | M1 |
+| String interning | Planned | M1 |
+| `tracing` setup, profiling markers | Planned | M0 |
+
+## 3. Module map
+
+```mermaid
+flowchart TD
+    lib["lib.rs"]
+    handle["handle.rs"]
+    slotmap["slotmap.rs"]
+    alloc["alloc.rs"]
+    arena["arena.rs"]
+    time["time.rs"]
+    jobs["jobs.rs"]
+    diag["diagnostics.rs"]
+
+    lib --> handle
+    lib --> slotmap
+    lib --> alloc
+    lib --> arena
+    lib --> time
+    lib -.-> jobs
+    lib -.-> diag
+
+    slotmap --> handle
+    alloc --> handle
+
+    classDef planned stroke-dasharray: 5 5
+    class jobs,diag planned
+```
+
+## 4. Key types
+
+| Type | Role | Decision |
+|---|---|---|
+| `Handle<T>` | Typed 8-byte reference to externally owned data | `DESIGN.md` §2.6, `PLAN.md` §4.1-C |
+| `RawHandle` | Type-erased handle for ABI transport | `DESIGN.md` §2.3 |
+| `SlotMap<T>` | Generational storage that **owns** its values | `PLAN.md` §4.1-C |
+| `HandleAllocator<T>` | Generation bookkeeping with **no payload** | `PLAN.md` §4.1-C |
+| `FrameArena` | Fixed-capacity bump allocator, reset per frame | `CONVENTIONS.md` §8 |
+| `FixedTimestep` | Accumulates time, releases fixed steps | `DESIGN.md` §2.7 |
+| `Clock` | The only reader of the system clock | `DESIGN.md` §5 |
+
+## 5. Diagrams
+
+### 5.1 Handle layout
+
+64 bits. The index is 32 bits and the generation is a `NonZeroU32`, so
+`Option<Handle<T>>` occupies the same 8 bytes as `Handle<T>` — the `None` case
+uses the zero niche and costs nothing.
+
+```
+ 63                             32 31                              0
+┌─────────────────────────────────┬─────────────────────────────────┐
+│      generation (NonZeroU32)    │           index (u32)           │
+└─────────────────────────────────┴─────────────────────────────────┘
+```
+
+A 32-bit packing (24 index / 8 generation) was rejected: eight bits of
+generation wrap after 256 reuses of a slot, which high-churn entities reach
+trivially, and a wrapped generation makes a stale handle compare equal to a live
+one.
+
+### 5.2 Slot lifecycle
+
+Generations bump on **free**, not on allocate, so a handle stops resolving the
+moment its slot is released rather than when the slot is next handed out.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Occupied: insert / allocate — generation 1
+    Occupied --> Vacant: remove / free — generation += 1
+    Vacant --> Occupied: reused — handle carries the bumped generation
+    Occupied --> Retired: remove at generation u32::MAX
+    Retired --> [*]: never reused
+
+    note right of Vacant
+        Every handle issued before
+        this point is already stale.
+    end note
+
+    note right of Retired
+        Wrapping would let an ancient
+        handle match a live one.
+        Leaking one slot is safer.
+    end note
+```
+
+### 5.3 Choosing a container
+
+```mermaid
+flowchart TD
+    q{"Does this crate own the data?"}
+    q -->|"yes, in one array"| sm["SlotMap of T"]
+    q -->|"no, it lives elsewhere"| ha["HandleAllocator of T"]
+
+    sm --> ex1["GPU resources, assets, scene nodes"]
+    ha --> ex2["ECS entities — components live in archetype columns"]
+```
+
+Both hand out the same `Handle<T>` and agree exactly on when handles die; a test
+drives both through one operation sequence and asserts identical index and
+generation.
+
+### 5.4 Frame arena lifecycle
+
+```mermaid
+flowchart LR
+    begin("frame begins") --> a1("alloc")
+    a1 --> a2("alloc")
+    a2 --> check{"fits in capacity?"}
+    check -->|"yes"| bump["offset += size"]
+    check -->|"no"| fail["panic with size and remaining"]
+    bump --> finish("frame ends")
+    finish --> rewind("reset — offset = 0")
+    rewind --> begin
+```
+
+`reset` takes `&mut self`, so it cannot compile while any allocation from the
+arena is still borrowed. That is the entire safety argument for allocation
+taking `&self` and returning `&mut`.
+
+The arena never grows. An arena that silently falls back to the heap hides the
+per-frame allocation it exists to eliminate — the frame still hitches and
+nothing reports it.
+
+## 6. Decisions
+
+| Decision | Where |
+|---|---|
+| Handles everywhere, never pointers | `DESIGN.md` §2.6 |
+| Handle API: typed, 64-bit, checked, two containers | `PLAN.md` §4.1-C |
+| Bump generation on free | `PLAN.md` §4.1-C |
+| Fixed timestep, interpolated rendering | `DESIGN.md` §2.7 |
+| Job system: API shape at M0, work-stealing at M1 | `PLAN.md` §4.1-C |
+| No allocation in per-frame paths | `CONVENTIONS.md` §8 |
+
+## 7. Invariants
+
+1. **A stale handle never resolves.** Not to the wrong value, and not to a
+   panic — `get` returns `None`. Releasing something another subsystem still
+   references is normal during hot reload and in the editor.
+2. **Generations bump on free.** Changing this to bump-on-allocate would leave
+   stale handles resolving until reuse, which turns a deterministic failure into
+   a timing-dependent one.
+3. **A slot at `u32::MAX` is retired, never wrapped.**
+4. **The arena runs no destructors.** Types needing `Drop` are rejected at
+   compile time; do not relax this to a runtime check.
+5. **`FrameArena` is `Send` but not `Sync`.** Concurrent allocation through its
+   `Cell` would be a data race — give each job thread its own arena rather than
+   sharing one.
+6. **`FixedTimestep` never reads a clock.** It takes a delta, which is what
+   makes deterministic replay and testing without wall-clock dependence
+   possible. `Clock` is the only place `Instant::now` is called.
+7. **Excess accumulated time is discarded, never carried.** Carrying it produces
+   the spiral of death.

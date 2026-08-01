@@ -1,4 +1,4 @@
-//! Generational handles — `DESIGN.md` §2.6.
+//! Generational handles — `docs/DESIGN.md` §2.6.
 //!
 //! A [`Handle<T>`] is a typed, `Copy`, 8-byte reference to something owned
 //! elsewhere: an index plus the generation the slot held when the handle was
@@ -8,10 +8,10 @@
 //! This is the engine's answer to graph-shaped data. `Rc<RefCell<_>>` would
 //! model the same relationships while costing refcount traffic, runtime borrow
 //! panics, and a serialization path that has to rebuild pointers. Handles are
-//! plain data: they serialize as-is, cross the `DESIGN.md` §2.3 WASM boundary as
+//! plain data: they serialize as-is, cross the `docs/DESIGN.md` §2.3 WASM boundary as
 //! integers, and never keep anything alive.
 //!
-//! The design decisions behind the specific layout are recorded in `PLAN.md`
+//! The design decisions behind the specific layout are recorded in `docs/PLAN.md`
 //! §4.1-C.
 
 use std::fmt;
@@ -61,7 +61,7 @@ impl<T> Handle<T> {
         self.generation
     }
 
-    /// Erase the type tag for transport across an ABI boundary (`DESIGN.md`
+    /// Erase the type tag for transport across an ABI boundary (`docs/DESIGN.md`
     /// §2.3), where handles are opaque integers.
     pub const fn to_raw(self) -> RawHandle {
         RawHandle(((self.generation.get() as u64) << 32) | self.index as u64)
@@ -138,7 +138,7 @@ impl<T> PartialOrd for Handle<T> {
 
 impl<T> Ord for Handle<T> {
     /// Ordered by slot, then generation. Sorting by handle is how iteration
-    /// order is made stable for the deterministic headless mode in `DESIGN.md`
+    /// order is made stable for the deterministic headless mode in `docs/DESIGN.md`
     /// §5, so the ordering must not depend on anything but these two fields.
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.index
@@ -150,7 +150,7 @@ impl<T> Ord for Handle<T> {
 impl<T> fmt::Debug for Handle<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Carries the type name because a bare `Handle(3v1)` in a log or a panic
-        // message is not diagnosable — see CONVENTIONS.md §13.
+        // message is not diagnosable — see docs/CONVENTIONS.md §13.
         write!(
             f,
             "Handle<{}>({}v{})",

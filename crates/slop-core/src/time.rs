@@ -1,4 +1,4 @@
-//! Fixed-timestep simulation and frame pacing — `DESIGN.md` §2.7.
+//! Fixed-timestep simulation and frame pacing — `docs/DESIGN.md` §2.7.
 //!
 //! Simulation advances in fixed increments; rendering happens at whatever rate
 //! the display allows and interpolates between the two most recent simulation
@@ -8,7 +8,7 @@
 //! [`FixedTimestep`] is the accumulator that makes this work. It takes a delta
 //! rather than reading a clock, which is what lets it be driven from recorded
 //! or synthetic deltas in tests and in the deterministic headless mode
-//! (`DESIGN.md` §5). [`Clock`] is the thin wrapper that supplies real deltas at
+//! (`docs/DESIGN.md` §5). [`Clock`] is the thin wrapper that supplies real deltas at
 //! runtime; nothing else in the engine should call [`Instant::now`].
 
 use std::fmt;
@@ -116,7 +116,7 @@ impl FixedTimestep {
     /// How far the accumulator sits between simulation states, in `0.0..1.0`.
     ///
     /// This is the blend factor the renderer applies between the two most
-    /// recent simulation states (`DESIGN.md` §2.7). Rendering the newest state
+    /// recent simulation states (`docs/DESIGN.md` §2.7). Rendering the newest state
     /// directly is what produces stutter when display and simulation rates
     /// disagree.
     pub fn alpha(&self) -> f32 {
@@ -319,7 +319,7 @@ mod tests {
 
     #[test]
     fn identical_delta_sequences_produce_identical_step_counts() {
-        // The determinism property DESIGN.md §5 depends on.
+        // The determinism property docs/DESIGN.md §5 depends on.
         let deltas = [3_u64, 11, 7, 1, 40, 6, 9];
 
         let mut first = timestep();
