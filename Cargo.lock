@@ -1534,6 +1534,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "slop-reflect"
+version = "0.0.0"
+dependencies = [
+ "slop-core",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "slop-rhi"
 version = "0.0.0"
 dependencies = [

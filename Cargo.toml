@@ -20,6 +20,7 @@ repository = "https://github.com/adamloec/slop"
 slop-app = { path = "crates/slop-app" }
 slop-core = { path = "crates/slop-core" }
 slop-math = { path = "crates/slop-math" }
+slop-reflect = { path = "crates/slop-reflect" }
 slop-rhi = { path = "crates/slop-rhi" }
 slop-verify = { path = "crates/slop-verify" }
 
