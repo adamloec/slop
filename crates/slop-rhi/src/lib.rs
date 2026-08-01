@@ -26,12 +26,15 @@
 //! carries a `// SAFETY:` comment, enforced by
 //! `clippy::undocumented_unsafe_blocks`.
 
+mod command;
 mod device;
 mod error;
 mod instance;
 mod surface;
 mod swapchain;
+mod sync;
 
+pub use command::{CommandBuffer, CommandPool, ImageState};
 pub use device::{
     Device, DeviceInfo, DeviceKind, DeviceSelection, QueueFamilies, Queues, Rejection, enumerate,
     select,
@@ -40,6 +43,7 @@ pub use error::RhiError;
 pub use instance::{Instance, InstanceConfig, Validation};
 pub use surface::{Surface, required_surface_extensions};
 pub use swapchain::{PresentMode, Swapchain, SwapchainConfig};
+pub use sync::{BinarySemaphore, TimelineSemaphore};
 
 /// Re-exported so consumers can name Vulkan types — extents, formats, handles —
 /// without their own `ash` dependency, and so the engine cannot end up split

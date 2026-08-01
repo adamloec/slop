@@ -26,10 +26,10 @@ Started. This is the bulk of M0 and the largest single body of work in it.
 | Logical device, queue creation | Landed | M0 |
 | Surface, and surface capability queries | Landed | M0 |
 | Swapchain, format and mode selection, recreation | Landed | M0 |
+| Timeline semaphores, binary semaphores | Landed | M0 |
+| Command pools, buffers, image barriers | Landed | M0 |
 | `gpu-allocator` integration | Planned | M0 |
 | Acquire and present | Planned | M0 |
-| Command pools and buffers | Planned | M0 |
-| Timeline semaphores, explicit barriers | Planned | M0 |
 | Bindless descriptor heap | Planned | M0 |
 | Minimal pipeline path | Planned | M0 |
 | Shader reflection, pipeline layout derivation | Planned | M2–M3 |
@@ -243,22 +243,72 @@ physical; the value passed to `WindowConfig` is not.
 families is an explicit ownership-transfer barrier, which §2.2's explicit model
 wants anyway.
 
-## 10. Decisions
+## 10. Synchronization: timelines, and the one forced exception
+
+§2.2 commits to timeline semaphores rather than fences plus binary semaphores. A
+timeline semaphore is a monotonically increasing 64-bit counter that both host
+and device can wait on and signal, which subsumes three older primitives:
+
+| Older primitive | Replaced by |
+|---|---|
+| Fence — device signals, host waits | Host waiting on a timeline value |
+| Binary semaphore — device to device | Device waiting on a timeline value |
+| Event — fine-grained ordering | Timeline values within a queue |
+
+The practical difference: a timeline value can be waited on **before** it is
+signalled, and by any number of waiters. Binary semaphores can be waited exactly
+once and must be signalled first, which is what makes frame-in-flight
+bookkeeping with them so error-prone. There is a test that blocks a thread on a
+value and then signals it from another.
+
+**No fences exist in this engine.** Submission passes `vk::Fence::null()`
+throughout.
+
+**The forced exception:** `vkAcquireNextImageKHR` and `vkQueuePresentKHR` do not
+accept timeline semaphores. `BinarySemaphore` exists solely for those two calls
+— a Vulkan limitation, not a choice, and the only place binary semaphores are
+permitted.
+
+## 11. Command recording
+
+**Pools are per-thread, per frame in flight.** A Vulkan command pool is not
+thread-safe; two threads recording from one pool is undefined behaviour. The
+parallel recording §2.5 and §4.1 depend on therefore means one pool each, and
+that shape is baked in now rather than discovered later.
+
+**Buffers are recycled by resetting the pool, never the buffer.** Vulkan offers
+`RESET_COMMAND_BUFFER` for per-buffer reset, but setting it forces the driver
+onto a slower internal allocator for every buffer in the pool, to support a
+capability the engine does not want. Resetting a whole pool returns its memory
+in one operation. The frame loop is: wait on the timeline value that frame
+signalled, then reset its pool.
+
+**`ImageState` bundles layout, stage, and access.** The failure mode of explicit
+barriers is not forgetting them — it is getting the layout right while the stage
+or access mask is subtly wrong, which validation may not catch and hardware may
+tolerate until it does not. Naming the common states once means the three cannot
+drift apart. Transitioning *from* `UNDEFINED` is the correct source for a
+swapchain image, since discarding is faster than preserving contents about to be
+overwritten.
+
+## 12. Decisions
 
 | Decision | Where |
 |---|---|
 | Own the RHI; Vulkan via `ash`; not `wgpu` | `DESIGN.md` §2.2 |
-| Require Vulkan 1.3, not 1.4 | §4 above |
-| Device selection by UUID, degrading to automatic | §6 above |
-| One feature tier, checked at selection, no fallbacks | §7 above |
+| Require Vulkan 1.3, not 1.4 | §5 above |
+| Device selection by UUID, degrading to automatic | §7 above |
+| One feature tier, checked at selection, no fallbacks | §8 above |
 | `Device` holds an `Arc<Instance>` to encode lifetime ordering | `device.rs` module docs |
-| Swapchain format, present mode, image count and extent | §8 above |
+| Swapchain format, present mode, image count and extent | §9 above |
+| Timeline semaphores throughout; no fences | §10 above |
+| Pools reset wholesale, never per-buffer | §11 above |
 | M0 ships primitives, not abstraction | `PLAN.md` §4.1-D |
 | Slang as the shading language, library-integrated | `DESIGN.md` §2.11 |
 | Which Slang Rust binding | `DESIGN.md` §8 item 2 — revisit at M3 |
 | Desktop only; one GPU feature tier | `DESIGN.md` §2.1 |
 
-## 11. Invariants
+## 13. Invariants
 
 1. **This crate and the allocator are the only sanctioned homes for `unsafe`.**
    `unsafe` anywhere else is a design discussion, not a review comment.
@@ -304,6 +354,15 @@ wants anyway.
 16. **`max_image_count` of `0` means unlimited, not zero.** Clamping against it
     naively yields a swapchain with no images.
 17. **Only FIFO present mode is guaranteed.** Every other mode needs a fallback.
+18. **No fences.** Timeline semaphores cover host-waits. `BinarySemaphore` is
+    permitted only for swapchain acquire and present, which the spec forbids
+    timelines from.
+19. **Timeline values increase monotonically.** Signalling backwards is
+    undefined behaviour Vulkan will not report; a debug assertion catches it.
+20. **One command pool per thread, per frame in flight.** Pools are not
+    thread-safe.
+21. **Reset the pool, not the buffer**, and only after the frame's timeline
+    value has been waited on.
 13. **Enable an extension only when it is needed and its dependencies are
     present.** A permissive driver accepting an invalid create-info is not
     evidence of correctness.
