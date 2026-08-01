@@ -1,0 +1,32 @@
+[package]
+name = "example-cube"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# A library as well as a binary. The windowed demo and the headless golden test
+# render the same scene, and without a shared library they would be the same
+# ~250 lines written twice and then allowed to drift. `slop-render` absorbs this
+# at M3; until then the example owns its own scene.
+[lib]
+name = "example_cube"
+path = "src/lib.rs"
+
+[[bin]]
+name = "example-cube"
+path = "src/main.rs"
+
+[dependencies]
+slop-app = { workspace = true }
+slop-core = { workspace = true, features = ["subscriber"] }
+slop-math = { workspace = true }
+slop-rhi = { workspace = true }
+
+[dev-dependencies]
+slop-verify = { workspace = true }
+
+[lints]
+workspace = true

@@ -178,6 +178,8 @@ impl Headless {
                 color_format: FORMAT,
                 // No depth: one flat primitive with nothing to occlude it.
                 depth_format: None,
+                // Positions come from SV_VertexID, so there is nothing to bind.
+                vertex_layout: None,
                 // On, matching the windowed path. A triangle wound the wrong way
                 // vanishes silently with no validation complaint, so this is the
                 // only thing that catches it — and here it would produce a

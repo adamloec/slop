@@ -51,7 +51,7 @@ pub use error::RhiError;
 pub use instance::{Instance, InstanceConfig, Validation};
 pub use pipeline::{
     DEPTH_CLEAR, DEPTH_COMPARE, GraphicsPipeline, GraphicsPipelineConfig, PipelineLayout,
-    PipelineLayoutConfig, ShaderStage,
+    PipelineLayoutConfig, ShaderStage, VertexLayout,
 };
 pub use resource::{
     Allocator, AllocatorStats, Buffer, BufferConfig, Image, ImageConfig, MemoryLocation, aspect_of,

@@ -1,48 +1,31 @@
-//! M0 task F: the first render.
+//! The windowed cube — `docs/PLAN.md` §4.2's exit criterion, on screen.
 //!
-//! Run `cargo run -p slop-cli -- cook` first, then `cargo run -p example-triangle`.
+//! Run `cargo run -p slop-cli -- cook` first, then `cargo run -p example-cube`.
+//! `SLOP_FRAMES=n` exits after n frames, which is how shutdown gets verified
+//! without a human closing a window.
 //!
-//! This file owns `main()` and drives the frame loop itself, per
-//! `docs/DESIGN.md` §1.2 principle 4. The engine supplies primitives; the render
-//! loop's eventual shape is `slop-render`'s job at M3, and inventing it here
-//! would be designing against imagined requirements
-//! (`docs/PLAN.md` §4.1-D).
-//!
-//! # The two synchronization subtleties
-//!
-//! **Acquire returns an index before the image is usable.** The presentation
-//! engine may still be reading it, so rendering waits on the acquire semaphore
-//! at the colour-attachment stage rather than starting immediately. Skipping
-//! this produces flicker that looks like a driver bug.
-//!
-//! **Render-finished semaphores are per swapchain image, not per frame in
-//! flight.** Present waits on one, and there is no way to observe when present
-//! is done with it — so a per-frame semaphore could be signalled again while a
-//! previous present still waits on it. One per image sidesteps that entirely.
+//! The scene itself lives in this crate's library, shared with the headless
+//! golden test. This file owns `main()` and the frame loop, per
+//! `docs/DESIGN.md` §1.2 principle 4 — the engine supplies pieces, it does not
+//! supply a framework to sit inside.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use slop_core::diagnostics::tracing::{error, info};
-
+use example_cube::{Scene, Target};
 use slop_app::window::{self, WindowConfig};
 use slop_app::winit::application::ApplicationHandler;
 use slop_app::winit::event::WindowEvent;
 use slop_app::winit::event_loop::{ActiveEventLoop, EventLoop};
 use slop_app::winit::window::{Window, WindowId};
+use slop_core::diagnostics::tracing::{error, info};
 use slop_rhi::{
-    AcquireOutcome, BinarySemaphore, CommandBuffer, CommandPool, Device, DeviceSelection,
-    GraphicsPipeline, GraphicsPipelineConfig, ImageState, Instance, InstanceConfig, PipelineLayout,
-    PresentMode, PresentOutcome, ShaderModule, ShaderStage, Surface, Swapchain, SwapchainConfig,
-    TimelineSemaphore, vk,
+    AcquireOutcome, Allocator, BinarySemaphore, CommandBuffer, CommandPool, Device,
+    DeviceSelection, ImageState, Instance, InstanceConfig, PresentMode, PresentOutcome, Surface,
+    Swapchain, SwapchainConfig, TimelineSemaphore, vk,
 };
 
 /// How many frames the CPU may prepare ahead of the GPU.
-///
-/// Two is the standard trade: enough to keep both busy, few enough that input
-/// latency stays low. `docs/DESIGN.md` §2.9's snapshot is what would eventually
-/// let this rise without the simulation and renderer fighting over state.
 const FRAMES_IN_FLIGHT: usize = 2;
 
 fn main() {
@@ -62,10 +45,6 @@ fn main() {
         error!(error = %failure, "the renderer failed");
     }
 
-    // Dropped explicitly so shutdown finishes — and logs that it finished —
-    // before the process exits. Letting it fall out of scope after the exit
-    // check would work, but "shutdown complete" is only trustworthy if it is
-    // printed after the teardown it describes.
     let failed = app.failure.is_some();
     drop(app);
 
@@ -80,7 +59,6 @@ fn main() {
 struct App {
     renderer: Option<Renderer>,
     failure: Option<String>,
-    /// Exit after this many frames, from `SLOP_FRAMES`.
     frame_limit: Option<u64>,
 }
 
@@ -106,7 +84,7 @@ impl ApplicationHandler for App {
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(_) => renderer.mark_dirty(),
+            WindowEvent::Resized(_) => renderer.dirty = true,
             WindowEvent::RedrawRequested => {
                 if let Err(error) = renderer.render() {
                     self.failure = Some(error);
@@ -122,23 +100,15 @@ impl ApplicationHandler for App {
             return;
         };
 
-        // `SLOP_FRAMES=n` exits after n frames. Makes shutdown verifiable
-        // without a human closing a window, and is the shape the deterministic
-        // headless mode in `docs/DESIGN.md` §5 needs — run a fixed number of
-        // frames, then stop.
         if let Some(limit) = self.frame_limit
             && renderer.frame_counter >= limit
         {
             println!("rendered {limit} frames; exiting");
-            // Cleared so this fires once: `about_to_wait` runs again before the
-            // loop actually unwinds.
             self.frame_limit = None;
             event_loop.exit();
             return;
         }
 
-        // Drive continuously rather than only on damage, so the frame loop is
-        // exercised the way a game's would be.
         renderer.window.request_redraw();
     }
 }
@@ -147,31 +117,27 @@ impl ApplicationHandler for App {
 struct Frame {
     pool: CommandPool,
     command: CommandBuffer,
-    /// Signalled by the presentation engine when its image is ready to write.
     acquire: BinarySemaphore,
-    /// The timeline value this frame's submission will signal. Waiting on it is
-    /// what makes reusing the pool safe.
     signalled: u64,
 }
 
 struct Renderer {
-    // Declared in drop order: everything built from the device, then the
-    // device, then the surface, then the window it came from.
+    // Declared in drop order: the scene and per-frame state first, then the
+    // allocator that owns their memory, then the device, surface and window.
     frames: Vec<Frame>,
-    /// One per swapchain image — see the module docs.
+    /// One per swapchain image, not per frame in flight — present waits on one
+    /// and there is no way to observe when it is done with it.
     render_finished: Vec<BinarySemaphore>,
     timeline: TimelineSemaphore,
-    // No separate layout field: `GraphicsPipeline` already holds an `Arc` to
-    // it, which is what keeps it alive.
-    pipeline: GraphicsPipeline,
+    scene: Scene,
     swapchain: Swapchain,
+    allocator: Arc<Allocator>,
     device: Arc<Device>,
     surface: Surface,
     window: Window,
 
     frame_index: usize,
     frame_counter: u64,
-    /// Set when the swapchain is known to no longer match the window.
     dirty: bool,
 }
 
@@ -180,7 +146,7 @@ impl Renderer {
         let window = window::create(
             event_loop,
             &WindowConfig {
-                title: String::from("slop — triangle"),
+                title: String::from("slop — cube"),
                 ..Default::default()
             },
         )
@@ -190,15 +156,15 @@ impl Renderer {
             window::required_instance_extensions(&window).map_err(|error| error.to_string())?;
         let instance = Arc::new(
             Instance::new(&InstanceConfig {
-                application_name: String::from("example-triangle"),
+                application_name: String::from("example-cube"),
                 required_extensions: extensions,
                 ..Default::default()
             })
             .map_err(|error| error.to_string())?,
         );
 
-        // SAFETY: `window` is moved into the returned `Renderer` after the
-        // surface and is declared last, so it outlives everything built here.
+        // SAFETY: `window` is moved into the returned `Renderer` and declared
+        // last, so it outlives everything built from it.
         let surface =
             unsafe { window::create_surface(&instance, &window) }.map_err(|e| e.to_string())?;
 
@@ -207,6 +173,7 @@ impl Renderer {
         let chosen = slop_rhi::select(&devices, &DeviceSelection::Automatic)
             .map_err(|error| error.to_string())?;
         let device = Arc::new(Device::new(&instance, &devices[chosen]).map_err(|e| e.to_string())?);
+        let allocator = Allocator::new(&device).map_err(|error| error.to_string())?;
 
         let size = window.inner_size();
         let swapchain = Swapchain::new(
@@ -222,39 +189,7 @@ impl Renderer {
         )
         .map_err(|error| error.to_string())?;
 
-        let module = load_shader(&device)?;
-        let layout = Arc::new(PipelineLayout::empty(&device).map_err(|e| e.to_string())?);
-        let pipeline = GraphicsPipeline::new(
-            &device,
-            &layout,
-            &GraphicsPipelineConfig {
-                vertex: ShaderStage {
-                    module: &module,
-                    entry: c"vertexMain",
-                },
-                fragment: ShaderStage {
-                    module: &module,
-                    entry: c"fragmentMain",
-                },
-                color_format: swapchain.format(),
-                // No depth: the triangle is a single flat primitive with nothing to
-                // occlude it. Depth arrives with the cube.
-                depth_format: None,
-                // Positions come from SV_VertexID, so there is nothing to bind.
-                vertex_layout: None,
-                // On, deliberately. This is the check that the shader agrees
-                // with the engine's counter-clockwise front face: a triangle
-                // wound the wrong way vanishes silently, with no validation
-                // complaint, so leaving culling off would let the convention rot
-                // unnoticed until real geometry made it expensive.
-                cull_back_faces: true,
-            },
-        )
-        .map_err(|error| error.to_string())?;
-
-        // The module may be dropped now — Vulkan does not require it to outlive
-        // the pipelines built from it.
-        drop(module);
+        let scene = Scene::new(&device, &allocator, swapchain.extent(), swapchain.format())?;
 
         let graphics_family = device.queue_families().graphics;
         let mut frames = Vec::with_capacity(FRAMES_IN_FLIGHT);
@@ -271,8 +206,6 @@ impl Renderer {
                 pool,
                 command,
                 acquire: BinarySemaphore::new(&device).map_err(|e| e.to_string())?,
-                // Zero: the timeline starts there, so the first wait is
-                // satisfied immediately rather than deadlocking.
                 signalled: 0,
             });
         }
@@ -283,7 +216,7 @@ impl Renderer {
             .map_err(|error| error.to_string())?;
 
         println!(
-            "triangle: {}x{}, {} swapchain images, {} frames in flight",
+            "cube: {}x{}, {} swapchain images, {} frames in flight",
             swapchain.extent().width,
             swapchain.extent().height,
             swapchain.images().len(),
@@ -294,8 +227,9 @@ impl Renderer {
             frames,
             render_finished,
             timeline: TimelineSemaphore::new(&device, 0).map_err(|e| e.to_string())?,
-            pipeline,
+            scene,
             swapchain,
+            allocator,
             device,
             surface,
             window,
@@ -305,10 +239,6 @@ impl Renderer {
         })
     }
 
-    fn mark_dirty(&mut self) {
-        self.dirty = true;
-    }
-
     fn render(&mut self) -> Result<(), String> {
         if self.dirty {
             self.recreate_swapchain()?;
@@ -316,8 +246,7 @@ impl Renderer {
 
         let frame_index = self.frame_index;
 
-        // Wait for this frame slot's previous submission before touching its
-        // pool. This is the whole reason the timeline exists.
+        // Wait for this slot's previous submission before touching its pool.
         self.timeline
             .wait_forever(self.frames[frame_index].signalled)
             .map_err(|error| error.to_string())?;
@@ -346,7 +275,24 @@ impl Renderer {
             AcquireOutcome::TimedOut => return Ok(()),
         };
 
-        self.record(frame_index, image_index)?;
+        let command = &self.frames[frame_index].command;
+        command.begin().map_err(|error| error.to_string())?;
+
+        self.scene.record(
+            command,
+            Target {
+                image: self.swapchain.images()[image_index as usize],
+                view: self.swapchain.views()[image_index as usize],
+                extent: self.swapchain.extent(),
+                // The frame clears, so the previous contents are worth nothing
+                // and discarding is faster than preserving them.
+                from: ImageState::UNDEFINED,
+                to: ImageState::PRESENT,
+            },
+            self.frame_counter,
+        );
+
+        command.end().map_err(|error| error.to_string())?;
 
         self.frame_counter += 1;
         let signalled = self.frame_counter;
@@ -377,101 +323,17 @@ impl Renderer {
         Ok(())
     }
 
-    fn record(&self, frame_index: usize, image_index: u32) -> Result<(), String> {
-        let command = &self.frames[frame_index].command;
-        let extent = self.swapchain.extent();
-        let image = self.swapchain.images()[image_index as usize];
-        let view = self.swapchain.views()[image_index as usize];
-
-        command.begin().map_err(|error| error.to_string())?;
-
-        // From UNDEFINED, not from PRESENT_SRC: the previous contents are about
-        // to be cleared, so discarding is both correct and faster.
-        command.transition_image(
-            image,
-            vk::ImageAspectFlags::COLOR,
-            ImageState::UNDEFINED,
-            ImageState::COLOR_ATTACHMENT,
-        );
-
-        let clear = vk::ClearValue {
-            color: vk::ClearColorValue {
-                float32: [0.02, 0.02, 0.03, 1.0],
-            },
-        };
-        let attachments = [vk::RenderingAttachmentInfo::default()
-            .image_view(view)
-            .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-            .load_op(vk::AttachmentLoadOp::CLEAR)
-            .store_op(vk::AttachmentStoreOp::STORE)
-            .clear_value(clear)];
-
-        let rendering = vk::RenderingInfo::default()
-            .render_area(vk::Rect2D {
-                offset: vk::Offset2D { x: 0, y: 0 },
-                extent,
-            })
-            .layer_count(1)
-            .color_attachments(&attachments);
-
-        let viewports = [vk::Viewport {
-            x: 0.0,
-            y: 0.0,
-            width: extent.width as f32,
-            height: extent.height as f32,
-            min_depth: 0.0,
-            max_depth: 1.0,
-        }];
-        let scissors = [vk::Rect2D {
-            offset: vk::Offset2D { x: 0, y: 0 },
-            extent,
-        }];
-
-        let raw = self.device.raw();
-        let buffer = command.handle();
-
-        // SAFETY: the buffer is recording, every borrowed structure outlives
-        // these calls, and `dynamic_rendering` is in the required feature tier.
-        unsafe {
-            raw.cmd_begin_rendering(buffer, &rendering);
-            raw.cmd_set_viewport(buffer, 0, &viewports);
-            raw.cmd_set_scissor(buffer, 0, &scissors);
-            raw.cmd_bind_pipeline(
-                buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline.handle(),
-            );
-            // Three vertices, one instance. Positions come from SV_VertexID, so
-            // there is nothing to bind.
-            raw.cmd_draw(buffer, 3, 1, 0, 0);
-            raw.cmd_end_rendering(buffer);
-        }
-
-        command.transition_image(
-            image,
-            vk::ImageAspectFlags::COLOR,
-            ImageState::COLOR_ATTACHMENT,
-            ImageState::PRESENT,
-        );
-        command.end().map_err(|error| error.to_string())?;
-
-        Ok(())
-    }
-
     fn submit(&self, frame_index: usize, image_index: u32, signalled: u64) -> Result<(), String> {
         let wait = [vk::SemaphoreSubmitInfo::default()
             .semaphore(self.frames[frame_index].acquire.handle())
-            // Wait at the colour-attachment stage, not the top of the pipe:
-            // vertex work may begin before the image is available, since it
-            // touches nothing the presentation engine is reading.
+            // At the colour-attachment stage, not the top of the pipe: vertex
+            // work may begin before the image is available.
             .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)];
 
         let signal = [
-            // Binary, for present — the swapchain accepts nothing else.
             vk::SemaphoreSubmitInfo::default()
                 .semaphore(self.render_finished[image_index as usize].handle())
                 .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
-            // Timeline, for frame pacing.
             vk::SemaphoreSubmitInfo::default()
                 .semaphore(self.timeline.handle())
                 .value(signalled)
@@ -502,7 +364,6 @@ impl Renderer {
         let size = self.window.inner_size();
 
         // Minimising produces a zero extent, which is not a valid swapchain.
-        // Skipping rather than failing is correct: the window will come back.
         if size.width == 0 || size.height == 0 {
             return Ok(());
         }
@@ -517,8 +378,13 @@ impl Renderer {
             )
             .map_err(|error| error.to_string())?;
 
-        // Image count can change on recreation, so the per-image semaphores are
-        // rebuilt rather than assumed still to match.
+        // The depth buffer must match the colour target's size, so it is
+        // rebuilt too. Forgetting this is a validation error on the first frame
+        // after a resize.
+        self.scene
+            .resize(&self.allocator, self.swapchain.extent())?;
+
+        // Image count can change on recreation.
         self.render_finished = (0..self.swapchain.images().len())
             .map(|_| BinarySemaphore::new(&self.device))
             .collect::<Result<Vec<_>, _>>()
@@ -534,36 +400,10 @@ impl Drop for Renderer {
     fn drop(&mut self) {
         info!(frames = self.frame_counter, "shutting down");
 
-        // Every Vulkan object below is destroyed when this struct's fields drop,
-        // which happens *after* this function returns — and the GPU may still be
-        // executing the last submitted frame.
-        //
-        // `Device::drop` also waits, but that is far too late: the device field
-        // is declared after the pools and semaphores, so those are already
-        // destroyed by the time it runs. Waiting here, before any field drops,
-        // is what actually makes teardown safe.
+        // Before any field drops — `Device::drop` waits too, but by then the
+        // pools and semaphores declared above it are already destroyed.
         if let Err(failure) = self.device.wait_idle() {
             error!(error = %failure, "device did not go idle; teardown may be unsafe");
         }
     }
-}
-
-/// Load the cooked triangle shader.
-///
-/// Dev-only path resolution — the asset VFS at M2 replaces this. Hard-coding it
-/// is honest about being a placeholder rather than pretending to be a lookup.
-fn load_shader(device: &Arc<Device>) -> Result<ShaderModule, String> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join(".slop/cache/shaders/passes/triangle.spv");
-
-    let bytes = std::fs::read(&path).map_err(|error| {
-        format!(
-            "{} could not be read ({error}). Run `cargo run -p slop-cli -- cook` first",
-            path.display()
-        )
-    })?;
-
-    ShaderModule::from_bytes(device, &bytes).map_err(|error| error.to_string())
 }

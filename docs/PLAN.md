@@ -1,7 +1,8 @@
 # Slop Engine — Implementation Plan & Session Handoff
 
-**Status:** Pre-implementation. No code written yet.
-**Last updated:** 2026-07-31
+**Status:** M0 functionally complete — the lit textured cube renders. Only
+dual-platform CI remains.
+**Last updated:** 2026-08-01
 
 This document is the working companion to `DESIGN.md`. **`DESIGN.md` is
 authoritative for all architectural decisions** — read it first, in full, before
@@ -121,8 +122,8 @@ Two consequences worth carrying into M0:
 
 ## 3. Current state
 
-**M0 tasks A, B, C, E, F and G are done. The triangle renders, and a golden
-image now guards it.**
+**M0 is functionally complete. Every task is done, and the lit textured cube
+renders with a golden image guarding it.** Only dual-platform CI remains.
 
 Verified on the RTX 5090: window, surface, device, swapchain, cooked Slang
 shader, graphics pipeline, and a frame loop with two frames in flight, running
@@ -130,7 +131,9 @@ with validation active and reporting no errors, and shutting down cleanly. A
 one-second run completes roughly 5,400 frames, which is the evidence that the
 frames-in-flight pipelining works rather than stalling on the GPU each frame.
 
-Task G landed with the memory work it needed:
+Verification landed *before* the cube rather than after it, and brought the
+memory work with it — readback needs an allocator, a device-local image and a
+host-visible buffer, so task G contained the first half of task D:
 
 - **`gpu-allocator` integration** — `Allocator`, `Buffer`, `Image`, and
   image-to-buffer readback. Every resource suballocates from the start.
@@ -141,25 +144,33 @@ Task G landed with the memory work it needed:
 - **`slop-verify`** — the golden-image harness: tolerance model, difference
   reporting, diff images, and an approval mode that never runs by default.
 
-**The harness was verified by breaking the renderer on purpose.** Reversing the
-triangle's winding — bug 2 below, the one that reached a running program — makes
-the test fail with 18.09% of pixels differing and writes a diff image showing
-exactly the triangle. Restoring it returns the suite to green. A golden test that
-has never caught anything is a golden test that does not work.
+§4.2's exit criteria are met except for CI:
 
-Remaining for M0:
-
-| Task | State |
+| Exit criterion | State |
 |---|---|
-| D — `slop-rhi` | Allocator, buffers and images landed. Bindless descriptor heap and depth attachments remain, and are needed for the cube rather than the triangle. |
-| §4.2 exit criteria | The cube and dual-platform CI are outstanding. The golden image is done for the hardware tier; the lavapipe tier lands with CI. |
+| Lit textured cube renders | **Met** on Windows. Linux is untested — see below. |
+| Validation layers clean | **Met** |
+| One golden-image test passing | **Met** on the hardware tier; lavapipe lands with CI |
+| No `#[allow]` hiding real problems | **Met** — one `expect(dead_code)` for an RAII field and one in the shared test-support module, both justified |
+| CI green on both platforms | **Outstanding** — deferred by decision, see §2.2 |
 
-The triangle deliberately allocates nothing — positions come from `SV_VertexID`
-— so the first render did not also depend on the allocator, buffer uploads, or
-descriptor sets being correct.
+What the cube exercises, all at once: staged vertex, index and texture uploads;
+the bindless heap; depth testing under reverse-Z; push constants; the projection
+conventions; and two draws sharing one pipeline. `slop-rhi` now covers instance,
+device, swapchain, sync, commands, memory, resources, descriptors and pipelines.
 
-**Three bugs reached a running program that review did not catch**, which was
-the argument for pulling task G forward rather than leaving it last:
+**The one gap that remains is Linux.** Nothing in this project has ever run
+there. That is not just a build question — Wayland's `u32::MAX` extent path
+(§4.1-E) has never executed, and §2.14's cross-platform determinism cannot be
+tested from one platform by construction. Both are claims the docs already make.
+
+### 3.1 What verification actually bought
+
+Two lists, and the contrast between them is the argument for having pulled
+task G ahead of the cube.
+
+**Before the verification skeleton existed, three bugs reached a running
+program:**
 
 1. A missing `shaderDrawParameters` feature: 18 validation errors, zero test
    failures, and correct output on this driver regardless.
@@ -168,9 +179,48 @@ the argument for pulling task G forward rather than leaving it last:
 3. A drop-order crash on shutdown, which only appeared when a human closed the
    window rather than when the process was killed.
 
-None of the three was visible to the type system, clippy, or the test suite. The
-golden test now catches the second directly, and the third is covered by a
-`Drop` impl the headless renderer carries for the same reason the example does.
+None of the three was visible to the type system, clippy, or the test suite.
+Validation caught the first; a human caught the other two.
+
+**After it existed, three bugs were caught before any GPU saw them:**
+
+1. **Two cube faces wound inward.** `cross(right, up)` must equal the face
+   normal, and for the ±Y faces the obvious axis choice is wrong. Under
+   back-face culling both faces would have silently vanished. A unit test on the
+   geometry caught it with no GPU involved.
+2. **The orthographic depth scale had the wrong sign.** `-1/depth` where
+   `+1/depth` was needed. Shadow cascades built on it would have rendered
+   inside out.
+3. **The cook cache did not key on shader includes.** Editing a shared include
+   changed what every dependent compiled to while leaving every stamp matching —
+   a cache that was *wrong*, not merely stale.
+
+**And two more were found by breaking working code on purpose**, to check the
+tests would notice: reversing the triangle's winding (18.09% of pixels differ),
+and flipping `DEPTH_COMPARE` to `LESS_OR_EQUAL`, which made both cubes vanish
+entirely because every fragment failed against a 0.0 clear. *A golden test that
+has never caught anything is not known to work.*
+
+The cube's golden also needed a design fix to be worth anything: a single convex
+cube with back-face culling renders identically whether or not depth works, so
+the scene draws a **second** cube, near-first, where only a working depth test
+keeps the far one behind. Drawing them far-first would have produced a correct
+image by draw order alone and proven nothing.
+
+The `Drop`-order crash is covered structurally rather than by a test: every type
+owning Vulkan objects waits for idle in its own `Drop`, recorded as invariant 22
+in `docs/slop-rhi/README.md`.
+
+1. **Two cube faces wound inward.** `cross(right, up)` must equal the face
+   normal, and for the ±Y faces the obvious axis choice is wrong. Under
+   back-face culling both faces would have silently vanished. A unit test on the
+   geometry caught it with no GPU involved.
+2. **The orthographic depth scale had the wrong sign.** `-1/depth` where
+   `+1/depth` was needed. Shadow cascades built on it would have rendered
+   inside out.
+3. **The cook cache did not key on shader includes.** Editing a shared include
+   changed what every dependent compiled to while leaving every stamp matching —
+   a cache that was *wrong*, not merely stale.
 
 **The determinism tier is settled** — `DESIGN.md` §2.14, decided before M1
 rather than before M5. A golden image means nothing unless the frame it captures
@@ -184,7 +234,7 @@ back by accident.
 
 ---
 
-### 3.1 Earlier state
+### 3.2 Earlier state
 
 **M0 tasks A and C: workspace scaffolding, and `slop-core` complete.**
 

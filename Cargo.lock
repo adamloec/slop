@@ -495,6 +495,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "example-cube"
+version = "0.0.0"
+dependencies = [
+ "slop-app",
+ "slop-core",
+ "slop-math",
+ "slop-rhi",
+ "slop-verify",
+]
+
+[[package]]
 name = "example-triangle"
 version = "0.0.0"
 dependencies = [

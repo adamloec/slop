@@ -87,9 +87,32 @@ pub struct GraphicsPipelineConfig<'a> {
     /// inventing the configuration surface before a pass needs it would be
     /// designing against imagined requirements (`docs/PLAN.md` §4.1-D).
     pub depth_format: Option<vk::Format>,
+    /// Layout of the vertex buffer bound at binding 0, or `None` for a shader
+    /// generating its own positions from `SV_VertexID`.
+    pub vertex_layout: Option<VertexLayout<'a>>,
     /// Whether to discard back faces. Off is useful while debugging geometry
     /// whose winding is in doubt.
     pub cull_back_faces: bool,
+}
+
+/// How to read one interleaved vertex buffer.
+///
+/// Shader input locations are assigned by position in [`attributes`], so the
+/// order here is the order the shader declares. Keeping one list rather than a
+/// list plus a separate set of location numbers removes the pairing that would
+/// otherwise have to be maintained by hand.
+///
+/// [`attributes`]: Self::attributes
+#[derive(Debug, Clone, Copy)]
+pub struct VertexLayout<'a> {
+    /// Bytes between consecutive vertices.
+    ///
+    /// Must equal the Rust vertex struct's `size_of`, which is why the struct
+    /// wants `#[repr(C)]` — Rust may otherwise reorder fields, and then the
+    /// offsets below describe a layout the compiler did not produce.
+    pub stride: u32,
+    /// Each attribute's format and byte offset, in shader location order.
+    pub attributes: &'a [(vk::Format, u32)],
 }
 
 /// What a pipeline's shaders can reach.
@@ -226,11 +249,48 @@ impl GraphicsPipeline {
                 .name(config.fragment.entry),
         ];
 
-        // No vertex buffers. The triangle's positions come from SV_VertexID, and
-        // real geometry will arrive through storage buffers read by index rather
-        // than fixed-function vertex input, which is what §4.2 stage B's
-        // GPU-driven pipeline needs.
-        let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
+        // One interleaved vertex buffer at binding 0, or none at all.
+        //
+        // Fixed-function vertex input is not where this ends up: §4.2 stage B's
+        // GPU-driven pipeline reads geometry from storage buffers by index,
+        // because a draw whose vertex data the CPU never bound cannot use a
+        // vertex buffer binding. It is here because M0's cube is CPU-submitted
+        // and this is the shortest path to it, not because it is the model.
+        let bindings = config.vertex_layout.map(|layout| {
+            [vk::VertexInputBindingDescription::default()
+                .binding(0)
+                .stride(layout.stride)
+                .input_rate(vk::VertexInputRate::VERTEX)]
+        });
+
+        let attributes: Vec<vk::VertexInputAttributeDescription> = config
+            .vertex_layout
+            .map(|layout| {
+                layout
+                    .attributes
+                    .iter()
+                    .enumerate()
+                    .map(|(location, &(format, offset))| {
+                        vk::VertexInputAttributeDescription::default()
+                            .binding(0)
+                            // Locations are assigned by position in the slice,
+                            // so the Rust struct's field order *is* the shader's
+                            // location order. One list to keep in step instead
+                            // of two.
+                            .location(u32::try_from(location).unwrap_or(0))
+                            .format(format)
+                            .offset(offset)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let vertex_input = match &bindings {
+            Some(bindings) => vk::PipelineVertexInputStateCreateInfo::default()
+                .vertex_binding_descriptions(bindings)
+                .vertex_attribute_descriptions(&attributes),
+            None => vk::PipelineVertexInputStateCreateInfo::default(),
+        };
 
         let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
             .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
