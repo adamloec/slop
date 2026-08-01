@@ -30,6 +30,7 @@ mod command;
 mod device;
 mod error;
 mod instance;
+mod pipeline;
 mod shader;
 mod surface;
 mod swapchain;
@@ -42,9 +43,10 @@ pub use device::{
 };
 pub use error::RhiError;
 pub use instance::{Instance, InstanceConfig, Validation};
+pub use pipeline::{GraphicsPipeline, GraphicsPipelineConfig, PipelineLayout, ShaderStage};
 pub use shader::ShaderModule;
 pub use surface::{Surface, required_surface_extensions};
-pub use swapchain::{PresentMode, Swapchain, SwapchainConfig};
+pub use swapchain::{AcquireOutcome, PresentMode, PresentOutcome, Swapchain, SwapchainConfig};
 pub use sync::{BinarySemaphore, TimelineSemaphore};
 
 /// Re-exported so consumers can name Vulkan types — extents, formats, handles —

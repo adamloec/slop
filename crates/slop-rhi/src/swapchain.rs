@@ -6,11 +6,47 @@
 //! machine. They are made explicitly here, and each records why.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use ash::vk;
 use slop_core::diagnostics::tracing::{debug, info, warn};
 
-use crate::{Device, RhiError, Surface};
+use crate::{BinarySemaphore, Device, RhiError, Surface};
+
+/// What acquiring an image produced.
+///
+/// `OutOfDate` is an outcome rather than an error because resizing a window is
+/// completely normal. Modelling it as a failure invites callers to treat it as
+/// one, and the correct response — recreate and try again next frame — is not
+/// error handling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcquireOutcome {
+    /// An image is ready to render into.
+    Acquired {
+        /// Index into [`Swapchain::images`] and [`Swapchain::views`].
+        index: u32,
+        /// The swapchain still works but no longer matches the surface
+        /// exactly — usually mid-resize. Rendering this frame is fine;
+        /// recreating soon is expected.
+        suboptimal: bool,
+    },
+    /// The swapchain no longer matches the surface and must be recreated before
+    /// anything can be drawn.
+    OutOfDate,
+    /// No image became available within the timeout.
+    TimedOut,
+}
+
+/// What presenting produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresentOutcome {
+    /// Queued for display.
+    Presented,
+    /// Displayed, but the swapchain no longer matches the surface exactly.
+    Suboptimal,
+    /// The swapchain must be recreated.
+    OutOfDate,
+}
 
 /// How presentation is paced.
 ///
@@ -288,6 +324,81 @@ impl Swapchain {
     /// The present mode actually in use, which may differ from the request.
     pub fn present_mode(&self) -> vk::PresentModeKHR {
         self.present_mode
+    }
+
+    /// Acquire an image to render into.
+    ///
+    /// `signal` is signalled once the image is actually available — acquiring
+    /// returns an index immediately, but the presentation engine may still be
+    /// reading from that image, so rendering must wait on the semaphore rather
+    /// than starting as soon as this returns. That gap is the single most
+    /// common source of flicker in a first renderer.
+    ///
+    /// A [`BinarySemaphore`] rather than a timeline one because the swapchain
+    /// extension accepts nothing else — see the `sync` module.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the device was lost. A swapchain that needs recreating is
+    /// reported through [`AcquireOutcome`], not as an error.
+    pub fn acquire_next_image(
+        &self,
+        signal: &BinarySemaphore,
+        timeout: Duration,
+    ) -> Result<AcquireOutcome, RhiError> {
+        let nanos = u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX);
+
+        // SAFETY: the swapchain and semaphore belong to this device, and no
+        // fence is supplied because the engine does not use them.
+        let result = unsafe {
+            self.loader
+                .acquire_next_image(self.handle, nanos, signal.handle(), vk::Fence::null())
+        };
+
+        match result {
+            Ok((index, suboptimal)) => Ok(AcquireOutcome::Acquired { index, suboptimal }),
+            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => Ok(AcquireOutcome::OutOfDate),
+            Err(vk::Result::TIMEOUT | vk::Result::NOT_READY) => Ok(AcquireOutcome::TimedOut),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Queue an image for display.
+    ///
+    /// `wait` must be the semaphore the rendering submission signalled, so the
+    /// presentation engine does not read the image before the GPU finishes
+    /// writing it.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the device was lost. A swapchain that needs recreating is
+    /// reported through [`PresentOutcome`], not as an error.
+    pub fn present(
+        &self,
+        queue: vk::Queue,
+        index: u32,
+        wait: &BinarySemaphore,
+    ) -> Result<PresentOutcome, RhiError> {
+        let wait_semaphores = [wait.handle()];
+        let swapchains = [self.handle];
+        let indices = [index];
+
+        let present_info = vk::PresentInfoKHR::default()
+            .wait_semaphores(&wait_semaphores)
+            .swapchains(&swapchains)
+            .image_indices(&indices);
+
+        // SAFETY: every borrowed array outlives the call, `index` came from
+        // `acquire_next_image` on this swapchain, and `queue` belongs to this
+        // device.
+        let result = unsafe { self.loader.queue_present(queue, &present_info) };
+
+        match result {
+            Ok(false) => Ok(PresentOutcome::Presented),
+            Ok(true) => Ok(PresentOutcome::Suboptimal),
+            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => Ok(PresentOutcome::OutOfDate),
+            Err(error) => Err(error.into()),
+        }
     }
 }
 

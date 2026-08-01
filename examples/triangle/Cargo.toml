@@ -1,0 +1,15 @@
+[package]
+name = "example-triangle"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+slop-app = { workspace = true }
+slop-rhi = { workspace = true }
+
+[lints]
+workspace = true
