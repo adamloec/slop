@@ -1538,7 +1538,17 @@ name = "slop-reflect"
 version = "0.0.0"
 dependencies = [
  "slop-core",
+ "slop-reflect-derive",
  "thiserror 2.0.19",
+]
+
+[[package]]
+name = "slop-reflect-derive"
+version = "0.0.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.3",
 ]
 
 [[package]]

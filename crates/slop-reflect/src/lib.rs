@@ -57,6 +57,14 @@ pub use info::{FieldInfo, Transfer, TypeInfo, TypeKind};
 pub use path::{TypeId, TypePath};
 pub use registry::{RegistryError, TypeRegistry};
 
+/// Derive [`Reflect`] for a struct with named fields.
+///
+/// The compile-time front end. Layout, destructor and blittability are all
+/// computed from the type rather than taken from the author — see the macro's
+/// own documentation for why each one is.
+#[cfg(feature = "derive")]
+pub use slop_reflect_derive::Reflect;
+
 /// A host-native type that can describe itself.
 ///
 /// The compile-time front end. Implemented by the derive macro for ordinary
@@ -71,10 +79,35 @@ pub use registry::{RegistryError, TypeRegistry};
 /// answer here is memory-unsafe. This is why hand-written impls should be rare —
 /// the derive macro cannot get it wrong.
 pub unsafe trait Reflect: 'static {
+    /// This type's canonical path — see [`TypePath`].
+    ///
+    /// An associated constant rather than something read out of
+    /// [`type_info`](Self::type_info), so that a field's id can be resolved
+    /// without building a whole `TypeInfo` for it, and so that archetype
+    /// signatures can be assembled in a `const` context.
+    const PATH: &'static str;
+
+    /// Whether this type's bytes can cross to a guest module.
+    ///
+    /// A constant, and **derived rather than declared**: the macro computes it
+    /// from `#[repr(C)]`, [`std::mem::needs_drop`], and every field's own
+    /// `TRANSFER`. All three are available in a `const` context, so the answer
+    /// folds at compile time and a struct containing a `String` cannot claim to
+    /// be blittable however it is annotated.
+    const TRANSFER: Transfer;
+
     /// Describe this type.
     fn type_info() -> TypeInfo
     where
         Self: Sized;
+
+    /// This type's id, without constructing a [`TypeInfo`].
+    fn type_id() -> TypeId
+    where
+        Self: Sized,
+    {
+        TypeId::from_path(Self::PATH)
+    }
 }
 
 /// Implement [`Reflect`] for a primitive.
@@ -88,11 +121,14 @@ macro_rules! primitive {
             // SAFETY: the layout is taken directly from the type, and no drop
             // function is installed — every type here is `Copy`.
             unsafe impl Reflect for $type {
+                const PATH: &'static str = stringify!($type);
+                const TRANSFER: Transfer = Transfer::Blittable;
+
                 fn type_info() -> TypeInfo {
                     TypeInfo::new(
-                        stringify!($type),
+                        Self::PATH,
                         std::alloc::Layout::new::<$type>(),
-                        Transfer::Blittable,
+                        Self::TRANSFER,
                         TypeKind::Primitive,
                     )
                 }
@@ -101,30 +137,66 @@ macro_rules! primitive {
     };
 }
 
-primitive!(bool, u8, u16, u32, u64, i8, i16, i32, i64, f32, f64);
+primitive!(
+    bool, char, u8, u16, u32, u64, usize, i8, i16, i32, i64, isize, f32, f64
+);
 
-/// Register every primitive.
+// SAFETY: the layout is `String`'s own, and the drop function does nothing but
+// drop a `String` in place through a correctly cast pointer.
+//
+// `Owning`, not `Blittable`: a `String` is a pointer into the host heap, so its
+// bytes mean nothing inside a guest's linear memory. `Opaque` rather than a
+// struct, because its three fields are private implementation detail — an editor
+// shows a text box, not a capacity field.
+unsafe impl Reflect for String {
+    const PATH: &'static str = "std::string::String";
+    const TRANSFER: Transfer = Transfer::Owning;
+
+    fn type_info() -> TypeInfo {
+        // SAFETY: as above.
+        unsafe {
+            TypeInfo::with_drop(
+                Self::PATH,
+                std::alloc::Layout::new::<Self>(),
+                Self::TRANSFER,
+                TypeKind::Opaque,
+                |pointer| std::ptr::drop_in_place(pointer.cast::<Self>()),
+            )
+        }
+    }
+}
+
+/// Register every type this crate ships an implementation for.
 ///
 /// Field types resolve through the registry, so a struct with an `f32` field is
-/// unresolvable until `f32` is present. Every registry wants these, which is why
-/// it is one call rather than eleven.
+/// unresolvable until `f32` is present. Every registry wants all of these, which
+/// is why it is one call rather than fifteen.
+///
+/// Deliberately not automatic: a registry with nothing in it is a valid starting
+/// point for a tool that only inspects a guest module's own types, and a
+/// `Default` that silently populated itself would make that impossible to
+/// express.
 ///
 /// # Errors
 ///
-/// Only if a primitive's path is already taken by a different definition, which
-/// would mean something registered a type called `f32`.
-pub fn register_primitives(registry: &mut TypeRegistry) -> Result<(), RegistryError> {
+/// Only if one of these paths is already taken by a different definition, which
+/// would mean something registered its own type called `f32`.
+pub fn register_builtins(registry: &mut TypeRegistry) -> Result<(), RegistryError> {
     registry.register_native::<bool>()?;
+    registry.register_native::<char>()?;
     registry.register_native::<u8>()?;
     registry.register_native::<u16>()?;
     registry.register_native::<u32>()?;
     registry.register_native::<u64>()?;
+    registry.register_native::<usize>()?;
     registry.register_native::<i8>()?;
     registry.register_native::<i16>()?;
     registry.register_native::<i32>()?;
     registry.register_native::<i64>()?;
+    registry.register_native::<isize>()?;
     registry.register_native::<f32>()?;
     registry.register_native::<f64>()?;
+    registry.register_native::<String>()?;
 
     Ok(())
 }
@@ -145,11 +217,11 @@ mod tests {
     }
 
     #[test]
-    fn every_primitive_registers_and_resolves() {
+    fn every_builtin_registers_and_resolves() {
         let mut registry = TypeRegistry::new();
-        register_primitives(&mut registry).expect("a fresh registry");
+        register_builtins(&mut registry).expect("a fresh registry");
 
-        assert_eq!(registry.len(), 11);
+        assert_eq!(registry.len(), 15);
         assert!(registry.get_by_path("f32").is_some());
         assert!(registry.get_by_path("bool").is_some());
         assert!(registry.unresolved_fields().is_empty());
@@ -161,7 +233,7 @@ mod tests {
         // disagree — `u64` registered with `u32`'s layout would make every
         // column holding one half the size it should be.
         let mut registry = TypeRegistry::new();
-        register_primitives(&mut registry).expect("fresh");
+        register_builtins(&mut registry).expect("fresh");
 
         let size = |path: &str| registry.get_by_path(path).map(|info| info.layout().size());
 
@@ -173,12 +245,12 @@ mod tests {
     }
 
     #[test]
-    fn registering_primitives_twice_is_harmless() {
+    fn registering_builtins_twice_is_harmless() {
         let mut registry = TypeRegistry::new();
 
-        register_primitives(&mut registry).expect("first");
-        register_primitives(&mut registry).expect("second");
+        register_builtins(&mut registry).expect("first");
+        register_builtins(&mut registry).expect("second");
 
-        assert_eq!(registry.len(), 11);
+        assert_eq!(registry.len(), 15);
     }
 }

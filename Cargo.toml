@@ -21,6 +21,7 @@ slop-app = { path = "crates/slop-app" }
 slop-core = { path = "crates/slop-core" }
 slop-math = { path = "crates/slop-math" }
 slop-reflect = { path = "crates/slop-reflect" }
+slop-reflect-derive = { path = "crates/slop-reflect-derive" }
 slop-rhi = { path = "crates/slop-rhi" }
 slop-verify = { path = "crates/slop-verify" }
 
@@ -93,6 +94,23 @@ blake3 = "1.8.5"
 # warns about, to a crate whose entire job is making cross-platform differences
 # visible.
 png = "0.18.1"
+
+# Proc-macro machinery, for `slop-reflect-derive` only. A proc macro must live in
+# its own crate — a Rust restriction, not a design choice — which is why
+# DESIGN.md §4's crate list gains a sibling it does not mention.
+#
+# `syn` without default features and with only what the derive parses: it is one
+# of the heaviest compile-time dependencies in the ecosystem, and the full
+# feature set exists for macros that parse expressions and function bodies. This
+# one reads struct definitions.
+syn = { version = "3.0.3", default-features = false, features = [
+    "derive",
+    "parsing",
+    "printing",
+    "proc-macro",
+] }
+quote = "1.0.47"
+proc-macro2 = "1.0.107"
 
 [workspace.lints.rust]
 rust_2018_idioms = { level = "warn", priority = -1 }

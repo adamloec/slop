@@ -32,6 +32,18 @@ pub enum Transfer {
     Owning,
 }
 
+impl Transfer {
+    /// Whether these bytes mean the same thing outside this address space.
+    ///
+    /// `const` so that [`Reflect::TRANSFER`](crate::Reflect::TRANSFER) can be
+    /// folded through nested structs at compile time — a struct is blittable
+    /// only if every field is, and that has to be computable in a `const`
+    /// context to cost nothing.
+    pub const fn is_blittable(self) -> bool {
+        matches!(self, Self::Blittable)
+    }
+}
+
 /// A field within a struct.
 ///
 /// The offset is the load-bearing part: it is what a property panel, a

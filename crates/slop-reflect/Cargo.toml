@@ -6,8 +6,17 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# On by default because a type system whose front end is opt-in is a type system
+# people hand-write impls for, and a hand-written `Reflect` impl is the one way
+# to get the layout wrong. Available to switch off so a build that only consumes
+# runtime-registered types need not compile `syn`.
+default = ["derive"]
+derive = ["dep:slop-reflect-derive"]
+
 [dependencies]
 slop-core = { workspace = true }
+slop-reflect-derive = { workspace = true, optional = true }
 thiserror = { workspace = true }
 
 [lints]
