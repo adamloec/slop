@@ -153,6 +153,36 @@ impl Column {
         self.len += 1;
     }
 
+    /// Reserve one element and return a pointer to write it into.
+    ///
+    /// The migration path's destination: moving a component between archetypes
+    /// means relocating bytes, and there is no owned value to hand to
+    /// [`push`](Self::push) in between. Pairing this with
+    /// [`swap_remove_to`](Self::swap_remove_to) moves a component with no
+    /// intermediate buffer and no destructor run.
+    ///
+    /// # Safety
+    ///
+    /// The returned slot is **uninitialized**, and the column's length already
+    /// counts it. The caller must write a complete, valid value of this
+    /// column's component type before anything else touches the column —
+    /// including before it can be dropped, because the destructor will run over
+    /// this element.
+    ///
+    /// Violating that leaves invariant 2 broken, which is undefined behaviour
+    /// the next time the column is read, dropped, or grown.
+    pub unsafe fn push_uninit(&mut self) -> *mut u8 {
+        self.reserve_one();
+
+        // SAFETY: `reserve_one` guarantees element `len` is within the
+        // allocation. The element is uninitialized, which is exactly what this
+        // returns a pointer to and what the caller undertakes to fix.
+        let slot = unsafe { self.element_ptr(self.len) };
+        self.len += 1;
+
+        slot
+    }
+
     /// A pointer to element `index`, or `None` if out of bounds.
     pub fn get(&self, index: usize) -> Option<*const u8> {
         (index < self.len).then(|| {

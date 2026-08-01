@@ -37,6 +37,20 @@
 //! A type the editor cannot inspect and the serializer cannot write would be a
 //! component that silently vanishes from a save file.
 
+mod archetype;
 mod column;
+mod error;
+mod signature;
 
+pub use archetype::{Archetype, EntityTag, Row};
 pub use column::Column;
+pub use error::EcsError;
+pub use signature::Signature;
+
+/// An entity: an id, and nothing else.
+///
+/// `docs/PLAN.md` §4.1-C built `HandleAllocator` for exactly this — generation
+/// bookkeeping with no payload, because an entity's component data lives in
+/// archetype columns rather than in one array. A despawned entity's handle stops
+/// resolving immediately, rather than when its slot is next reused.
+pub type Entity = slop_core::Handle<EntityTag>;
