@@ -12,9 +12,13 @@
 //! execution — that assumption is the part which becomes unfixable later.
 
 mod alloc;
+mod arena;
 mod handle;
 mod slotmap;
+mod time;
 
 pub use alloc::HandleAllocator;
+pub use arena::FrameArena;
 pub use handle::{Handle, RawHandle};
 pub use slotmap::SlotMap;
+pub use time::{Clock, FixedTimestep};
