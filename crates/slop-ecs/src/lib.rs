@@ -55,7 +55,9 @@ mod column;
 mod command;
 mod error;
 mod query;
+mod schedule;
 mod signature;
+mod system;
 mod tick;
 mod world;
 
@@ -67,7 +69,9 @@ pub use query::{
     Access, Added, Changed, Mut, Or, Query, QueryData, QueryFilter, ReadOnlyQueryData, With,
     Without,
 };
+pub use schedule::{Schedule, Stage};
 pub use signature::Signature;
+pub use system::{System, WorldCell, conflicts};
 pub use tick::{ElementTicks, MAX_AGE, Tick, Ticks};
 pub use world::World;
 

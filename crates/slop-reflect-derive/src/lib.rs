@@ -101,6 +101,24 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         }
     };
 
+    // Whether the struct is exactly as big as its fields.
+    //
+    // If it is not, the difference is padding: bytes the compiler never writes,
+    // which hold whatever was in that memory before. Reading them is undefined,
+    // and `Column::as_bytes` reads the whole array — so a padded type must not
+    // claim to be blittable however well-behaved its fields are.
+    //
+    // Nested padding needs no separate check: a field that has any is itself not
+    // blittable, and every field must be blittable to reach here.
+    let no_padding = if field_types.is_empty() {
+        quote!(true)
+    } else {
+        quote! {
+            ::core::mem::size_of::<#name>()
+                == 0 #( + ::core::mem::size_of::<#field_types>() )*
+        }
+    };
+
     let repr_c = has_repr_c(input);
 
     Ok(quote! {
@@ -116,10 +134,13 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                 // `#[repr(Rust)]` leaves field order unspecified, so offsets
                 // are not reproducible across compilations and mean nothing to
                 // a separately compiled guest module. A destructor means the
-                // bytes own something a raw copy would alias.
+                // bytes own something a raw copy would alias. Padding means
+                // some of the bytes were never written and reading them is
+                // undefined — see `#no_padding` above.
                 if #repr_c
                     && !::core::mem::needs_drop::<#name>()
                     && #fields_blittable
+                    && #no_padding
                 {
                     ::slop_reflect::Transfer::Blittable
                 } else {

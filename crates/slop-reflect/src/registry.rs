@@ -181,6 +181,71 @@ impl TypeRegistry {
 
         missing
     }
+
+    /// Find registered structs that claim [`Transfer::Blittable`](crate::Transfer::Blittable) but have
+    /// padding.
+    ///
+    /// # Why this is a check rather than a guarantee
+    ///
+    /// `Blittable` means "these bytes mean something outside this address
+    /// space", and `Column::as_bytes` hands the whole array over on the
+    /// strength of it. Padding bytes are never written by anyone, so they hold
+    /// whatever was in that memory before: reading them is undefined, and
+    /// handing them to a guest module carries host memory through the wall
+    /// `docs/DESIGN.md` §2.3 exists to build.
+    ///
+    /// `#[derive(Reflect)]` refuses to mark a padded type blittable, so a Rust
+    /// component cannot get this wrong. [`TypeInfo::new`] is safe and takes the
+    /// author's word, which is the path a **guest-declared** type arrives by —
+    /// and a guest's type table is exactly the input that should not be trusted.
+    /// So this is the audit for that path, and a module loader should call it
+    /// alongside [`unresolved_fields`](Self::unresolved_fields) once the whole
+    /// table is in.
+    ///
+    /// Returns each offender's path with the number of unaccounted-for bytes.
+    /// Only structs whose every field type is registered can be checked; one
+    /// with an unresolved field is reported by `unresolved_fields` instead, and
+    /// is skipped here rather than guessed at.
+    ///
+
+    pub fn padded_blittable(&self) -> Vec<(&TypePath, usize)> {
+        let mut offenders = Vec::new();
+
+        for info in self.sorted() {
+            if !info.transfer().is_blittable() {
+                continue;
+            }
+
+            let fields = info.fields();
+            if fields.is_empty() {
+                continue;
+            }
+
+            // Every field's size must be known, or the sum means nothing.
+            let mut covered = 0;
+            let mut resolvable = true;
+            for field in fields {
+                match self.get(field.type_id) {
+                    Some(field_info) => covered += field_info.layout().size(),
+                    None => {
+                        resolvable = false;
+                        break;
+                    }
+                }
+            }
+
+            if !resolvable {
+                continue;
+            }
+
+            let declared = info.layout().size();
+            if declared > covered {
+                offenders.push((info.path(), declared - covered));
+            }
+        }
+
+        offenders
+    }
 }
 
 #[cfg(test)]

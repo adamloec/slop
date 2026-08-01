@@ -19,6 +19,7 @@ repository = "https://github.com/adamloec/slop"
 # hoisted here so every crate resolves to one version.
 slop-app = { path = "crates/slop-app" }
 slop-core = { path = "crates/slop-core" }
+slop-ecs = { path = "crates/slop-ecs" }
 slop-math = { path = "crates/slop-math" }
 slop-reflect = { path = "crates/slop-reflect" }
 slop-reflect-derive = { path = "crates/slop-reflect-derive" }
@@ -66,6 +67,18 @@ gpu-allocator = { version = "0.28.0", default-features = false, features = [
     "std",
     "vulkan",
 ] }
+
+# Work-stealing thread pool, behind `slop-core`'s `JobSystem` seam and named
+# nowhere else. DESIGN.md §2.5 calls the scheduler foundational, and a persistent
+# pool supporting scoped borrows needs one lifetime erasure that has no safe
+# formulation — which is what this crate exists to have already gotten right.
+# Writing our own would put that `unsafe` in the one crate CONVENTIONS.md §7
+# does not sanction it in.
+#
+# The containment rule is in `jobs.rs` and matters more than the version: no
+# `rayon` type appears in any public signature, so replacing it later — for
+# fibers, or for priority lanes, the two things it forecloses — is one file.
+rayon = "1.12.0"
 
 # Error enums for library crates. `anyhow` is for application boundaries only,
 # per CONVENTIONS.md §6.

@@ -10,7 +10,9 @@
 //! to get wrong. The derive takes none of them from the author, and these tests
 //! are what hold that line.
 
-use slop_reflect::{Reflect, Transfer, TypeId, TypeKind, TypeRegistry, register_builtins};
+use slop_reflect::{
+    FieldInfo, Reflect, Transfer, TypeId, TypeInfo, TypeKind, TypeRegistry, register_builtins,
+};
 
 #[derive(Reflect)]
 #[repr(C)]
@@ -150,6 +152,105 @@ fn one_owning_field_makes_the_whole_struct_owning() {
 }
 
 #[test]
+fn a_struct_with_interior_padding_is_never_blittable() {
+    // The bug this pins. `#[repr(C)]`, no destructor, both fields blittable —
+    // every question the check used to ask says yes. But `u8` followed by `u32`
+    // puts three bytes of padding between them, and the compiler never writes
+    // those bytes: they hold whatever was in that memory before.
+    //
+    // Two consequences, and the second is the reason this is not a nitpick.
+    // Reading them is undefined, which Miri reports the moment
+    // `Column::as_bytes` touches the array. And `Blittable` is precisely the
+    // flag deciding what may cross into a WASM guest, so the padding would
+    // carry three bytes of host memory through the wall §2.3 exists to build.
+    #[derive(Reflect)]
+    #[repr(C)]
+    struct Padded {
+        small: u8,
+        large: u32,
+    }
+
+    assert_eq!(size_of::<Padded>(), 8);
+    assert_eq!(
+        size_of::<u8>() + size_of::<u32>(),
+        5,
+        "three bytes unaccounted"
+    );
+    assert_eq!(Padded::TRANSFER, Transfer::Owning);
+}
+
+#[test]
+fn a_struct_with_trailing_padding_is_never_blittable() {
+    // The other shape: alignment rounds the size up past the last field.
+    #[derive(Reflect)]
+    #[repr(C)]
+    struct Trailing {
+        large: u32,
+        small: u8,
+    }
+
+    assert_eq!(size_of::<Trailing>(), 8);
+    assert_eq!(Trailing::TRANSFER, Transfer::Owning);
+}
+
+#[test]
+fn an_over_aligned_struct_is_never_blittable() {
+    // `align(16)` around one byte is fifteen bytes of padding.
+    #[derive(Reflect)]
+    #[repr(C, align(16))]
+    struct OverAligned {
+        tag: u8,
+    }
+
+    assert_eq!(size_of::<OverAligned>(), 16);
+    assert_eq!(OverAligned::TRANSFER, Transfer::Owning);
+}
+
+#[test]
+fn padding_inside_a_field_makes_the_outer_struct_owning() {
+    // Nested padding needs no separate check, and this is why: the inner struct
+    // is already `Owning`, and every field must be blittable for the outer one
+    // to qualify. Worth pinning because the size arithmetic alone would pass —
+    // `Outer` is exactly the sum of its fields.
+    #[derive(Reflect)]
+    #[repr(C)]
+    struct Inner {
+        small: u8,
+        large: u32,
+    }
+
+    #[derive(Reflect)]
+    #[repr(C)]
+    struct Outer {
+        inner: Inner,
+        value: u32,
+    }
+
+    assert_eq!(
+        size_of::<Outer>(),
+        size_of::<Inner>() + size_of::<u32>(),
+        "the outer struct itself has no padding"
+    );
+    assert_eq!(Inner::TRANSFER, Transfer::Owning);
+    assert_eq!(Outer::TRANSFER, Transfer::Owning);
+}
+
+#[test]
+fn a_tightly_packed_struct_is_still_blittable() {
+    // The check must not be so broad that it rejects what it should allow.
+    #[derive(Reflect)]
+    #[repr(C)]
+    struct Tight {
+        x: f32,
+        y: f32,
+        z: f32,
+    }
+
+    assert_eq!(size_of::<Tight>(), 12);
+    assert_eq!(Tight::TRANSFER, Transfer::Blittable);
+}
+
+#[test]
 fn a_default_repr_struct_is_never_blittable() {
     // Every field is blittable and there is no destructor, yet the answer is
     // still `Owning`: `#[repr(Rust)]` leaves field order unspecified, so the
@@ -282,4 +383,94 @@ fn type_info_is_stable_across_calls() {
     // Called once per registration, but a module reloaded twice must produce
     // the same description or `register` reports a spurious conflict.
     assert_eq!(Position::type_info(), Position::type_info());
+}
+
+#[test]
+fn the_registry_catches_a_hand_written_padded_blittable_claim() {
+    // The derive cannot get this wrong, but `TypeInfo::new` is safe and takes
+    // the author's word — which is the path a guest module's type table takes.
+    // This is the audit a module loader runs, and the input it is meant to
+    // distrust.
+    let mut registry = TypeRegistry::new();
+    slop_reflect::register_builtins(&mut registry).expect("fresh");
+
+    registry
+        .register(TypeInfo::new(
+            "guest::Padded",
+            std::alloc::Layout::from_size_align(8, 4).expect("valid"),
+            Transfer::Blittable,
+            TypeKind::Struct {
+                fields: vec![
+                    FieldInfo::new("small", 0, <u8 as Reflect>::type_id()),
+                    FieldInfo::new("large", 4, <u32 as Reflect>::type_id()),
+                ],
+            },
+        ))
+        .expect("fresh");
+
+    let offenders = registry.padded_blittable();
+
+    assert_eq!(offenders.len(), 1);
+    assert_eq!(offenders[0].0.as_str(), "guest::Padded");
+    assert_eq!(offenders[0].1, 3, "three bytes nobody writes");
+}
+
+#[test]
+fn the_registry_accepts_a_tightly_packed_blittable_claim() {
+    let mut registry = TypeRegistry::new();
+    slop_reflect::register_builtins(&mut registry).expect("fresh");
+
+    registry
+        .register(TypeInfo::new(
+            "guest::Tight",
+            std::alloc::Layout::from_size_align(8, 4).expect("valid"),
+            Transfer::Blittable,
+            TypeKind::Struct {
+                fields: vec![
+                    FieldInfo::new("x", 0, <u32 as Reflect>::type_id()),
+                    FieldInfo::new("y", 4, <u32 as Reflect>::type_id()),
+                ],
+            },
+        ))
+        .expect("fresh");
+
+    assert!(registry.padded_blittable().is_empty());
+}
+
+#[test]
+fn the_registry_skips_a_type_whose_fields_it_cannot_resolve() {
+    // Reported by `unresolved_fields` instead. Guessing at a size we do not
+    // have would turn a missing registration into a false padding report.
+    let mut registry = TypeRegistry::new();
+
+    registry
+        .register(TypeInfo::new(
+            "guest::Forward",
+            std::alloc::Layout::from_size_align(8, 4).expect("valid"),
+            Transfer::Blittable,
+            TypeKind::Struct {
+                fields: vec![FieldInfo::new(
+                    "later",
+                    0,
+                    TypeId::from_path("guest::NotYet"),
+                )],
+            },
+        ))
+        .expect("fresh");
+
+    assert!(registry.padded_blittable().is_empty());
+    assert_eq!(registry.unresolved_fields().len(), 1);
+}
+
+#[test]
+fn every_derived_component_in_the_workspace_style_passes_the_audit() {
+    // The derive's guarantee, restated as the property the audit checks — so
+    // the two cannot drift apart.
+    let mut registry = TypeRegistry::new();
+    slop_reflect::register_builtins(&mut registry).expect("fresh");
+    registry.register(Position::type_info()).expect("fresh");
+    registry.register(Health::type_info()).expect("fresh");
+    registry.register(Body::type_info()).expect("fresh");
+
+    assert!(registry.padded_blittable().is_empty());
 }

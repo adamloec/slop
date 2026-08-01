@@ -18,11 +18,33 @@ use crate::{TypeId, TypePath};
 /// same thing inside the guest's linear memory as they do in the host's heap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Transfer {
-    /// Plain bytes with no interior pointers, no padding that carries meaning,
-    /// and no `Drop`. A `Vec3` or a `u32`.
+    /// Plain bytes with **no padding**, no interior pointers, and no `Drop`.
+    /// A `Vec3` or a `u32`.
     ///
     /// Only these can cross to a guest as raw memory, and only these can be
     /// bulk-copied between archetypes with `memcpy`.
+    ///
+    /// # Padding is part of the claim, not a detail
+    ///
+    /// A `#[repr(C)] struct { a: u8, b: u32 }` is eight bytes holding five bytes
+    /// of fields. Nobody ever writes the other three, so they hold whatever was
+    /// in that memory before. Reading them is undefined, and `Column::as_bytes`
+    /// reads the whole array — so a padded type declared blittable both is
+    /// undefined behaviour and leaks host memory into a guest.
+    ///
+    /// Two paths reach this enum, and they are trusted differently:
+    ///
+    /// | Path | How the claim is checked |
+    /// |---|---|
+    /// | `#[derive(Reflect)]` | The derive refuses `Blittable` unless the struct is exactly as large as its fields. A Rust component cannot get this wrong. |
+    /// | [`TypeInfo::new`] by hand, or from a guest's type table | **Not checked here.** `TypeInfo::new` is safe and takes the author's word. |
+    ///
+    /// The second is audited by
+    /// [`TypeRegistry::padded_blittable`](crate::TypeRegistry::padded_blittable),
+    /// which a module loader should call once a guest's whole table is in. That
+    /// is the right place for it: a guest's declaration is the input that should
+    /// not be trusted, and it is not fully checkable until every field type it
+    /// references has been registered.
     Blittable,
     /// Owns something a raw copy would alias — a heap allocation, a file
     /// handle, an `Arc`. A `String` or a `Vec<T>`.
