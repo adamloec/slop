@@ -1,2 +1,5 @@
-# Clippy will not suggest anything requiring a newer toolchain than we pin.
-msrv = "1.97"
+# Deliberately minimal. `msrv` is NOT set here: clippy reads `rust-version` from
+# the workspace manifest, and duplicating it gives an MSRV bump two places to be
+# changed and one place to be forgotten.
+#
+# Add configuration here only when a lint genuinely needs tuning.

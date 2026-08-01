@@ -121,8 +121,19 @@ Two consequences worth carrying into M0:
 
 ## 3. Current state
 
-**M0 task A (workspace scaffolding) is done; no engine code yet.** The repository
-contains the design docs plus:
+**M0 tasks A and C are done: workspace scaffolding, and `slop-core` complete.**
+
+`slop-core` ships `Handle<T>` / `RawHandle`, `SlotMap<T>`, `HandleAllocator<T>`,
+`FrameArena`, `FixedTimestep` / `Clock`, `JobSystem` / `Scope`, and
+`diagnostics`. 68 tests, clippy clean under `-D warnings` in both feature
+configurations, rustdoc clean. Two implementations behind it are provisional and
+labelled as such — the job system's `std::thread::scope` backing, and
+`HandleAllocator`'s `Vec<bool>` liveness — both entirely behind their APIs.
+
+Remaining for M0: `slop-math` (B), `slop-rhi` (D), window and surface (E), first
+render (F), verification skeleton (G).
+
+The repository also contains:
 
 - `.gitattributes` — LF normalization (§2.13). Repo-local `core.autocrlf` set to
   `false` so the attributes file is the sole authority; the machine's global
@@ -136,9 +147,20 @@ contains the design docs plus:
   block carries a `// SAFETY:` comment" convention into a machine-checked rule
   rather than a review responsibility.
 - `.github/workflows/ci.yml` — Windows + Linux matrix running fmt, clippy,
-  build, and test with `-D warnings` and `fail-fast: false`.
+  build, and test with `-D warnings` and `fail-fast: false`. **Currently paused
+  to `workflow_dispatch` only** — see below.
+- `LICENSE-APACHE` and `LICENSE-MIT`, backing the `MIT OR Apache-2.0` every
+  manifest declares.
 
 All four crates pass fmt, clippy, build, and test locally on Windows.
+
+> **CI must come back before task E.** It was paused while the workspace was
+> empty, on the stated condition that it returns before the first
+> platform-conditional code lands. Task E — the `winit` window and Vulkan
+> surface — is exactly that point, and it is now also the first code with
+> dependencies that must build under both MSVC and GCC. `DESIGN.md` §2.13 exists
+> to stop "we'll port it later" from becoming the default, and this is the
+> commit where that starts being possible.
 
 **Design decisions locked** (`DESIGN.md` §2): target platforms, owned Vulkan RHI,
 WASM gameplay ABI, reflection-first, job-system-first, handles everywhere, fixed

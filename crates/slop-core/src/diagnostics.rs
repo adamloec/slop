@@ -2,8 +2,12 @@
 //!
 //! The engine emits through the [`tracing`] facade. Engine crates only ever
 //! *emit*; installing a subscriber is the application's decision, which is why
-//! [`init`] sits behind the optional `subscriber` feature rather than being
+//! `init` sits behind the optional `subscriber` feature rather than being
 //! always available.
+//!
+//! Note the deliberate absence of intra-doc links to `init` from anything not
+//! itself feature-gated: a link from ungated documentation into a gated item
+//! dangles in the default configuration, which `-D warnings` correctly rejects.
 //!
 //! `tracing` is re-exported here so dependent crates get the macros without
 //! adding their own dependency edge, and so the whole engine is guaranteed to
@@ -35,8 +39,8 @@
 /// and so the engine cannot end up split across two versions of it.
 pub use tracing;
 
-/// Environment variable read by [`init`] to set log filtering, using the
-/// standard `tracing-subscriber` syntax — `slop_rhi=debug,warn`.
+/// Environment variable read by `init` to set log filtering, using the standard
+/// `tracing-subscriber` syntax — `slop_rhi=debug,warn`.
 pub const FILTER_ENV: &str = "SLOP_LOG";
 
 /// Default filter when [`FILTER_ENV`] is unset.

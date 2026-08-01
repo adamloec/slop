@@ -70,3 +70,17 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+      # Broken intra-doc links only surface here, and only workspace-wide —
+      # a per-crate `cargo doc` will not catch a link into a crate that has not
+      # defined the target type yet.
+      - name: Docs
+        run: cargo doc --workspace --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      # Default features are what dependent crates get. Building only
+      # --all-features would let a cfg-gated compile error sit undetected in the
+      # configuration everything actually uses.
+      - name: Check default features
+        run: cargo clippy --workspace --all-targets

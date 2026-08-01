@@ -1,15 +1,32 @@
 //! Foundational primitives shared by every other Slop crate.
 //!
-//! Arenas, generational-index slotmaps and handles (`docs/DESIGN.md` §2.6), string
-//! interning, the job system (§2.5), time and frame pacing, and tracing and
-//! profiling markers. See `docs/DESIGN.md` §4.
+//! Identity without pointers, memory without per-frame allocation, and time
+//! without wall-clock nondeterminism. Nothing here knows what a mesh, an entity,
+//! or a GPU is. See `docs/DESIGN.md` §4 and `docs/slop-core/README.md`.
 //!
-//! # Job system
+//! | Module | Owns |
+//! |---|---|
+//! | [`handle`](Handle) | Generational handles — `docs/DESIGN.md` §2.6 |
+//! | [`SlotMap`] | Generational storage that owns its values |
+//! | [`HandleAllocator`] | Generation bookkeeping with no payload, for the ECS |
+//! | [`FrameArena`] | Fixed-capacity bump allocator, reset per frame |
+//! | [`FixedTimestep`] | Fixed-step accumulation — `docs/DESIGN.md` §2.7 |
+//! | [`JobSystem`] | Task dispatch — `docs/DESIGN.md` §2.5 |
+//! | [`diagnostics`] | Structured logging — `docs/CONVENTIONS.md` §13 |
 //!
-//! M0 lands the scheduler's *API shape* backed by a plain thread pool; the
-//! work-stealing implementation follows in M1, once ECS system scheduling
-//! supplies real requirements. The API must not assume single-threaded
-//! execution — that assumption is the part which becomes unfixable later.
+//! # Two implementations here are provisional
+//!
+//! Both are `docs/DESIGN.md` §1.2 principle 6 applied deliberately — the seam is
+//! final, the implementation behind it is not. Callers do not change when either
+//! is replaced.
+//!
+//! - **[`JobSystem`] is backed by [`std::thread::scope`]**, which spawns OS
+//!   threads per call. The work-stealing pool lands at M1, once ECS system
+//!   scheduling supplies real requirements. Do not optimize against the current
+//!   dispatch cost.
+//! - **[`HandleAllocator`] tracks liveness in a `Vec<bool>`.** A bitset is
+//!   eight times denser and live-entity iteration is a hot ECS path, but that is
+//!   entirely behind the API.
 
 mod alloc;
 mod arena;
@@ -18,7 +35,14 @@ mod jobs;
 mod slotmap;
 mod time;
 
+/// Structured logging and profiling markers.
+///
+/// A public module rather than flat re-exports, unlike everything else in this
+/// crate: `diagnostics::init()` reads better than a bare `init()`, and the
+/// module namespaces a `tracing` re-export alongside it.
 pub mod diagnostics;
+
+pub mod prelude;
 
 pub use alloc::HandleAllocator;
 pub use arena::FrameArena;

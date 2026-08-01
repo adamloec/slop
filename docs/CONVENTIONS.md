@@ -180,8 +180,16 @@ Name the concept and give it a file.
 
 ### 2.3 The standard crate skeleton
 
-Every crate has the same shape. Only three files are fixed; the rest is named
-for whatever that crate owns.
+Every crate has the same shape. Three filenames are reserved — when a crate
+needs one of these things, it goes in the file with that name, never somewhere
+else — and the rest is named for whatever the crate owns.
+
+Reserved does not mean mandatory. `lib.rs` always exists; `prelude.rs` appears
+once a crate has a public surface worth one; `error.rs` appears once a crate has
+a fallible operation. Creating either empty, in anticipation, is worse than not
+having it: an empty `error.rs` invites the first error type to be shoved
+somewhere convenient instead, and an empty prelude teaches callers that the
+prelude is not worth importing.
 
 ```
 crates/slop-<name>/
