@@ -33,6 +33,7 @@
 use slop_core::{FxHashMap, HandleAllocator};
 use slop_reflect::{Reflect, TypeId, TypeInfo, TypeRegistry};
 
+use crate::query::{Query, QueryData, ReadOnlyQueryData};
 use crate::{Archetype, EcsError, Entity, EntityTag, Row, Signature};
 
 /// Where an entity's components are.
@@ -120,6 +121,48 @@ impl World {
     /// Every archetype, for queries to walk.
     pub fn archetypes(&self) -> &[Archetype] {
         &self.archetypes
+    }
+
+    /// Iterate every entity holding the components `D` names, reading only.
+    ///
+    /// ```ignore
+    /// for (entity, position) in world.query::<(Entity, &Position)>() {
+    ///     println!("{entity:?} is at {position:?}");
+    /// }
+    /// ```
+    ///
+    /// Takes `&self`, so several read-only queries may be live at once. `D` must
+    /// be [`ReadOnlyQueryData`], which `&mut T` deliberately is not — asking for
+    /// mutation here fails to compile rather than at runtime.
+    ///
+    /// # Panics
+    ///
+    /// If `D` names one component type twice with mutable access, which is
+    /// impossible here since mutable access does not typecheck.
+    pub fn query<D: ReadOnlyQueryData>(&self) -> Query<'_, D> {
+        Query::new(&self.archetypes)
+    }
+
+    /// Iterate every entity holding the components `D` names, with mutation.
+    ///
+    /// ```ignore
+    /// for (position, velocity) in world.query_mut::<(&mut Position, &Velocity)>() {
+    ///     position.x += velocity.dx;
+    /// }
+    /// ```
+    ///
+    /// Takes `&mut self`, which is what makes the yielded `&mut` references
+    /// sound: no other query, no `get`, and no structural change can be in
+    /// flight while this iterates.
+    ///
+    /// # Panics
+    ///
+    /// If `D` names one component type twice and either access is mutable —
+    /// `(&mut Position, &Position)` would hand out an aliasing pair. That is a
+    /// property of the code as written rather than of the data, so it fails the
+    /// first time the line runs.
+    pub fn query_mut<D: QueryData>(&mut self) -> Query<'_, D> {
+        Query::new(&self.archetypes)
     }
 
     /// Create an entity with no components.

@@ -183,6 +183,16 @@ impl Column {
         slot
     }
 
+    /// A pointer to element zero.
+    ///
+    /// What a query resolves once per archetype and then strides over, so that
+    /// the per-row cost is one add rather than a binary search through the
+    /// signature. Dangling but aligned for an empty column, which is never
+    /// indexed because iteration is bounded by [`len`](Self::len).
+    pub fn as_ptr(&self) -> *mut u8 {
+        self.data.as_ptr()
+    }
+
     /// A pointer to element `index`, or `None` if out of bounds.
     pub fn get(&self, index: usize) -> Option<*const u8> {
         (index < self.len).then(|| {

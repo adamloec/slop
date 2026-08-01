@@ -40,12 +40,14 @@
 mod archetype;
 mod column;
 mod error;
+mod query;
 mod signature;
 mod world;
 
 pub use archetype::{Archetype, EntityTag, Row};
 pub use column::Column;
 pub use error::EcsError;
+pub use query::{Access, Query, QueryData, ReadOnlyQueryData};
 pub use signature::Signature;
 pub use world::World;
 
