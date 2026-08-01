@@ -1,311 +1,519 @@
 # Slop Engine — Code Conventions
 
 **Status:** Draft — pre-implementation
-**Last updated:** 2026-07-31
+**Last updated:** 2026-08-01
 
-Companion to `DESIGN.md` (architecture) and `PLAN.md` (task breakdown). Those two
-answer *what* we are building and *in what order*. This file answers *how the
-code is written*, and it is the file to check a diff against.
+**`DESIGN.md` what, `PLAN.md` when, this file how.** Check diffs against it.
 
-Two ground rules for the document itself:
-
-- **Every rule states its reason.** A convention nobody understands is a
-  convention that gets violated the first time it's inconvenient. Where a rule
-  exists to protect a locked decision, it cites the section.
-- **Prefer mechanical enforcement over documented intent.** A rule a lint can
-  check is worth more than a paragraph here. Where a rule *can* be a lint and
-  currently isn't, that is noted as a gap to close, not a rule to trust.
+Rules state their reason in one line and then show it. Where a rule could be a
+lint and is not yet, it is marked **[gap]** — a rule enforced by prose is a rule
+that decays.
 
 ---
 
 ## 1. Crate and module layout
 
-**Crates depend only downward**, in the order listed in `DESIGN.md` §4. No
-cycles, and no upward reach — `slop-ecs` never knows `slop-render` exists. If a
-lower crate seems to need something from a higher one, the dependency is
-inverted: the lower crate defines a trait or data type and the higher one
-supplies it.
+Crates depend only downward (`DESIGN.md` §4). No cycles, no upward reach. Use
+`foo.rs` beside a `foo/` directory; never `mod.rs` — it makes every file in the
+editor's file switcher read `mod.rs`.
 
-**One concept per module.** Use `foo.rs` alongside a `foo/` directory for
-submodules; do not use `mod.rs`. It makes files findable by name in an editor,
-which `mod.rs` actively defeats.
+```
+crates/slop-ecs/src/
+    lib.rs
+    prelude.rs
+    archetype.rs          ← the concept
+    archetype/
+        column.rs         ← its parts
+        table.rs
+    query.rs
+```
 
-**Keep the public surface small and deliberate.** `unreachable_pub` is on, so
-anything `pub` is genuinely part of the crate's API. Re-export the intended
-surface from the crate root with `pub use` and keep the internal module tree free
-to change.
+Invert rather than reach upward:
 
-**Each consumer-facing crate exposes a `prelude`** containing the handful of
-types a caller cannot avoid. Preludes contain types and traits, never functions,
-and never grow to "everything in the crate."
+```rust
+// ✗ slop-ecs must not know slop-render exists
+use slop_render::Mesh;
+pub fn extract_meshes(&self) -> Vec<Mesh> { .. }
+
+// ✓ the lower crate defines the contract, the higher one satisfies it
+pub trait Component: 'static + Send + Sync {}
+```
+
+`unreachable_pub` is on, so `pub` means genuinely public. Each consumer-facing
+crate exposes a prelude of types the caller cannot avoid — types and traits only,
+never functions, and never "everything":
+
+```rust
+// slop-ecs/src/prelude.rs
+pub use crate::{Component, Entity, Query, World};
+```
 
 ## 2. Naming
 
-Standard Rust naming (RFC 430) with three additions:
+Standard Rust naming (RFC 430), plus: **name for the data, not the role.** If no
+precise name suggests itself, the type is usually doing two things.
 
-**Name for the data, not for the role.** `Manager`, `Handler`, `Helper`,
-`Util`, `Info`, `Data`, and `Object` are banned as type-name suffixes. They carry
-no information — `TextureManager` tells you nothing that `TextureCache` or
-`TextureRegistry` doesn't tell you better. If no precise name suggests itself,
-that is usually evidence the type is doing more than one thing.
+```rust
+// ✗ role-shaped — carries no information
+struct TextureManager;
+struct AssetHelper;
+struct RenderData;
+struct SceneUtils;
 
-**No `get_` prefix on accessors.** `transform()`, not `get_transform()`. Reserve
-`get` for the fallible-lookup shape that returns `Option`, matching the standard
-library's `slice::get`.
+// ✓ named for what it holds
+struct TextureCache;
+struct AssetRegistry;
+struct FrameSnapshot;
+```
 
-**Names of things that cross the ABI are permanent.** Anything appearing in
-`slop-abi`'s WIT definitions (`DESIGN.md` §7) is versioned public contract.
-Renaming it later is a breaking change for every third party. Spend the extra
-minute up front.
+`get` is reserved for fallible lookup, matching `slice::get`:
+
+```rust
+// ✗
+fn get_transform(&self) -> &Transform;
+
+// ✓ plain accessor
+fn transform(&self) -> &Transform;
+
+// ✓ `get` earns its name
+fn get(&self, handle: Handle<Node>) -> Option<&Node>;
+```
+
+Names in `slop-abi`'s WIT are permanent public contract (`DESIGN.md` §7).
+Renaming one later breaks every third party.
 
 ## 3. Data-oriented rules
 
-These implement `DESIGN.md` §1.2 principle 2 and are the ones most likely to be
-violated by writing ordinary idiomatic Rust without thinking.
+Implements `DESIGN.md` §1.2 principle 2. These are the rules most easily broken
+by writing perfectly ordinary idiomatic Rust.
 
-**Handles, never pointers, for engine-owned resources** (§2.6). No `Rc`, no
-`Arc<Mutex<...>>`, and no `RefCell` inside engine data structures. `Arc` is
-acceptable for genuinely shared immutable payloads crossing thread boundaries —
-a loaded asset's bytes, for example — but never as a way to model an object graph.
+**Handles, never pointers, for engine-owned data** (§2.6):
 
-**No trait objects in per-frame paths.** `dyn Trait` costs an indirect call and
-blocks inlining. It is fine in tooling, the editor, and asset import, where the
-call count is small and flexibility is worth more. In simulation and rendering
-inner loops, use enums or generics.
+```rust
+// ✗ refcount churn, runtime borrow panics, no serialization path
+struct Node {
+    parent: Option<Rc<RefCell<Node>>>,
+    children: Vec<Rc<RefCell<Node>>>,
+}
 
-**No `HashMap` in per-frame paths.** Hashing plus a cache miss per lookup, every
-frame, is the exact cost the ECS exists to avoid. Use dense arrays indexed by
-handle. `HashMap` is fine at load time, in tooling, and for one-off registries.
+// ✓ handles into a slotmap; serializes with no pointer fixups
+struct Node {
+    parent: Option<Handle<Node>>,
+    children: Vec<Handle<Node>>,
+}
+```
 
-**Prefer `Vec<T>` and slices to anything graph-shaped.** If a linked or tree
-structure seems necessary, model it as indices into a `Vec` — which is also how
-it survives serialization (§2.4) without pointer fixups.
+`Arc` is fine for shared *immutable* payloads crossing threads — a loaded asset's
+bytes — never to model a graph.
 
-**Structure of arrays where it is swept, array of structures where it is
-looked up.** Do not apply SoA reflexively; apply it where a hot loop reads one
-field across many entities.
+**No `HashMap` in per-frame paths.** Hash plus a cache miss per entity, every
+frame, is the cost the ECS exists to delete.
+
+```rust
+// ✗
+for e in &visible {
+    let t = self.transforms.get(&e).unwrap();
+}
+
+// ✓ dense columns, linear scan
+for (t, m) in transforms.iter().zip(meshes.iter()) { .. }
+```
+
+**No `dyn Trait` in per-frame paths** — indirect call, no inlining. Fine in
+tooling, the editor, and asset import.
+
+```rust
+// ✗ virtual call per item, every frame
+passes: Vec<Box<dyn RenderPass>>,
+
+// ✓ enum dispatch
+enum Pass { Shadow(ShadowPass), Forward(ForwardPass), Post(PostPass) }
+```
+
+**SoA where it is swept, AoS where it is looked up.** Do not apply SoA
+reflexively.
+
+```rust
+// ✗ culling reads only `pos` but drags 36 bytes into cache per particle
+struct Particle { pos: Vec3, vel: Vec3, color: [u8; 4], lifetime: f32 }
+particles: Vec<Particle>,
+
+// ✓ the swept field is contiguous
+struct Particles {
+    pos: Vec<Vec3>,
+    vel: Vec<Vec3>,
+    color: Vec<[u8; 4]>,
+    lifetime: Vec<f32>,
+}
+```
 
 ## 4. API design
 
-**Explicit over implicit** (§1.2 principle 3). An API that hides a GPU
-allocation, a synchronization point, or a file read behind an innocuous-looking
-call is a bug factory. Name the cost in the function name where it exists.
-
 **No hidden global state.** No singletons, no `static mut`, no implicit "current
-device" or "current world." Context is passed explicitly. This is what makes
-headless mode, multiple worlds in the editor, and deterministic replay (§5)
-possible at all — each is impossible the moment a global exists.
+device." Globals are what make headless mode, multiple editor worlds, and
+deterministic replay (§5) impossible.
 
-**Prefer `&mut self` to interior mutability.** If a type needs `RefCell` to
-present an immutable API, the API is wrong. The borrow checker is telling you
-about real aliasing, and hiding it just moves the failure to runtime.
+```rust
+// ✗
+static DEVICE: OnceLock<Device> = OnceLock::new();
+pub fn create_buffer(size: u64) -> Buffer {
+    DEVICE.get().unwrap().alloc(size)
+}
 
-**Bulk over per-item at every boundary that has a crossing cost.** This is
-§2.3's whole thesis and it is not limited to WASM: it applies to GPU uploads,
-asset loads, and job dispatch equally. Prefer `fn update_all(&mut self,
-items: &[T])` to calling `update` in a loop.
+// ✓ context is a parameter
+pub fn create_buffer(device: &Device, size: u64) -> Result<Buffer, RhiError>;
+```
 
-**Builders for anything with more than about four construction parameters,**
-especially in `slop-rhi`, where this matches the shape of the underlying Vulkan
-structs and keeps call sites readable.
+**Name the cost** (§1.2 principle 3). An innocuous call that hides an allocation,
+a stall, or a file read is a bug factory.
+
+```rust
+// ✗ hides a disk read, a GPU upload, and a stall
+fn texture(&self, path: &str) -> Texture;
+
+// ✓
+fn load_texture_blocking(&mut self, path: &Path)
+    -> Result<Handle<Texture>, AssetError>;
+```
+
+**Bulk over per-item at any boundary with a crossing cost** — §2.3's thesis, and
+it applies equally to GPU uploads and job dispatch.
+
+```rust
+// ✗ a million crossings per frame; this is the failure mode §2.3 exists to avoid
+for e in entities {
+    host.set_transform(e, t);
+}
+
+// ✓ one crossing, columnar
+fn write_transforms(&mut self, entities: &[Entity], transforms: &[Transform]);
+```
+
+**Prefer `&mut self` to interior mutability.** Needing `RefCell` to present an
+immutable API means the API is wrong; the borrow checker is describing real
+aliasing.
 
 ## 5. Errors and panics
 
-Per `PLAN.md` §7:
+`thiserror` in libraries, `anyhow` only at application boundaries. Errors are
+typed enums — a caller must be able to match and respond.
 
-| Context | Mechanism |
-|---|---|
-| Library crates | `thiserror`, concrete error enums |
-| Application boundaries only | `anyhow` |
-| Programmer error / broken invariant | `panic!` |
-| Expensive invariant checks | `debug_assert!` |
+```rust
+#[derive(Debug, thiserror::Error)]
+pub enum RhiError {
+    #[error("no Vulkan device supports the required feature set")]
+    NoSuitableDevice,
+    #[error("swapchain out of date; recreate before the next frame")]
+    SwapchainOutOfDate,
+    #[error("device lost during {op}")]
+    DeviceLost { op: &'static str },
+}
+```
 
-**Errors are typed enums, never strings.** A caller must be able to match on the
-failure and respond differently. Stringly-typed errors force callers to either
-ignore the distinction or parse prose.
+**Panic only for bugs, never for input.** §2.3 loads untrusted third-party WASM;
+a malformed asset must not be able to take the process down.
 
-**No bare `unwrap()` in library code.** Where an invariant genuinely guarantees
-success, use `expect()` with a message that states the invariant — "swapchain is
-recreated before use" — so a violation reports the broken assumption rather than
-a line number. `unwrap()` is fine in tests and examples.
+```rust
+// ✗ untrusted bytes must not panic
+pub fn load(bytes: &[u8]) -> Module {
+    parse(bytes).expect("valid module")
+}
 
-**Panic only for bugs, never for input.** A malformed asset, a missing file, or
-a WASM module that misbehaves is expected input and returns `Result`. A violated
-internal invariant is a bug and panics. Getting this backwards is what makes an
-engine feel fragile: §2.3 explicitly loads untrusted third-party code, and it
-must not be able to take the process down through the error path.
+// ✓
+pub fn load(bytes: &[u8]) -> Result<Module, ModuleError>;
+```
+
+**No bare `unwrap()` in library code.** `expect` states the invariant, so a
+violation reports the broken assumption instead of a line number.
+
+```rust
+// ✗
+let sc = self.swapchain.unwrap();
+
+// ✓
+let sc = self.swapchain.expect("swapchain recreated before frame begin");
+```
+
+Use `debug_assert!` for invariants too expensive to check in shipping builds.
 
 ## 6. `unsafe`
 
-**Confined to `slop-rhi` and the allocator** (`PLAN.md` §7). Any `unsafe`
-appearing elsewhere is a design discussion, not a code review comment.
+Confined to `slop-rhi` and the allocator. `unsafe` elsewhere is a design
+discussion, not a review comment. Every block carries `// SAFETY:` stating the
+invariant that makes it sound — enforced by
+`clippy::undocumented_unsafe_blocks`, so it fails the build, not review.
 
-**Every `unsafe` block carries a `// SAFETY:` comment** stating the invariant
-that makes it sound — not what the code does. This is enforced by
-`clippy::undocumented_unsafe_blocks`, already enabled workspace-wide, so it is a
-build failure rather than a review responsibility.
+```rust
+// ✗ restates the code
+// SAFETY: creates a slice from a raw pointer
+let data = unsafe { slice::from_raw_parts(ptr, len) };
 
-**Wrap at the lowest level and expose a safe API.** The unsafe surface should be
-a thin layer directly over `ash`, not a family of unsafe functions propagating
-outward through the crate.
+// ✓ states why it is sound
+// SAFETY: `ptr` comes from `allocation.mapped_ptr()`, which stays valid for the
+// lifetime of `self.allocation`, and is at least `len` bytes. The transfer that
+// last wrote this range completed before the timeline wait above returned, so no
+// GPU write aliases this read.
+let data = unsafe { slice::from_raw_parts(ptr, len) };
+```
 
-**No `unsafe` for performance without a benchmark.** "This is probably faster"
-is not a justification. `DESIGN.md` §5's frame-budget harness is the arbiter.
+Wrap at the lowest level and expose a safe API — the unsafe surface is a thin
+layer over `ash`, not a family of unsafe functions propagating outward. No
+`unsafe` for performance without a benchmark; §5's budget harness arbitrates.
 
 ## 7. Allocation and performance
 
-**No heap allocation in per-frame paths.** Use `slop-core`'s frame arena for
-per-frame scratch, and reset it once per frame rather than freeing individually.
+No heap allocation in per-frame paths — use the frame arena and reset once per
+frame.
 
-**Reserve capacity up front** where the size is known or bounded. Growth
-reallocation mid-frame is both a stall and a source of frame-time variance,
-which is worse than a slightly higher mean.
+```rust
+// ✗ allocates and frees every frame
+let visible: Vec<Handle<Mesh>> = cull(&scene, &frustum);
 
-**Measure before optimizing, and measure with the budget harness** (§5), not by
-eyeballing. Performance claims in commit messages should cite a number.
+// ✓ bump-allocated, freed wholesale at frame end
+let visible = frame.arena.alloc_slice_from_iter(cull(&scene, &frustum));
+```
 
-**Instrument subsystem boundaries with profiling markers** as they are written.
-Retrofitting instrumentation is how you end up with an engine that is slow in a
-way nobody can localize.
+Reserve when the size is known — mid-frame reallocation is a stall and a source
+of frame-time *variance*, which is worse than a higher mean.
+
+```rust
+let mut draws = Vec::with_capacity(snapshot.mesh_count());
+```
+
+Measure with the §5 budget harness, not by eye. Performance claims in commit
+messages cite a number. Instrument subsystem boundaries as they are written.
 
 ## 8. Concurrency
 
-**Use the job system, never raw threads** (§2.5). A subsystem spawning its own
+Use the job system, never raw threads (§2.5) — a subsystem spawning its own
 threads is invisible to the scheduler and competes with it for cores.
 
-**Prefer partitioning to locking.** The archetype design (§2.10) exists partly so
-disjoint tables go to disjoint threads with no coordination at all. A lock in a
-simulation or rendering inner loop is a design failure; locks are fine in asset
-loading and tooling.
+```rust
+// ✗
+std::thread::spawn(move || bake_lighting(&scene));
 
-**The renderer never reads live simulation state** (§2.9). It consumes the
-immutable snapshot. This is the single most load-bearing invariant in the engine
-— pipelining, replay, and interpolation all evaporate the moment one subsystem
-reaches across — and it is currently enforced only by discipline. Encoding it in
-the type system, so the renderer is structurally incapable of holding a reference
-to the live world, is worth doing when the snapshot type lands.
+// ✓
+jobs.spawn(move || bake_lighting(&scene));
+```
 
-**Structural ECS changes go through command buffers** applied at explicit sync
+**Prefer partitioning to locking.** Disjoint archetypes go to disjoint threads
+with no coordination (§2.10). A lock in a sim or render inner loop is a design
+failure; locks are fine in asset loading and tooling.
+
+**The renderer never reads live simulation state** (§2.9) — the most load-bearing
+invariant in the engine. Pipelining, replay, and interpolation all evaporate the
+moment one subsystem reaches across.
+
+```rust
+// ✗
+fn render(&mut self, world: &World);
+
+// ✓ immutable snapshot plus interpolation alpha
+fn render(&mut self, snapshot: &RenderSnapshot, alpha: f32);
+```
+
+**[gap]** This is enforced only by discipline today. When the snapshot type
+lands, make it structurally impossible for the renderer to hold a `&World`.
+
+Structural ECS changes go through command buffers applied at explicit sync
 points, never immediately (§2.10).
 
 ## 9. Platform portability
 
-Every rule here maps to a row of `DESIGN.md` §2.13's trap table.
+Each rule maps to a row of `DESIGN.md` §2.13's trap table.
 
-- **`PathBuf` / `Path::join` exclusively.** No `\` or `/` literals in paths, no
-  string concatenation to build one.
-- **Asset paths are lowercase, always**, enforced at cook time. This is the most
-  common real-world Windows → Linux breakage.
-- **Never write `#[cfg(windows)]` without writing the other arm in the same
-  change.** A `cfg` with one arm implemented is a Linux build break scheduled for
-  whenever someone next builds on Linux.
-- **Never hand-roll platform surface or window code.** `winit`, `ash-window`,
-  and `raw-window-handle` exist precisely to absorb this.
-- **Text files are LF**, governed by `.gitattributes`. Repo-local
-  `core.autocrlf` is `false` so that file is the sole authority.
+```rust
+// ✗ breaks on Linux, and silently
+let p = format!("{}/textures/{}", root, name);
+
+// ✓
+let p = root.join("textures").join(name);
+```
+
+Never write one arm of a `cfg` without the other in the same change — a
+half-written `cfg` is a Linux break scheduled for later.
+
+```rust
+// ✗
+#[cfg(windows)]
+fn create_surface(..) -> Surface { .. }
+// (no unix arm — compiles here, fails there)
+
+// ✓ better still: no cfg at all
+ash_window::create_surface(&entry, &instance, display_handle, window_handle, None)
+```
+
+Asset paths are lowercase, enforced at cook time. Text files are LF, governed by
+`.gitattributes`, with repo-local `core.autocrlf = false`.
 
 ## 10. Documentation
 
-**Every public item is documented.** Not yet lint-enforced; `missing_docs` should
-be turned on per-crate as each crate's API stabilizes.
-
-**Module-level `//!` docs explain why the module exists** and how it fits the
-architecture, with a `DESIGN.md` section reference where one applies. The
-existing stub `lib.rs` files show the intended register.
+Module-level `//!` explains why the module exists and cites the design section.
+Every public item documented — **[gap]**, enable `missing_docs` per crate as each
+API stabilizes.
 
 **Comment why, not what.** The code says what. Comments carry the reason, the
-constraint, and — most valuably — the alternative that was rejected and why.
-This project's design docs already do this well; the code should match.
+constraint, and most valuably the rejected alternative.
 
-**No commented-out code.** Git remembers.
+```rust
+// ✗
+// increment the generation
+slot.generation = slot.generation.saturating_add(1);
+
+// ✓
+// Bump on free rather than on allocate: a handle captured before this call must
+// stop resolving immediately, even if the slot is never handed out again.
+slot.generation = slot.generation.saturating_add(1);
+```
+
+No commented-out code. Git remembers.
 
 ## 11. Testing
 
-Implements `DESIGN.md` §5, which treats verification as a subsystem rather than
-polish. The premise: code can be produced faster than it can be reviewed line by
-line, so automated truth is the only thing keeping subtly wrong architecture out.
+Implements §5. Unit tests colocated in `#[cfg(test)] mod tests`; integration and
+golden-image tests in `tests/`.
 
-- **Unit tests colocated** in `#[cfg(test)] mod tests`; integration and
-  golden-image tests in `tests/`.
-- **Test names state the property**, not the function:
-  `stale_handle_does_not_resolve_after_slot_reuse`, not `test_handle`.
-- **No test may depend on wall-clock time, thread scheduling, or unseeded RNG.**
-  A flaky test is worse than no test — it trains you to ignore red.
-- **Every reflected type round-trips automatically** once §2.4 lands. This is
-  generated from the type registry, not written per type.
-- **Golden images compare by exact match on lavapipe** in CI, with a
-  real-hardware lane run separately. See `PLAN.md` §4.1-G.
-- **Bugs get a regression test**, written before the fix, so the test is
-  demonstrated to fail first.
+```rust
+// ✗ names the function
+#[test]
+fn test_handle() { .. }
+
+// ✓ names the property
+#[test]
+fn stale_handle_does_not_resolve_after_slot_reuse() {
+    let mut map = SlotMap::new();
+    let a = map.insert(Node::default());
+    map.remove(a);
+    let b = map.insert(Node::default());
+
+    assert_eq!(a.index(), b.index(), "slot should be reused");
+    assert!(map.get(a).is_none(), "stale handle must not resolve");
+}
+```
+
+No test may depend on wall-clock time, thread scheduling, or unseeded RNG — a
+flaky test trains you to ignore red.
+
+```rust
+// ✗
+let start = Instant::now();
+assert!(start.elapsed() < Duration::from_millis(5));
+
+// ✓
+let mut rng = Rng::seed_from_u64(0x5109);
+```
+
+Bugs get a regression test written *before* the fix, so it is demonstrated to
+fail first. Reflected types round-trip automatically once §2.4 lands — generated
+from the registry, not written per type.
 
 ## 12. Logging and diagnostics
 
-**`tracing`, structured, never `println!`.** Log *fields*, not interpolated
-prose: `warn!(asset = %path, "cook failed")` rather than baking the path into the
-message. Structured records can be filtered and aggregated; sentences cannot.
+`tracing`, structured, never `println!`. Log fields, not prose — records can be
+filtered and aggregated; sentences cannot.
 
-**Spans around subsystem work**, so timing and causality are recoverable from a
-log alone. Spans are also what make the §5 frame-budget harness and the profiler
-integration read naturally rather than requiring parallel instrumentation.
+```rust
+// ✗
+info!("loaded {} in {}ms", path.display(), ms);
 
-**Levels mean specific things**, or they mean nothing:
+// ✓
+info!(asset = %path.display(), duration_ms = ms, "asset loaded");
+```
+
+**Log the decision, not just the outcome.** The first bug reports arrive as log
+files from machines you cannot inspect.
+
+```rust
+// ✗
+info!("device initialized");
+
+// ✓ diagnosable by a stranger
+info!(
+    device = %props.device_name,
+    kind = ?props.device_type,
+    vram_mb = vram >> 20,
+    "selected physical device"
+);
+```
 
 | Level | Use for |
 |---|---|
-| `error` | The operation failed and the user loses something |
-| `warn` | Recovered, but a human should know — asset fell back, feature unavailable |
-| `info` | Lifecycle events a user would want: device selected, module loaded |
-| `debug` | Engine-developer detail, off by default in shipping |
+| `error` | Failed, and the user loses something |
+| `warn` | Recovered, but a human should know |
+| `info` | Lifecycle: device selected, module loaded |
+| `debug` | Engine-developer detail, off in shipping |
 | `trace` | Per-frame or per-item volume |
 
-**Nothing above `debug` fires per-frame.** A log line in the frame loop is a
-performance bug and it drowns the signal in the log.
+Nothing above `debug` fires per frame — a log line in the frame loop is a perf
+bug that also drowns the signal. Use a span:
 
-**Log the decision, not just the outcome** — "selected RTX 5090 (discrete) over
-Intel UHD 770 (integrated)" is diagnosable from a user's log file; "device
-initialized" is not. This applies especially to `slop-rhi` bring-up, where the
-first bug reports will arrive as log files from machines we cannot inspect.
+```rust
+let _span = trace_span!("cull", entities = scene.len()).entered();
+```
 
 ## 13. Dependencies
 
-**Adding a dependency requires justifying it against `DESIGN.md` §3's
-write/take line.** The question is not "does this crate work" but "does this
-subsystem define engine behavior." If it does, we write it.
+Adding one requires justifying it against `DESIGN.md` §3's write/take line. The
+question is not "does this crate work" but "does this subsystem define engine
+behavior." If it does, we write it.
 
-- **Add with `cargo add`**, never by hand-editing a version guess.
-- **Version constraints live in `[workspace.dependencies]`** so every crate
-  agrees on one version.
-- **Licenses must be MIT, Apache-2.0, or compatible.** Anything copyleft is a
-  problem for a platform third parties ship on (§7).
-- **Prefer one well-maintained dependency to three convenient ones.** Every
-  dependency is a supply chain entry and a build-time cost on both platforms.
+Add with `cargo add`, never a hand-typed version guess. Versions live in one
+place:
 
-## 14. Lints, formatting, and suppressions
+```toml
+# workspace Cargo.toml
+[workspace.dependencies]
+ash = "0.38"
 
-**rustfmt is the authority.** Formatting is not a matter of opinion and never a
-review topic. Config is stable-only options so it reproduces on the pinned
-toolchain.
+# crates/slop-rhi/Cargo.toml
+[dependencies]
+ash = { workspace = true }
+```
 
-**Lints are centralized** in the root manifest's `[workspace.lints]` and
-inherited by every crate. Add lints there, never per-crate, so the rule is
-uniform.
+Licenses must be MIT, Apache-2.0, or compatible — copyleft is a problem for a
+platform third parties ship on (§7). Prefer one well-maintained dependency to
+three convenient ones; each is a supply-chain entry and a build cost on both
+platforms.
 
-**`#[allow]` requires a comment giving the reason,** and is expected to be rare
-and local — on an item, never a whole module or crate. `PLAN.md` §4.2 makes "no
-`#[allow]` suppressions hiding real problems" an M0 exit criterion. A suppression
-that is genuinely correct is fine; one that silences a lint because fixing it is
-inconvenient is a defect with a comment attached.
+## 14. Lints, formatting, suppressions
 
-**CI runs with `-D warnings`.** Warnings do not accumulate, because a codebase
-with 200 warnings has zero.
+rustfmt is the authority — formatting is never a review topic. Lints are
+centralized in the root manifest's `[workspace.lints]` and inherited, never added
+per crate. CI runs `-D warnings`: a codebase with 200 warnings has zero.
+
+`#[allow]` is local, on an item, and carries its reason.
+
+```rust
+// ✗ blanket, unexplained, hides future problems
+#![allow(clippy::too_many_arguments)]
+
+// ✓
+// Mirrors VkGraphicsPipelineCreateInfo field-for-field; grouping these into
+// structs would obscure the mapping to the Vulkan spec.
+#[allow(clippy::too_many_arguments)]
+fn create_graphics_pipeline(..) -> Result<Pipeline, RhiError> { .. }
+```
+
+`PLAN.md` §4.2 makes "no `#[allow]` hiding real problems" an M0 exit criterion.
 
 ## 15. Commits
 
-- **Imperative mood subject line**, under ~72 characters.
-- **The body explains why**, not what — the diff already says what. Rejected
-  alternatives are worth a line.
-- **Cite the design section** a change implements or amends.
-- **A commit that changes a decision updates the doc in the same commit.**
-  Decisions that live only in a commit message are decisions that get silently
-  reversed six months later.
-- Work lands directly on `main`; this project does not use feature branches.
+Imperative subject under ~72 chars. The body explains *why* — the diff says what.
+Cite the design section, and note rejected alternatives.
+
+```
+Select physical device by score, not enumeration order
+
+Both a discrete 5090 and an integrated UHD 770 enumerate on the dev
+machine, and index 0 is not deterministic across driver versions.
+
+Scores on device type, then VRAM. Rejected preferring the device with
+the most queue families -- it correlates poorly with performance and
+would pick the iGPU on some Intel configurations.
+
+DESIGN.md 2.13, PLAN.md 2.2.
+```
+
+A commit that changes a decision updates the doc in the same commit. Decisions
+living only in commit messages get silently reversed six months later. Work lands
+directly on `main`; no feature branches.
