@@ -588,6 +588,15 @@ architecture. The bottleneck in this project is verification, not authoring.
   reference scenes. Performance regressions fail the build.
 - **Validation layers on in debug.** Vulkan validation, plus our own RHI-level
   assertions on barrier and lifetime correctness.
+- **Miri over every crate containing `unsafe`.** Type-erased ECS storage (§2.4,
+  §2.10) is raw pointer arithmetic by construction, and its failure modes —
+  misaligned access, aliasing violations, deallocating with the wrong layout,
+  reading uninitialized memory — are invisible to ordinary tests and usually
+  invisible on x86 at runtime. Miri catches all of them, and unlike the golden
+  images it needs no GPU, so it is the one verification tool that is free to run
+  everywhere. Not a substitute for tests: it only reports undefined behaviour on
+  paths a test actually executes, so coverage of the `unsafe` paths is what makes
+  it worth anything.
 - **Dual-platform CI matrix.** Every check above runs on both Windows and Linux
   from M0, per §2.13.
 

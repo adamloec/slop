@@ -1,0 +1,15 @@
+[package]
+name = "slop-ecs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+slop-core = { workspace = true }
+slop-reflect = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

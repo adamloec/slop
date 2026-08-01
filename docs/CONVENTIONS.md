@@ -560,10 +560,18 @@ Use `debug_assert!` for invariants too expensive to check in shipping builds.
 
 ## 7. `unsafe`
 
-Confined to `slop-rhi` and the allocator. `unsafe` elsewhere is a design
-discussion, not a review comment. Every block carries `// SAFETY:` stating the
-invariant that makes it sound — enforced by
-`clippy::undocumented_unsafe_blocks`, so it fails the build, not review.
+Confined to three places, and adding a fourth is a design discussion rather than
+a review comment:
+
+| Where | Why it is unavoidable |
+|---|---|
+| `slop-rhi` | Vulkan is a C API |
+| The GPU allocator | Raw device memory |
+| `slop-ecs`'s storage | Type-erased columns are pointer arithmetic by construction (`DESIGN.md` §2.4) — a `Column<T>` cannot exist for a `T` declared at runtime |
+
+Every block carries `// SAFETY:` stating the invariant that makes it sound —
+enforced by `clippy::undocumented_unsafe_blocks`, so it fails the build, not
+review.
 
 ```rust
 // ✗ restates the code
@@ -581,6 +589,24 @@ let data = unsafe { slice::from_raw_parts(ptr, len) };
 Wrap at the lowest level and expose a safe API — the unsafe surface is a thin
 layer over `ash`, not a family of unsafe functions propagating outward. No
 `unsafe` for performance without a benchmark; §5's budget harness arbitrates.
+
+**A type holding raw pointers states its invariants once, on the type**, and
+every `// SAFETY:` comment inside cites them by number. Restating the same three
+facts in fifteen blocks is how they drift apart.
+
+**Run Miri on any crate with `unsafe` in it**, and write the tests that reach
+those paths:
+
+```
+cargo +nightly miri test -p slop-ecs
+```
+
+Misaligned access, aliasing violations, deallocating with the wrong layout, and
+reading uninitialized memory are all invisible to ordinary tests and usually
+invisible on x86 at runtime — `dealloc` with a mismatched alignment simply works
+until it doesn't. Miri reports them exactly, with a line number. It only sees
+paths a test executes, so it is worth precisely as much as the coverage of the
+unsafe code.
 
 ## 8. Allocation and performance
 

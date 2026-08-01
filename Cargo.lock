@@ -1526,6 +1526,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "slop-ecs"
+version = "0.0.0"
+dependencies = [
+ "slop-core",
+ "slop-reflect",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "slop-math"
 version = "0.0.0"
 dependencies = [
