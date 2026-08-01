@@ -25,8 +25,9 @@ Started. This is the bulk of M0 and the largest single body of work in it.
 | Required feature tier, checked at selection | Landed | M0 |
 | Logical device, queue creation | Landed | M0 |
 | Surface, and surface capability queries | Landed | M0 |
+| Swapchain, format and mode selection, recreation | Landed | M0 |
 | `gpu-allocator` integration | Planned | M0 |
-| Swapchain and recreation | Planned | M0 |
+| Acquire and present | Planned | M0 |
 | Command pools and buffers | Planned | M0 |
 | Timeline semaphores, explicit barriers | Planned | M0 |
 | Bindless descriptor heap | Planned | M0 |
@@ -181,7 +182,34 @@ on a headless instance is a spec violation that permissive drivers accept and
 strict ones reject. Validation caught this during bring-up; NVIDIA had been
 creating the device anyway.
 
-## 8. Decisions
+## 8. Swapchain: four choices, each with a plausible wrong answer
+
+Every one of these looks correct on the development machine if you get it wrong,
+which is why each is explicit and tested.
+
+| Choice | Decision | The wrong answer that still works here |
+|---|---|---|
+| Format | Prefer `B8G8R8A8_SRGB` + `SRGB_NONLINEAR` | A `UNORM` format looks merely "a bit dark", easily misattributed to lighting |
+| Present mode | Requested, falling back to FIFO | Assuming `MAILBOX` exists — it is not guaranteed; only FIFO is |
+| Image count | `min + 1`, clamped | Clamping against `max_image_count` of **0**, which means *unlimited*, not zero |
+| Extent | Surface's, unless it defers | Trusting `current_extent` unconditionally |
+
+**The extent case is a genuine Windows/Linux split.** When a surface reports
+`current_extent` of `u32::MAX` it is saying *you choose* — Wayland does this,
+Windows does not. Ignoring it yields a swapchain four billion pixels wide on
+Linux while working perfectly on Windows, which is exactly the class of breakage
+`DESIGN.md` §2.13 exists to catch. There is a test for both branches.
+
+**Sizes are physical pixels.** A window requested at 1280×720 logical reports a
+1920×1080 surface at 150% display scaling. `winit`'s `inner_size()` is already
+physical; the value passed to `WindowConfig` is not.
+
+**Sharing mode is `EXCLUSIVE` even when graphics and present families differ.**
+`CONCURRENT` costs bandwidth on every access; the correct answer for split
+families is an explicit ownership-transfer barrier, which §2.2's explicit model
+wants anyway.
+
+## 9. Decisions
 
 | Decision | Where |
 |---|---|
@@ -190,12 +218,13 @@ creating the device anyway.
 | Device selection by UUID, degrading to automatic | §6 above |
 | One feature tier, checked at selection, no fallbacks | §7 above |
 | `Device` holds an `Arc<Instance>` to encode lifetime ordering | `device.rs` module docs |
+| Swapchain format, present mode, image count and extent | §8 above |
 | M0 ships primitives, not abstraction | `PLAN.md` §4.1-D |
 | Slang as the shading language, library-integrated | `DESIGN.md` §2.11 |
 | Which Slang Rust binding | `DESIGN.md` §8 item 2 — revisit at M3 |
 | Desktop only; one GPU feature tier | `DESIGN.md` §2.1 |
 
-## 9. Invariants
+## 10. Invariants
 
 1. **This crate and the allocator are the only sanctioned homes for `unsafe`.**
    `unsafe` anywhere else is a design discussion, not a review comment.
@@ -236,6 +265,11 @@ creating the device anyway.
     requested at 1280×720 logical pixels reports a 1920×1080 surface on a
     display at 150% scaling. Sizing a swapchain from the logical request
     produces blurry output or validation errors.
+15. **`current_extent` of `u32::MAX` means "you choose", not a size.** Wayland
+    reports it; Windows does not. See §8.
+16. **`max_image_count` of `0` means unlimited, not zero.** Clamping against it
+    naively yields a swapchain with no images.
+17. **Only FIFO present mode is guaranteed.** Every other mode needs a fallback.
 13. **Enable an extension only when it is needed and its dependencies are
     present.** A permissive driver accepting an invalid create-info is not
     evidence of correctness.

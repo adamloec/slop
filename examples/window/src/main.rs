@@ -3,9 +3,12 @@
 //! This is M0 task E's exit criterion in executable form. It opens a window,
 //! creates a Vulkan instance with the surface extensions that window's display
 //! requires, builds a surface from it, selects an adapter that can actually
-//! present to that surface, and creates a logical device. Then it reports what
-//! it found and exits — there is nothing to draw yet, and a window that lingers
-//! with nothing in it would be less informative than the log.
+//! present to that surface, creates a logical device, and builds a swapchain.
+//! It reports what it found, then stays open until closed.
+//!
+//! **Nothing is drawn.** The swapchain exists but no frame is ever recorded or
+//! presented, so the window's contents are undefined — usually black, possibly
+//! whatever the compositor left there. Rendering is task F.
 //!
 //! Run with `cargo run -p example-window`, or `SLOP_LOG=debug` for more.
 //!
@@ -21,7 +24,7 @@ use slop_app::winit::event::WindowEvent;
 use slop_app::winit::event_loop::{ActiveEventLoop, EventLoop};
 use slop_app::winit::window::WindowId;
 use slop_rhi::{Device, DeviceSelection, Instance, InstanceConfig};
-use slop_rhi::{DeviceInfo, Surface};
+use slop_rhi::{DeviceInfo, PresentMode, Surface, Swapchain, SwapchainConfig};
 
 fn main() {
     slop_app::logging::init();
@@ -48,7 +51,8 @@ fn main() {
 // signal to delete the attribute.
 #[expect(dead_code, reason = "held for RAII and drop ordering, not for reading")]
 struct Graphics {
-    device: Device,
+    swapchain: Swapchain,
+    device: Arc<Device>,
     surface: Surface,
     // Last, so it outlives everything created from it — the safety condition
     // `window::create_surface` states and cannot enforce.
@@ -77,8 +81,11 @@ impl ApplicationHandler for App {
             }
         }
 
-        // The chain is proven; there is nothing to render yet.
-        event_loop.exit();
+        // The window stays open until it is closed. Nothing draws into the
+        // swapchain yet, so its contents are undefined — expect whatever the
+        // compositor had there, or black. That is correct for M0 task E; the
+        // first render is task F.
+        println!("\nwindow is open — close it to exit.");
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -132,11 +139,45 @@ fn setup(event_loop: &ActiveEventLoop) -> Result<Graphics, String> {
 
     report(&devices, chosen, &surface);
 
-    let device = Device::new(&instance, &devices[chosen]).map_err(|error| error.to_string())?;
+    let device = Arc::new(Device::new(&instance, &devices[chosen]).map_err(|e| e.to_string())?);
 
-    println!("\nwindow, surface and device all created successfully.");
+    // `inner_size` is already in physical pixels, which is what a swapchain
+    // needs. The logical size passed to WindowConfig is a different number on
+    // any display that is not at 100% scaling.
+    let size = window.inner_size();
+    let swapchain = Swapchain::new(
+        &device,
+        &surface,
+        &SwapchainConfig {
+            present_mode: PresentMode::Mailbox,
+            extent: slop_rhi::vk::Extent2D {
+                width: size.width,
+                height: size.height,
+            },
+        },
+    )
+    .map_err(|error| error.to_string())?;
+
+    println!(
+        "\nswapchain: {}x{}, {} images, {:?}, {:?}",
+        swapchain.extent().width,
+        swapchain.extent().height,
+        swapchain.images().len(),
+        swapchain.format(),
+        swapchain.present_mode(),
+    );
+    println!(
+        "requested {}x{} logical, surface reported {}x{} physical",
+        WindowConfig::default().width,
+        WindowConfig::default().height,
+        size.width,
+        size.height,
+    );
+
+    println!("\nwindow, surface, device and swapchain all created successfully.");
 
     Ok(Graphics {
+        swapchain,
         device,
         surface,
         window,

@@ -68,6 +68,14 @@ pub enum RhiError {
         reason: String,
     },
 
+    /// The surface reported no formats at all.
+    ///
+    /// Distinct from "no *preferred* format": that falls back with a warning.
+    /// An empty list means the surface is unusable, which normally indicates the
+    /// window was destroyed underneath us.
+    #[error("the surface reports no supported formats")]
+    NoSurfaceFormats,
+
     /// A Vulkan call returned a failure code.
     #[error("Vulkan call failed: {0}")]
     Vulkan(#[from] ash::vk::Result),

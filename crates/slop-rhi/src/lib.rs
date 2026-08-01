@@ -33,6 +33,7 @@ mod instance;
 mod physical;
 mod queues;
 mod surface;
+mod swapchain;
 
 pub use device::{Device, Queues};
 pub use error::RhiError;
@@ -40,5 +41,11 @@ pub use instance::{Instance, InstanceConfig, Validation};
 pub use physical::{DeviceInfo, DeviceKind, DeviceSelection, Rejection, enumerate, select};
 pub use queues::QueueFamilies;
 pub use surface::{Surface, required_surface_extensions};
+pub use swapchain::{PresentMode, Swapchain, SwapchainConfig};
+
+/// Re-exported so consumers can name Vulkan types — extents, formats, handles —
+/// without their own `ash` dependency, and so the engine cannot end up split
+/// across two versions of it.
+pub use ash::vk;
 
 pub(crate) use instance::REQUIRED_API_VERSION;
