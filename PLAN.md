@@ -9,6 +9,10 @@ writing any code. This file covers what `DESIGN.md` deliberately does not: who
 we are building for, the state of the environment, the immediate task breakdown,
 and the invariants that are easy to violate by accident.
 
+`CONVENTIONS.md` is the third document and is authoritative for code-level
+conventions — how code is written, rather than what is built or in what order.
+The three divide as: **`DESIGN.md` what, `PLAN.md` when, `CONVENTIONS.md` how.**
+
 ---
 
 ## 1. Context for whoever picks this up
@@ -175,6 +179,48 @@ The cube is deliberately unambitious. Its job is integration, not looks.
 **C. `slop-core`**
 - Generational-index slotmap and handle types — `DESIGN.md` §2.6, used by
   everything downstream, so get the ergonomics right
+
+> **Handle API — decided 2026-07-31.** Four calls, each hard to reverse once
+> entities, assets, GPU resources, and scene nodes all depend on them.
+>
+> 1. **Typed.** `Handle<T>` carrying `PhantomData<fn() -> T>`. Passing a
+>    `Handle<Texture>` where a `Handle<Buffer>` belongs becomes a compile error
+>    rather than a garbage read. The `fn() -> T` phantom rather than a bare
+>    `PhantomData<T>` is deliberate: it keeps `Handle<T>` unconditionally `Copy`,
+>    `Send`, and `Sync` no matter what `T` is. At the §2.3 WASM boundary handles
+>    erase to opaque integers through an explicit `to_raw` / `from_raw` pair.
+>
+> 2. **64-bit: `u32` index + `NonZeroU32` generation.** Packing to 32 bits
+>    (24 index / 8 generation) was considered to halve bandwidth in the arrays
+>    culling and transform propagation sweep every frame, and rejected: 8 bits of
+>    generation wraps after 256 reuses of a slot, and for high-churn entities —
+>    bullets, particles, decals — 256 is trivially reachable. A wrapped
+>    generation means a stale handle silently validates against the wrong object.
+>    Correctness over four bytes. `NonZeroU32` additionally makes
+>    `Option<Handle<T>>` the same size as `Handle<T>`; fresh slots start at
+>    generation 1.
+>
+> 3. **Checked access returning `Option`** — not panic, not debug-only. The check
+>    is one comparison against a generation already being loaded into cache.
+>    Panicking is wrong for an engine where deleting an object something still
+>    references is routine in the editor and during hot reload. Debug-only
+>    checking manufactures precisely the bugs that surface only in shipping
+>    builds, which inverts the point of `DESIGN.md` §5. An `unsafe` unchecked
+>    accessor may exist for *measured* hot spots under §7's policy. Note the perf
+>    objection is largely misplaced: handle lookup is not the ECS hot path —
+>    iteration over archetype columns is, and that never touches a handle.
+>
+> 4. **Two primitives, not one.** This is the call that matters most:
+>    - `SlotMap<T>` owns its values — for GPU resources, assets, and scene
+>      nodes, where lookup by handle is the access pattern.
+>    - `HandleAllocator` tracks generations with no payload — for ECS entities,
+>      whose component data lives in §2.10's archetype columns and *not* in one
+>      array.
+>
+>    Both hand out the same `Handle<T>`. Building only the owning variant and
+>    discovering at M1 that the ECS cannot use it is exactly the rework §8 warns
+>    about when it says archetype storage and the columnar boundary must be
+>    designed together.
 - Arena / bump allocator for per-frame scratch
 - Time and frame pacing primitives
 - `tracing` setup for structured logging
@@ -306,18 +352,19 @@ problem later. Check work against this list.
 
 ---
 
-## 7. Conventions to settle at M0
+## 7. Conventions
 
-Proposals, to confirm when starting rather than debate mid-implementation:
+**Moved to `CONVENTIONS.md`, which is now authoritative for code-level
+conventions.** It covers crate and module layout, naming, the data-oriented
+rules, API design, errors and panics, `unsafe`, allocation and performance,
+concurrency, portability, documentation, testing, logging, dependencies, lints,
+and commits — each rule with its reason and a reference to the decision it
+protects.
 
-- **Errors:** `thiserror` for library crates, `anyhow` only at application
-  boundaries
-- **Logging:** `tracing`, structured, with spans around subsystem work
-- **`unsafe`:** confined to `slop-rhi` and the allocator; every block carries a
-  `// SAFETY:` comment stating the invariant
-- **Testing:** unit tests colocated; integration and golden-image tests in
-  `tests/`
-- **MSRV:** pin via `rust-toolchain.toml`, bump deliberately
+Settled here and not repeated there:
+
+- **MSRV:** pinned via `rust-toolchain.toml` (currently 1.97.1), bumped
+  deliberately rather than incidentally.
 
 ---
 
