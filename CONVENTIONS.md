@@ -9,6 +9,12 @@ Rules state their reason in one line and then show it. Where a rule could be a
 lint and is not yet, it is marked **[gap]** — a rule enforced by prose is a rule
 that decays.
 
+**Overriding rule (`DESIGN.md` §1.2 principle 6): no shortcut that has to be
+unpicked later.** Defer implementations freely; never defer a seam. If a choice
+turns out wrong, a refactor is acceptable and a rewrite is not — so design for
+the finished engine, not for this week. Where a rule below is inconvenient, that
+is the rule working.
+
 ---
 
 ## 1. Repository layout

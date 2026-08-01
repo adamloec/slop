@@ -44,6 +44,23 @@ Explicitly out of scope, to keep the target honest:
 5. **Verification scales with generation.** Code can be produced faster than it
    can be eyeballed. Automated truth — determinism, golden images, round-trip
    tests, perf budgets — is infrastructure, not polish.
+6. **Build for the shape of the finished engine, not for what is needed this
+   week.** No expedient shortcut that has to be unpicked later. When a choice is
+   between the easy version now and the correct version now, take the correct
+   one — the schedule pressure that makes the shortcut attractive is the same
+   pressure that will make paying it back impossible.
+
+   **The distinction that keeps this from meaning "build everything now":**
+   defer *implementations* freely, never *seams*. A simple implementation behind
+   a correctly shaped interface is not a shortcut — it is scheduling. A simple
+   interface that assumes away the eventual design is a rewrite with a delay
+   fuse. This is why the M0 job system ships a parallel-capable API over a plain
+   thread pool (`PLAN.md` §4.1-C), and why the M0 RHI stays close to `ash` while
+   still committing to timeline semaphores and bindless descriptors
+   (`PLAN.md` §4.1-D): the implementations are provisional, the shapes are not.
+
+   Applied test: *if this turns out to be wrong, is it a refactor or a rewrite?*
+   Refactor is fine. Rewrite means design it properly now.
 
 ---
 
