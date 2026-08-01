@@ -34,7 +34,7 @@ use slop_core::{FxHashMap, HandleAllocator};
 use slop_reflect::{Reflect, TypeId, TypeInfo, TypeRegistry};
 
 use crate::query::{Query, QueryData, ReadOnlyQueryData};
-use crate::{Archetype, EcsError, Entity, EntityTag, Row, Signature};
+use crate::{Archetype, EcsError, ElementTicks, Entity, EntityTag, Row, Signature, Tick, Ticks};
 
 /// Where an entity's components are.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +58,8 @@ pub struct World {
     by_signature: FxHashMap<Signature, usize>,
     locations: FxHashMap<Entity, Location>,
     registry: TypeRegistry,
+    /// What every write is stamped with — see [`advance_tick`](Self::advance_tick).
+    tick: Tick,
 }
 
 impl World {
@@ -78,7 +80,32 @@ impl World {
             by_signature,
             locations: FxHashMap::default(),
             registry,
+            // One, not zero. A query that has never run compares against
+            // `Tick::ZERO`, and starting there would make the world's first
+            // writes indistinguishable from nothing having happened.
+            tick: Tick::ZERO.next(),
         }
+    }
+
+    /// The tick every write is currently stamped with.
+    pub fn tick(&self) -> Tick {
+        self.tick
+    }
+
+    /// Move to the next tick.
+    ///
+    /// Everything written from now on is stamped later than everything written
+    /// before. Nothing calls this for you — how often a tick passes is a
+    /// property of the caller's loop, not of the world, and a caller that never
+    /// advances simply has every write share one stamp.
+    ///
+    /// The frame loop advances once per frame; a scheduler running systems in
+    /// sequence advances once per system, which is what lets each see the
+    /// previous one's writes as changes.
+    pub fn advance_tick(&mut self) -> Tick {
+        self.tick = self.tick.next();
+
+        self.tick
     }
 
     /// A world whose registry knows the built-in types and nothing else.
@@ -140,7 +167,7 @@ impl World {
     /// If `D` names one component type twice with mutable access, which is
     /// impossible here since mutable access does not typecheck.
     pub fn query<D: ReadOnlyQueryData>(&self) -> Query<'_, D> {
-        Query::new(&self.archetypes)
+        Query::new(&self.archetypes, Ticks::everything(self.tick))
     }
 
     /// Iterate every entity holding the components `D` names, with mutation.
@@ -162,7 +189,7 @@ impl World {
     /// property of the code as written rather than of the data, so it fails the
     /// first time the line runs.
     pub fn query_mut<D: QueryData>(&mut self) -> Query<'_, D> {
-        Query::new(&self.archetypes)
+        Query::new(&self.archetypes, Ticks::everything(self.tick))
     }
 
     /// Create an entity with no components.
@@ -171,7 +198,7 @@ impl World {
 
         // SAFETY: the empty archetype has no columns, so there are no slots to
         // initialize.
-        let (row, slots) = unsafe { self.archetypes[0].begin_row(entity) };
+        let (row, slots) = unsafe { self.archetypes[0].begin_row(entity, self.tick) };
         debug_assert!(slots.is_empty(), "the empty archetype has no columns");
 
         self.locations
@@ -221,9 +248,18 @@ impl World {
     }
 
     /// Mutate `entity`'s `T`, if it has one.
+    ///
+    /// **Stamps the component as changed whether or not it is written.** A query
+    /// is precise about this — [`Mut`](crate::Mut) stamps only when the value is
+    /// actually reached mutably — but a point lookup is a caller who has already
+    /// said which single component they intend to write, so the eager stamp
+    /// costs at most one false positive per call and keeps this returning a
+    /// plain `&mut T`.
     pub fn get_mut<T: Reflect>(&mut self, entity: Entity) -> Option<&mut T> {
+        let tick = self.tick;
         let location = *self.locations.get(&entity)?;
         let column = self.archetypes[location.archetype].column_mut(T::type_id())?;
+        column.mark_changed(location.row.0, tick);
         let pointer = column.get_mut(location.row.0)?;
 
         // SAFETY: as `get`, and the borrow is tied to `&mut self` so it is
@@ -241,21 +277,74 @@ impl World {
     /// [`EcsError::UnregisteredComponent`] if `T` is not registered, or
     /// [`EcsError::NoSuchEntity`] if `entity` is not alive.
     pub fn insert<T: Reflect>(&mut self, entity: Entity, component: T) -> Result<(), EcsError> {
-        let type_id = T::type_id();
+        let mut component = std::mem::ManuallyDrop::new(component);
+        let pointer = std::ptr::from_mut(&mut *component)
+            .cast::<u8>()
+            .cast_const();
 
-        if !self.registry.contains(type_id) {
-            return Err(EcsError::UnregisteredComponent { type_id });
+        // SAFETY: `pointer` is an initialized, aligned `T`, and `T::type_id()`
+        // names `T` by `Reflect`'s contract.
+        match unsafe { self.insert_raw(entity, T::type_id(), pointer) } {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                // `insert_raw` moves the value out only on success, so on this
+                // path it is still live and still ours.
+                //
+                // SAFETY: nothing took ownership, and `component` is not used
+                // again.
+                unsafe { std::mem::ManuallyDrop::drop(&mut component) };
+
+                Err(error)
+            }
         }
+    }
+
+    /// Give `entity` a component described at runtime.
+    ///
+    /// The untyped half of [`insert`](Self::insert), and the path §2.4's guest
+    /// components take: a WASM module's component type has no Rust type behind
+    /// it, so the value arrives as bytes plus the [`TypeId`] naming their
+    /// layout. Deferred structural change ([`CommandBuffer`](crate::CommandBuffer))
+    /// takes the same path for the same reason — a recorded component is bytes
+    /// in a staging area by the time it is applied.
+    ///
+    /// # Safety
+    ///
+    /// `component` must point at an initialized, properly aligned value of
+    /// exactly the type `type_id` names, and must be treated as moved-from
+    /// afterward — but **only if this returns `Ok`**. On an error the value was
+    /// not taken and remains the caller's to drop.
+    ///
+    /// # Errors
+    ///
+    /// [`EcsError::UnregisteredComponent`] if `type_id` is not registered, or
+    /// [`EcsError::NoSuchEntity`] if `entity` is not alive.
+    pub unsafe fn insert_raw(
+        &mut self,
+        entity: Entity,
+        type_id: TypeId,
+        component: *const u8,
+    ) -> Result<(), EcsError> {
+        let size = self
+            .registry
+            .get(type_id)
+            .ok_or(EcsError::UnregisteredComponent { type_id })?
+            .layout()
+            .size();
 
         let location = *self
             .locations
             .get(&entity)
             .ok_or(EcsError::NoSuchEntity { entity })?;
 
+        let tick = self.tick;
+
         // Already present: overwrite in place. No table changes, so none of the
         // migration machinery runs.
-        if let Some(existing) = self.get_mut::<T>(entity) {
-            *existing = component;
+        if let Some(column) = self.archetypes[location.archetype].column_mut(type_id) {
+            // SAFETY: the column holds exactly this type, the row is occupied,
+            // and `component` is the caller's value living outside this column.
+            unsafe { column.replace(location.row.0, component, tick) };
             return Ok(());
         }
 
@@ -266,21 +355,19 @@ impl World {
         let destination = self.archetype_index(&destination)?;
 
         // SAFETY: every slot returned below is written exactly once — the
-        // shared components by `move_row_out`, and the new component by the
-        // explicit write. `component` is forgotten afterward so its destructor
-        // does not also run.
+        // shared components by `relocate_into`, and the new component by the
+        // explicit write, which is the caller's value being moved in.
         unsafe {
-            let component = std::mem::ManuallyDrop::new(component);
-
-            let (row, slots) = self.archetypes[destination].begin_row(entity);
-            let shared = self.relocate_into(location, destination, &slots, Some(type_id));
+            let (row, slots) = self.archetypes[destination].begin_row(entity, tick);
+            let (shared, ticks) = self.relocate_into(location, destination, &slots, Some(type_id));
 
             let slot = self.slot_for(destination, &slots, type_id);
-            std::ptr::copy_nonoverlapping(
-                std::ptr::from_ref(&*component).cast::<u8>(),
-                slot,
-                size_of::<T>(),
-            );
+            std::ptr::copy_nonoverlapping(component, slot, size);
+
+            // The relocated components keep the stamps they arrived with; the
+            // one being added keeps the fresh stamp `begin_row` gave it, which
+            // is why its entry in `ticks` is `None`.
+            self.archetypes[destination].set_row_ticks(row, &ticks);
 
             self.finish_move(entity, location, destination, row, shared);
         }
@@ -295,8 +382,18 @@ impl World {
     /// value would mean the caller owning it, which needs a typed path this does
     /// not yet have.
     pub fn remove<T: Reflect>(&mut self, entity: Entity) -> bool {
-        let type_id = T::type_id();
+        self.remove_by_id(entity, T::type_id())
+    }
 
+    /// Take a component away from `entity`, naming it at runtime.
+    ///
+    /// The untyped half of [`remove`](Self::remove) — see
+    /// [`insert_raw`](Self::insert_raw) for why an untyped path exists. Safe,
+    /// unlike its counterpart: removing needs no value from the caller, so
+    /// there is nothing to get wrong about it.
+    ///
+    /// Returns whether the entity had one.
+    pub fn remove_by_id(&mut self, entity: Entity, type_id: TypeId) -> bool {
         let Some(&location) = self.locations.get(&entity) else {
             return false;
         };
@@ -319,9 +416,10 @@ impl World {
         // dropped rather than relocated, because the destination has no column
         // for it.
         unsafe {
-            let (row, slots) = self.archetypes[destination].begin_row(entity);
-            let shared = self.relocate_into(location, destination, &slots, None);
+            let (row, slots) = self.archetypes[destination].begin_row(entity, self.tick);
+            let (shared, ticks) = self.relocate_into(location, destination, &slots, None);
 
+            self.archetypes[destination].set_row_ticks(row, &ticks);
             self.finish_move(entity, location, destination, row, shared);
         }
 
@@ -333,7 +431,13 @@ impl World {
     /// Components the destination lacks are dropped. `skip` names a type the
     /// destination has but the source does not, which the caller writes itself.
     ///
-    /// Returns the entity the source's swap-remove moved into the vacated row.
+    /// Returns the entity the source's swap-remove moved into the vacated row,
+    /// and the stamps each relocated component arrived with — one entry per
+    /// destination column, `None` for the one the caller writes itself.
+    ///
+    /// The stamps are collected rather than applied here because applying them
+    /// means borrowing the destination archetype, which this is already
+    /// borrowing the source out of.
     ///
     /// # Safety
     ///
@@ -345,12 +449,14 @@ impl World {
         destination: usize,
         slots: &[*mut u8],
         skip: Option<TypeId>,
-    ) -> Option<Entity> {
+    ) -> (Option<Entity>, Vec<Option<ElementTicks>>) {
         let source_types: Vec<TypeId> = self.archetypes[location.archetype]
             .signature()
             .types()
             .to_vec();
         let destination_signature = self.archetypes[destination].signature().clone();
+
+        let mut ticks = vec![None; destination_signature.len()];
 
         for &type_id in &source_types {
             let column = self.archetypes[location.archetype]
@@ -358,11 +464,12 @@ impl World {
                 .expect("the type came from this archetype's own signature");
 
             match destination_signature.position(type_id) {
-                // Shared: relocate the bytes, no destructor.
+                // Shared: relocate the bytes, no destructor, and carry the
+                // stamps across — relocating is not writing.
                 Some(index) => {
                     // SAFETY: `slots[index]` is the destination column for this
                     // exact type, uninitialized and correctly aligned.
-                    unsafe { column.swap_remove_to(location.row.0, slots[index]) };
+                    ticks[index] = unsafe { column.swap_remove_to(location.row.0, slots[index]) };
                 }
                 // The destination does not want it, so it is destroyed.
                 None => {
@@ -378,7 +485,9 @@ impl World {
 
         // The columns are done; the entity list still has to shed its row, and
         // it is what reports who moved.
-        self.archetypes[location.archetype].take_row(location.row)
+        let moved = self.archetypes[location.archetype].take_row(location.row);
+
+        (moved, ticks)
     }
 
     /// Update the location index after a completed move.

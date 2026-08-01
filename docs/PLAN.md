@@ -126,9 +126,9 @@ Two consequences worth carrying into M0:
 renders with a golden image guarding it, and the reflection and ECS foundations
 are built through queries.
 
-368 tests. Clippy and rustdoc clean under `-D warnings` in both feature
+446 tests. Clippy and rustdoc clean under `-D warnings` in both feature
 configurations, Vulkan validation reporting nothing, and every crate containing
-`unsafe` passing under Miri.
+`unsafe` passing under Miri — `slop-ecs` under both Stacked and Tree Borrows.
 
 ### 3.0 M1 so far — reflection and the ECS
 
@@ -136,12 +136,22 @@ configurations, Vulkan validation reporting nothing, and every crate containing
 |---|---|
 | `slop-reflect` — `TypeInfo` as data, registry, `#[derive(Reflect)]` | Landed |
 | `slop-ecs` — `Column`, `Signature`, `Archetype`, `World`, queries | Landed |
-| Command buffers — deferred structural change | **Next.** §2.10 calls it required for parallel systems |
-| Change detection | Outstanding |
+| Command buffers — deferred structural change | Landed |
+| Query filters — `With`, `Without`, `Or`, `Option<&T>` | Landed |
+| Change detection — `Tick`, `Mut<T>`, `Changed<T>`, `Added<T>` | Landed |
+| Work-stealing job pool behind the M0 API | **Next.** §4.1-C deferred it so ECS scheduling would supply the requirements, and it now can |
 | System scheduling from read/write sets | Outstanding — needs the work-stealing pool |
-| Query filters — `With`, `Without`, `Option` | Outstanding |
-| Work-stealing job pool behind the M0 API | Outstanding |
 | Serialization round-trip harness (§5) | Outstanding — needs serializers, which `slop-reflect` deliberately excludes |
+
+**Deferred structural change diverges from the conventional answer, on purpose.**
+Bevy and Unity's `EntityCommandBuffer` both return a usable entity id from a
+deferred spawn, reserving it from the allocator through an atomic. §2.14 rules
+that out: two systems spawning on two threads would receive ids in whatever
+order the hardware resolved the contention, making every recorded replay and
+every golden image of a scene that spawns anything timing-dependent. `slop-ecs`
+returns a `Target` instead — an ordinal within the recording buffer, resolved to
+a real `Entity` at the sync point, on one thread, in schedule order. The cost is
+recorded in §6.1.
 
 The binding constraint §2.4 named has been honoured: `TypeInfo` is a **value**,
 so a component type declared at runtime by a WASM guest is a first-class
@@ -230,7 +240,7 @@ Validation caught the first; a human caught the other two.
    changed what every dependent compiled to while leaving every stamp matching —
    a cache that was *wrong*, not merely stale.
 
-**And three were found by breaking working code on purpose**, to check the tests
+**And four were found by breaking working code on purpose**, to check the tests
 would notice:
 
 - Reversing the triangle's winding — 18.09% of pixels differ.
@@ -244,6 +254,17 @@ would notice:
   error: Undefined Behavior: incorrect layout on deallocation:
   alloc59958 has size 64 and alignment 16, but gave size 64 and alignment 1
     --> crates\slop-ecs\src\column.rs:378:22
+  ```
+
+- Making the command buffer's staging area ignore the alignment a component
+  asks for — the mistake a `Vec<u8>` staging area makes for free, since its
+  allocation is aligned to 1 whatever offsets are computed within it. **All 24
+  command-buffer tests still passed**, including one written specifically to
+  place a 16-aligned component. Only Miri objected:
+
+  ```
+  error: Undefined Behavior: constructing invalid value of type &mut Tracked:
+  encountered an unaligned reference (required 8 byte alignment but found 1)
   ```
 
 *A test that has never caught anything is not known to work.* That applies to
@@ -581,8 +602,12 @@ freely, never seams.
 | Raw `vk::Sampler`, destroyed by hand | `examples/cube/src/scene.rs` | A sampler cache in the material system | **Replaced.** | M2 |
 | Whole-frame golden comparison only | `slop-verify` | Region assertions, intermediate captures | **Extended**, not replaced (`DESIGN.md` §8 item 8). | M3 |
 | Hardware-tier golden references | `examples/cube/tests/golden/` | The lavapipe exact-match tier | **Joined by**, not replaced (§4.1-G). | M1 |
-| Structural change requires `&mut World` | `slop-ecs` | Command buffers applied at a sync point (§2.10) | **Joined by.** The direct path stays for single-threaded setup; systems get the deferred one. | M1 |
-| Queries name components only — no `With`, `Without`, `Option` | `slop-ecs` | Filter types alongside `QueryData` | **Extended.** The `QueryData` trait already has the shape; filters are more impls, not a redesign. | M1 |
+| A deferred spawn's `Target` cannot be stored inside a component | `slop-ecs` | Nothing — this is permanent, and §2.14 is why | **Kept.** Wiring a freshly spawned child into a parent's component takes the direct `&mut World` path or a second frame. | — |
+| A deferred spawn plus *n* inserts performs *n* archetype moves | `slop-ecs` | Recording the full component set and spawning straight into the final archetype | **Replaced.** Correct today, and pure throughput — no caller changes when it lands. | M1 |
+| `CommandBuffer::apply` reports only the first error | `slop-ecs` | Nothing planned | **Kept.** The alternative is stopping half way with no way to describe which half; an unregistered type is a wiring bug, not a condition to recover from. | — |
+| A stamp older than `Tick::MAX_AGE` reads as recently changed | `slop-ecs` | A periodic pass clamping stamps that old | **Replaced.** The comparison is by age and already correct; what is missing is the scan that stops ages growing without bound. Reachable only after ~2<sup>31</sup> ticks. | M2 |
+| `last_run` is supplied by hand through `Query::since` | `slop-ecs` | The scheduler supplying each system's own last run | **Replaced.** The filters do not change; only who fills in the window does. | M1 |
+| `World::get_mut` stamps eagerly rather than on write | `slop-ecs` | Nothing planned | **Kept.** A point lookup is a caller who already named the single component they intend to write, so the cost is one false positive per call — and the alternative is `Mut<T>` leaking into every single-entity access path. | — |
 | `TypeKind` models structs, primitives and opaque types only | `slop-reflect` | Enums, tuples, lists, maps | **Extended**, one variant each. A consumer's `match` fails to compile when one lands rather than silently ignoring it. | M2 |
 | `Reflect` rejects generic types | `slop-reflect-derive` | A path encoding the type arguments | **Replaced.** Rejected loudly today rather than silently giving every instantiation one id. | M2 |
 | `World::remove` drops the component rather than returning it | `slop-ecs` | A typed take that hands the value back | **Extended.** Needs a path that can name the type's Rust identity, which the erased core deliberately cannot. | M1 |
@@ -637,11 +662,18 @@ WASM boundary be designed together, not sequentially.** That has been honoured:
 to a guest, and `Transfer::Blittable` gates the second use. Nothing about the
 storage would change if the boundary were built tomorrow.
 
-What remains is the scheduling half — command buffers, change detection, and
-systems declaring read/write sets so the job system can parallelize them. That
-last one is why `slop-core`'s work-stealing pool is an M1 item rather than an M0
-one: §4.1-C deferred it precisely so that ECS scheduling would supply the real
-requirements, and it now can.
+What remains is the scheduling half: systems declaring read/write sets so the job
+system can parallelize them. Everything it rests on has landed — command buffers
+so a system can change structure without `&mut World`, `Access` so a scheduler
+can tell two systems apart, and change detection so a system can decline work it
+does not need to do. That is why `slop-core`'s work-stealing pool is an M1 item
+rather than an M0 one: §4.1-C deferred it precisely so ECS scheduling would
+supply the real requirements, and it now can.
+
+The data model is settled. Every remaining M1 item adds capability without
+reshaping storage, which was the point of taking the three storage-shaping
+decisions — archetype tables, deferred structural change, and per-component
+ticks — before anything was built on top of them.
 
 M1 also lands the §5 verification infrastructure properly. Do not defer it: code
 can be produced faster than it can be reviewed line by line, and automated truth

@@ -570,6 +570,10 @@ a review comment:
 | The GPU allocator | Raw device memory |
 | `slop-ecs`'s storage | Type-erased columns are pointer arithmetic by construction (`DESIGN.md` §2.4) — a `Column<T>` cannot exist for a `T` declared at runtime |
 
+"`slop-ecs`'s storage" covers `column.rs` and `command.rs`: a command buffer
+holds owned component values as bytes plus a destructor, for the same reason a
+column does, and that is one place rather than two.
+
 Every block carries `// SAFETY:` stating the invariant that makes it sound —
 enforced by `clippy::undocumented_unsafe_blocks`, so it fails the build, not
 review.
@@ -600,7 +604,12 @@ those paths:
 
 ```
 cargo +nightly miri test -p slop-ecs
+MIRIFLAGS="-Zmiri-tree-borrows" cargo +nightly miri test -p slop-ecs
 ```
+
+Both aliasing models, because they disagree — Tree Borrows accepts some patterns
+Stacked Borrows rejects and is stricter about others, and code that has to hold
+under whichever one Rust settles on should be checked against both.
 
 Misaligned access, aliasing violations, deallocating with the wrong layout, and
 reading uninitialized memory are all invisible to ordinary tests and usually

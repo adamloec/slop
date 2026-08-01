@@ -34,9 +34,12 @@
 //! [`Column`].
 
 use std::alloc::{Layout, alloc, dealloc, handle_alloc_error};
+use std::cell::Cell;
 use std::ptr::NonNull;
 
 use slop_reflect::{Transfer, TypeId, TypeInfo};
+
+use crate::{ElementTicks, Tick};
 
 /// Elements reserved by the first allocation.
 ///
@@ -59,6 +62,9 @@ const INITIAL_CAPACITY: usize = 4;
 /// 4. `layout.size()` may be zero, in which case no allocation is ever made and
 ///    `capacity` is `usize::MAX` — a zero-sized type needs no memory and must
 ///    never be pointer-arithmetic'd over.
+/// 5. `added` and `changed` each hold exactly `len` entries, and entry `n`
+///    describes element `n`. They travel with the elements through every
+///    operation, which is why they live here rather than beside the column.
 pub struct Column {
     type_id: TypeId,
     /// One element's layout, not the whole array's.
@@ -68,6 +74,24 @@ pub struct Column {
     data: NonNull<u8>,
     len: usize,
     capacity: usize,
+    /// When each element was attached to its entity.
+    added: Vec<Tick>,
+    /// When each element was last written.
+    ///
+    /// `Cell` because a mutable query resolves its columns through `&Archetype`
+    /// and stamps them from there — the same reason [`as_ptr`](Self::as_ptr)
+    /// hands out a `*mut u8` from `&self`.
+    ///
+    /// A plain `Vec<Tick>` would also work today: `Vec::as_ptr` yields a pointer
+    /// whose provenance comes from the vector's own internal raw pointer rather
+    /// than from the `&self` borrow, so casting it mutable and writing through
+    /// it passes Miri under both Stacked and Tree Borrows. That was measured,
+    /// not assumed. It is still the wrong choice — it rests on an implementation
+    /// detail of `Vec` that nothing guarantees, and it needs an `unsafe` block
+    /// to express. `Cell` states the shared mutation in the type, needs no
+    /// `unsafe`, and costs nothing: it has the same size and alignment as what
+    /// it wraps.
+    changed: Vec<Cell<Tick>>,
 }
 
 // SAFETY: a `Column` owns its allocation exclusively and hands out raw pointers
@@ -77,8 +101,12 @@ pub struct Column {
 // component data plain data, and §2.5's scheduler hands disjoint archetypes to
 // disjoint threads without ever sharing a column.
 unsafe impl Send for Column {}
-// SAFETY: as above. `&Column` grants only reads, and the archetype layer is
-// what guarantees no `&mut` exists concurrently.
+// SAFETY: as above, and note what the `Cell` in `changed` widens this to: a
+// shared reference now permits writing a stamp, so `Sync` asserts that no two
+// threads hold `&Column` while either mutates. That holds by construction —
+// component data is only written through `World::query_mut`, which takes
+// `&mut World`, and §2.5's scheduler hands disjoint archetypes to disjoint
+// threads without ever sharing a column.
 unsafe impl Sync for Column {}
 
 impl Column {
@@ -101,6 +129,8 @@ impl Column {
             // elements. Saying so up front removes every "is it zero-sized?"
             // branch from `reserve`.
             capacity: if layout.size() == 0 { usize::MAX } else { 0 },
+            added: Vec::new(),
+            changed: Vec::new(),
         }
     }
 
@@ -139,7 +169,7 @@ impl Column {
     /// `value` must point at an initialized, properly aligned value of exactly
     /// this column's component type, and must be treated as moved-from
     /// afterward — `std::mem::forget` it, or read it from a `ManuallyDrop`.
-    pub unsafe fn push(&mut self, value: *const u8) {
+    pub unsafe fn push(&mut self, value: *const u8, tick: Tick) {
         self.reserve_one();
 
         // SAFETY: `reserve_one` guarantees element `len` is within the
@@ -150,6 +180,7 @@ impl Column {
             std::ptr::copy_nonoverlapping(value, self.element_ptr(self.len), self.layout.size());
         }
 
+        self.push_ticks(ElementTicks::new(tick));
         self.len += 1;
     }
 
@@ -171,16 +202,91 @@ impl Column {
     ///
     /// Violating that leaves invariant 2 broken, which is undefined behaviour
     /// the next time the column is read, dropped, or grown.
-    pub unsafe fn push_uninit(&mut self) -> *mut u8 {
+    pub unsafe fn push_uninit(&mut self, tick: Tick) -> *mut u8 {
         self.reserve_one();
 
         // SAFETY: `reserve_one` guarantees element `len` is within the
         // allocation. The element is uninitialized, which is exactly what this
         // returns a pointer to and what the caller undertakes to fix.
         let slot = unsafe { self.element_ptr(self.len) };
+
+        self.push_ticks(ElementTicks::new(tick));
         self.len += 1;
 
         slot
+    }
+
+    /// When element `index` was added and last changed.
+    pub fn ticks(&self, index: usize) -> Option<ElementTicks> {
+        Some(ElementTicks {
+            added: *self.added.get(index)?,
+            changed: self.changed.get(index)?.get(),
+        })
+    }
+
+    /// Overwrite element `index`'s stamps.
+    ///
+    /// The migration path: a component relocating to another archetype has not
+    /// been written, so it keeps the stamps it arrived with. Resetting them
+    /// would report every component of an entity as changed the moment it gained
+    /// an unrelated one, which is exactly the false positive change detection
+    /// exists to avoid.
+    ///
+    /// Out of range is a no-op, matching the rest of the indexed API.
+    pub fn set_ticks(&mut self, index: usize, ticks: ElementTicks) {
+        if index >= self.len {
+            return;
+        }
+
+        self.added[index] = ticks.added;
+        self.changed[index].set(ticks.changed);
+    }
+
+    /// Stamp element `index` as written at `tick`.
+    ///
+    /// Takes `&self` because that is what a mutable query holds — see the note
+    /// on the `changed` field. Out of range is a no-op.
+    pub fn mark_changed(&self, index: usize, tick: Tick) {
+        if let Some(changed) = self.changed.get(index) {
+            changed.set(tick);
+        }
+    }
+
+    /// A pointer to element zero's added-stamp.
+    ///
+    /// What a query resolves once per archetype and then strides over, exactly
+    /// as it does with [`as_ptr`](Self::as_ptr).
+    pub fn added_ticks_ptr(&self) -> *const Tick {
+        self.added.as_ptr()
+    }
+
+    /// A pointer to element zero's changed-stamp.
+    pub fn changed_ticks_ptr(&self) -> *const Cell<Tick> {
+        self.changed.as_ptr()
+    }
+
+    /// Check invariant 5 — that the stamps have not drifted from the elements.
+    ///
+    /// Debug-only. Drift here does not crash: it silently reports the wrong
+    /// element as changed, or panics much later on an index that used to exist.
+    #[cfg(debug_assertions)]
+    pub fn assert_consistent(&self) {
+        assert_eq!(
+            self.added.len(),
+            self.len,
+            "added stamps drifted from the elements"
+        );
+        assert_eq!(
+            self.changed.len(),
+            self.len,
+            "changed stamps drifted from the elements"
+        );
+    }
+
+    /// Append both stamps for a new element.
+    fn push_ticks(&mut self, ticks: ElementTicks) {
+        self.added.push(ticks.added);
+        self.changed.push(Cell::new(ticks.changed));
     }
 
     /// A pointer to element zero.
@@ -243,17 +349,20 @@ impl Column {
     /// The archetype migration path: a component moving to a different
     /// archetype must not be destroyed, only relocated.
     ///
-    /// Returns whether anything was removed.
+    /// Returns the stamps the element carried, so the destination can keep them
+    /// — relocating is not writing. `None` if `index` was out of bounds.
     ///
     /// # Safety
     ///
     /// `out` must point at writable, properly aligned space for one element of
     /// this column's type, and the value written there becomes the caller's to
     /// drop.
-    pub unsafe fn swap_remove_to(&mut self, index: usize, out: *mut u8) -> bool {
+    pub unsafe fn swap_remove_to(&mut self, index: usize, out: *mut u8) -> Option<ElementTicks> {
         if index >= self.len {
-            return false;
+            return None;
         }
+
+        let ticks = self.ticks(index).expect("the bounds were just checked");
 
         // SAFETY: `index` is in bounds and initialized; `out` is valid for one
         // element by the caller's guarantee; the column's allocation and `out`
@@ -269,7 +378,53 @@ impl Column {
 
         self.move_last_into(index);
 
-        true
+        Some(ticks)
+    }
+
+    /// Overwrite element `index`, dropping the value it held.
+    ///
+    /// Assigning to an entity that already has this component: no table changes,
+    /// so none of the migration machinery runs, but the old value is still a
+    /// value and has to be destroyed.
+    ///
+    /// Stamps the element as changed at `tick`. The added-stamp is left alone —
+    /// overwriting a component is not gaining one.
+    ///
+    /// # Safety
+    ///
+    /// `value` must point at an initialized, properly aligned value of exactly
+    /// this column's component type, must be treated as moved-from afterward,
+    /// and must not point into this column — the write is a
+    /// `copy_nonoverlapping`, and self-assignment through it is undefined.
+    ///
+    /// # Panics
+    ///
+    /// If `index` is out of bounds. Unlike [`get_mut`](Self::get_mut) this
+    /// cannot report failure by returning nothing, because failing would mean
+    /// silently leaking the caller's value.
+    pub unsafe fn replace(&mut self, index: usize, value: *const u8, tick: Tick) {
+        assert!(
+            index < self.len,
+            "replace index {index} is out of bounds for a column of {} elements",
+            self.len
+        );
+
+        // SAFETY: the bounds check above, and elements below `len` are
+        // initialized by invariant 2.
+        let slot = unsafe { self.element_ptr(index) };
+
+        if let Some(drop_in_place) = self.drop_in_place {
+            // SAFETY: the slot holds an initialized value of this column's type,
+            // and it is overwritten immediately below so this runs once.
+            unsafe { drop_in_place(slot) };
+        }
+
+        // SAFETY: the slot is now uninitialized space for one element, and the
+        // caller guarantees `value` is a distinct, initialized value of the
+        // right type.
+        unsafe { std::ptr::copy_nonoverlapping(value, slot, self.layout.size()) };
+
+        self.changed[index].set(tick);
     }
 
     /// Every element as raw bytes.
@@ -329,6 +484,8 @@ impl Column {
         }
 
         self.len = 0;
+        self.added.clear();
+        self.changed.clear();
     }
 
     /// A pointer to element `index`, without a bounds check.
@@ -348,9 +505,13 @@ impl Column {
     /// Move the last element into `index`, shrinking by one.
     ///
     /// The element previously at `index` must already have been dropped or moved
-    /// out; this only relocates the tail over it.
+    /// out; this only relocates the tail over it — and its stamps with it, which
+    /// is what keeps invariant 5 true through a swap-remove.
     fn move_last_into(&mut self, index: usize) {
         let last = self.len - 1;
+
+        self.added.swap_remove(index);
+        self.changed.swap_remove(index);
 
         if index != last && self.layout.size() != 0 {
             // SAFETY: both indices are within the allocation and `last` is
@@ -462,12 +623,17 @@ mod tests {
 
     /// Push a typed value, handing the column ownership.
     fn push<T>(column: &mut Column, value: T) {
+        push_at(column, value, Tick::new(1));
+    }
+
+    /// Push a typed value stamped at `tick`.
+    fn push_at<T>(column: &mut Column, value: T, tick: Tick) {
         let value = std::mem::ManuallyDrop::new(value);
 
         // SAFETY: `value` is an initialized `T`, the column was built from
         // `T`'s own `TypeInfo`, and `ManuallyDrop` stops it being dropped here
         // after the column takes ownership.
-        unsafe { column.push(std::ptr::from_ref(&*value).cast::<u8>()) };
+        unsafe { column.push(std::ptr::from_ref(&*value).cast::<u8>(), tick) };
     }
 
     /// Read element `index` as a `T`.
@@ -589,7 +755,7 @@ mod tests {
         // column holds `Witness` values.
         let removed = unsafe { column.swap_remove_to(0, moved.as_mut_ptr().cast::<u8>()) };
 
-        assert!(removed);
+        assert!(removed.is_some(), "the element's stamps come back with it");
         assert_eq!(column.len(), 0);
         assert_eq!(
             Rc::strong_count(&witness),
@@ -597,7 +763,7 @@ mod tests {
             "the value must have been moved, not dropped"
         );
 
-        // SAFETY: `swap_remove_to` returned true, so `moved` is initialized.
+        // SAFETY: `swap_remove_to` returned `Some`, so `moved` is initialized.
         let moved = unsafe { moved.assume_init() };
         drop(moved);
 

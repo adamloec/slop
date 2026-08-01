@@ -36,19 +36,39 @@
 //! The consequence worth stating plainly: there is no "unregistered component".
 //! A type the editor cannot inspect and the serializer cannot write would be a
 //! component that silently vanishes from a save file.
+//!
+//! # Structural change comes in two forms
+//!
+//! [`World::insert`], [`World::remove`], [`World::spawn`] and
+//! [`World::despawn`] all take `&mut World`, because all of them physically move
+//! an entity's data between tables. That is the right shape for loading a scene
+//! and for a single-threaded tool.
+//!
+//! It is the wrong shape for a system, which holds a query — and a query is a
+//! borrow. §2.10 calls the resolution *required for safe parallel system
+//! execution regardless*: a [`CommandBuffer`] records the change and
+//! [`World::apply`] performs it at an explicit sync point. Both paths stay; they
+//! are for different callers rather than one superseding the other.
 
 mod archetype;
 mod column;
+mod command;
 mod error;
 mod query;
 mod signature;
+mod tick;
 mod world;
 
 pub use archetype::{Archetype, EntityTag, Row};
 pub use column::Column;
+pub use command::{CommandBuffer, Target};
 pub use error::EcsError;
-pub use query::{Access, Query, QueryData, ReadOnlyQueryData};
+pub use query::{
+    Access, Added, Changed, Mut, Or, Query, QueryData, QueryFilter, ReadOnlyQueryData, With,
+    Without,
+};
 pub use signature::Signature;
+pub use tick::{ElementTicks, MAX_AGE, Tick, Ticks};
 pub use world::World;
 
 /// An entity: an id, and nothing else.

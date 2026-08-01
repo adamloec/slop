@@ -146,7 +146,7 @@ fn a_mutable_query_writes_through_to_storage() {
         moving(&mut world, seed);
     }
 
-    for (position, velocity) in world.query_mut::<(&mut Position, &Velocity)>() {
+    for (mut position, velocity) in world.query_mut::<(&mut Position, &Velocity)>() {
         position.x += velocity.dx;
         position.y += velocity.dy;
     }
@@ -314,7 +314,7 @@ fn a_mutable_query_can_replace_an_owning_component() {
             .expect("ok");
     }
 
-    for name in world.query_mut::<&mut Name>() {
+    for mut name in world.query_mut::<&mut Name>() {
         name.text = format!("replaced: {}", name.text);
     }
 

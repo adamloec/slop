@@ -12,7 +12,7 @@
 
 use slop_reflect::{TypeId, TypeRegistry};
 
-use crate::{Column, EcsError, Entity, Signature};
+use crate::{Column, EcsError, ElementTicks, Entity, Signature, Tick};
 
 /// A position within an archetype's columns.
 ///
@@ -122,6 +122,10 @@ impl Archetype {
     /// migration relocates bytes out of another archetype's columns. Both need
     /// somewhere to write, and neither has a uniform typed value to hand over.
     ///
+    /// Every component in the row is stamped added-and-changed at `tick`. A
+    /// migration that wants to preserve the stamps its components arrived with
+    /// overwrites them afterwards through [`Column::set_ticks`].
+    ///
     /// # Safety
     ///
     /// The caller must initialize **every** returned slot with a valid value of
@@ -130,7 +134,8 @@ impl Archetype {
     /// is undefined behaviour the next time the column is read or dropped.
     ///
     /// [`Column`]: crate::Column
-    pub unsafe fn begin_row(&mut self, entity: Entity) -> (Row, Vec<*mut u8>) {
+    /// [`Column::set_ticks`]: crate::Column::set_ticks
+    pub unsafe fn begin_row(&mut self, entity: Entity, tick: Tick) -> (Row, Vec<*mut u8>) {
         let row = Row(self.entities.len());
         self.entities.push(entity);
 
@@ -139,10 +144,30 @@ impl Archetype {
             .iter_mut()
             // SAFETY: the caller undertakes to initialize every slot, which is
             // exactly `push_uninit`'s obligation passed along.
-            .map(|column| unsafe { column.push_uninit() })
+            .map(|column| unsafe { column.push_uninit(tick) })
             .collect();
 
         (row, slots)
+    }
+
+    /// Overwrite one row's change-detection stamps, column by column.
+    ///
+    /// `ticks` is parallel to [`columns`](Self::columns), as
+    /// [`begin_row`](Self::begin_row)'s slots are. Used by migration, which
+    /// relocates components rather than writing them and so must not report them
+    /// as changed.
+    pub fn set_row_ticks(&mut self, row: Row, ticks: &[Option<ElementTicks>]) {
+        debug_assert_eq!(
+            ticks.len(),
+            self.columns.len(),
+            "one entry per column is required"
+        );
+
+        for (column, ticks) in self.columns.iter_mut().zip(ticks) {
+            if let Some(ticks) = *ticks {
+                column.set_ticks(row.0, ticks);
+            }
+        }
     }
 
     /// Remove `row`, dropping its components.
@@ -254,6 +279,7 @@ impl Archetype {
                 column.len(),
                 self.entities.len(),
             );
+            column.assert_consistent();
         }
 
         assert_eq!(
@@ -324,7 +350,7 @@ mod tests {
         // SAFETY: every slot is written immediately below, in signature order,
         // with a value of that column's type.
         unsafe {
-            let (row, slots) = archetype.begin_row(entity);
+            let (row, slots) = archetype.begin_row(entity, Tick::new(1));
 
             for (&slot, &type_id) in slots.iter().zip(archetype.signature().types()) {
                 if type_id == Position::type_id() {
@@ -519,7 +545,7 @@ mod tests {
         // both archetypes have the same signature, and `move_row_out` writes
         // every slot with a value of that column's type.
         unsafe {
-            let (row, slots) = destination.begin_row(entity(0));
+            let (row, slots) = destination.begin_row(entity(0), Tick::new(1));
             source.move_row_out(Row(0), &slots);
 
             assert_eq!(
@@ -545,7 +571,7 @@ mod tests {
             Archetype::new(Signature::empty(), &registry()).expect("no types to resolve");
 
         // SAFETY: there are no slots to initialize.
-        let (row, slots) = unsafe { archetype.begin_row(entity(0)) };
+        let (row, slots) = unsafe { archetype.begin_row(entity(0), Tick::new(1)) };
 
         assert!(slots.is_empty());
         assert_eq!(row, Row(0));
