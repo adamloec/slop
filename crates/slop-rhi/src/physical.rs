@@ -16,7 +16,7 @@
 use ash::vk;
 use slop_core::diagnostics::tracing::{info, warn};
 
-use crate::{Instance, QueueFamilies, RhiError};
+use crate::{Instance, QueueFamilies, RhiError, Surface};
 
 /// Broad category of adapter, as the driver reports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,8 +182,8 @@ pub enum DeviceSelection {
 
 /// List every adapter the instance can see, usable or not.
 ///
-/// `surface` is `(loader, handle)` when the result must be able to present;
-/// `None` enumerates for headless use.
+/// Pass a surface when the result must be able to present; `None` enumerates
+/// for headless use.
 ///
 /// # Errors
 ///
@@ -191,7 +191,7 @@ pub enum DeviceSelection {
 /// reported through [`DeviceInfo::rejection`], not as errors.
 pub fn enumerate(
     instance: &Instance,
-    surface: Option<(&ash::khr::surface::Instance, vk::SurfaceKHR)>,
+    surface: Option<&Surface>,
 ) -> Result<Vec<DeviceInfo>, RhiError> {
     // SAFETY: the instance is alive for the duration of this call.
     let handles = unsafe { instance.raw().enumerate_physical_devices() }?;
@@ -205,7 +205,7 @@ pub fn enumerate(
 fn describe(
     instance: &Instance,
     handle: vk::PhysicalDevice,
-    surface: Option<(&ash::khr::surface::Instance, vk::SurfaceKHR)>,
+    surface: Option<&Surface>,
 ) -> DeviceInfo {
     let mut id_properties = vk::PhysicalDeviceIDProperties::default();
     let mut properties2 = vk::PhysicalDeviceProperties2::default().push_next(&mut id_properties);

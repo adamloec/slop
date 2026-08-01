@@ -31,12 +31,12 @@ pub struct QueueFamilies {
 impl QueueFamilies {
     /// Find suitable families, or `None` if this device cannot serve the engine.
     ///
-    /// `surface` is `(loader, handle)` when presenting; `None` selects for
-    /// headless use, which `docs/DESIGN.md` §5 requires.
+    /// Pass a surface when the result must be able to present; `None` selects
+    /// for headless use, which `docs/DESIGN.md` §5 requires.
     pub(crate) fn find(
         instance: &ash::Instance,
         device: vk::PhysicalDevice,
-        surface: Option<(&ash::khr::surface::Instance, vk::SurfaceKHR)>,
+        surface: Option<&crate::Surface>,
     ) -> Option<Self> {
         // SAFETY: `device` came from this instance's enumeration, and this query
         // has no other preconditions.
@@ -62,13 +62,14 @@ impl QueueFamilies {
 
         let present = match surface {
             None => None,
-            Some((loader, handle)) => {
+            Some(surface) => {
                 let found = (0..families.len() as u32).find(|&index| {
                     // SAFETY: `index` is within the family count just queried,
-                    // and `handle` belongs to `loader`'s instance.
+                    // and the surface belongs to the same instance as `device`.
                     unsafe {
-                        loader
-                            .get_physical_device_surface_support(device, index, handle)
+                        surface
+                            .loader()
+                            .get_physical_device_surface_support(device, index, surface.handle())
                             .unwrap_or(false)
                     }
                 });

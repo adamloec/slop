@@ -24,8 +24,9 @@ Started. This is the bulk of M0 and the largest single body of work in it.
 | Queue family discovery | Landed | M0 |
 | Required feature tier, checked at selection | Landed | M0 |
 | Logical device, queue creation | Landed | M0 |
+| Surface, and surface capability queries | Landed | M0 |
 | `gpu-allocator` integration | Planned | M0 |
-| Surface, swapchain and recreation | Planned | M0 |
+| Swapchain and recreation | Planned | M0 |
 | Command pools and buffers | Planned | M0 |
 | Timeline semaphores, explicit barriers | Planned | M0 |
 | Bindless descriptor heap | Planned | M0 |
@@ -227,6 +228,14 @@ creating the device anyway.
     across hardware or driver changes; `deviceUUID` is.
 12. **Required features are declared only in `features.rs`.** A capability check
     anywhere else is the capability-tier branching §2.1 exists to prevent.
+13. **This crate never depends on a windowing library.** `Surface` takes raw
+    handles via `raw-window-handle`, so the RHI stays agnostic, the headless
+    path pulls in no window code, and an embedder can supply a surface from
+    windows it already owns. Joining `winit` to Vulkan is `slop-app`'s job.
+14. **Swapchain extents come from the surface, in physical pixels.** A window
+    requested at 1280×720 logical pixels reports a 1920×1080 surface on a
+    display at 150% scaling. Sizing a swapchain from the logical request
+    produces blurry output or validation errors.
 13. **Enable an extension only when it is needed and its dependencies are
     present.** A permissive driver accepting an invalid create-info is not
     evidence of correctness.

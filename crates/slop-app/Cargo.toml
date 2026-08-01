@@ -1,4 +1,4 @@
-[package]
+﻿[package]
 name = "slop-app"
 version.workspace = true
 edition.workspace = true
@@ -12,6 +12,8 @@ repository.workspace = true
 slop-core = { workspace = true, features = ["subscriber"] }
 slop-math = { workspace = true }
 slop-rhi = { workspace = true }
+thiserror.workspace = true
+winit = { workspace = true }
 
 [lints]
 workspace = true

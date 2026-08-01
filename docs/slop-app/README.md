@@ -18,7 +18,7 @@ Stub.
 | Area | State | Milestone |
 |---|---|---|
 | `logging` — log filter policy, `SLOP_LOG` | Landed | M0 |
-| Window creation via `winit` | Planned | M0 |
+| `window` — creation, and the winit-to-Vulkan seam | Landed | M0 |
 | Main loop wiring sim and render | Planned | M0 |
 | Configuration file, CLI arguments | Planned | M2 |
 | Module and plugin wiring | Planned | M4 |
@@ -76,7 +76,34 @@ Three things this buys, none of which survive a shared global:
 and reads nothing, while `logging::filter_from_env` decides that the filter comes
 from `SLOP_LOG`.
 
-## 5. Decisions
+## 5. The winit-to-Vulkan seam
+
+This is the only place in the engine that knows both a windowing library and
+Vulkan exist. `slop-rhi` takes raw handles and has no `winit` dependency;
+`winit` knows nothing about Vulkan.
+
+```mermaid
+flowchart LR
+    win["winit Window"] -->|"raw display handle"| ext("required_instance_extensions")
+    ext -->|"VK_KHR_surface plus platform"| inst["Instance"]
+    win -->|"raw window + display handles"| surf("create_surface")
+    inst --> surf
+    surf --> surface["Surface"]
+    surface --> enum2("enumerate with present support")
+    enum2 --> dev["Device"]
+```
+
+The ordering is a Vulkan constraint, not an arbitrary one: the instance must be
+created *already knowing* which surface extensions the display needs, so the
+window has to exist first.
+
+**No event loop or main loop lives here.** `DESIGN.md` §1.2 principle 4 says the
+game owns `main()`, so the caller implements winit's `ApplicationHandler` and
+drives the loop. Wrapping that would make the engine a framework, and the loop's
+eventual shape depends on the renderer — the same reasoning that keeps the M0
+RHI thin (`PLAN.md` §4.1-D). `examples/window` is the worked example.
+
+## 6. Decisions
 
 | Decision | Where |
 |---|---|
@@ -85,7 +112,7 @@ from `SLOP_LOG`.
 | Fixed-timestep sim, interpolated rendering | `DESIGN.md` §2.7 |
 | Renderer consumes a snapshot, never live world state | `DESIGN.md` §2.9 |
 
-## 6. Invariants
+## 7. Invariants
 
 1. **No hidden global state.** No singleton device, world, or "current app".
    Globals are exactly what make headless mode, multiple editor worlds, and
@@ -101,3 +128,10 @@ from `SLOP_LOG`.
 6. **No central `Config` struct.** It would have to name every crate's types,
    inverting the dependency graph, and every crate would come to depend on it.
    Each crate owns its own; this one assembles them.
+7. **`winit` is re-exported and must not be duplicated.** A consumer depending
+   on its own `winit` risks two versions in the graph, which makes the
+   `raw-window-handle` types incompatible and breaks surface creation with an
+   error that reads as nonsense.
+8. **A `Surface` must be dropped before its window.** Vulkan cannot detect a
+   surface outliving its window. Keep them in one struct with the surface
+   declared first, as `examples/window` does.

@@ -16,3 +16,10 @@
 //! fighting over ambient state.
 
 pub mod logging;
+pub mod window;
+
+/// Re-exported so consumers need no `winit` dependency of their own, and so the
+/// engine cannot end up split across two versions of it — which would make the
+/// `raw-window-handle` types incompatible and surface creation fail to compile
+/// for reasons that read as nonsense.
+pub use winit;

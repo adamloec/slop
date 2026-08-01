@@ -32,11 +32,13 @@ mod features;
 mod instance;
 mod physical;
 mod queues;
+mod surface;
 
 pub use device::{Device, Queues};
 pub use error::RhiError;
 pub use instance::{Instance, InstanceConfig, Validation};
 pub use physical::{DeviceInfo, DeviceKind, DeviceSelection, Rejection, enumerate, select};
 pub use queues::QueueFamilies;
+pub use surface::{Surface, required_surface_extensions};
 
 pub(crate) use instance::REQUIRED_API_VERSION;

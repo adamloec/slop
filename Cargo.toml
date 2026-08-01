@@ -1,6 +1,10 @@
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+# Examples are workspace members rather than per-crate `examples/` files: they
+# are runnable applications that own `main()`, which is exactly what DESIGN.md
+# §1.2 principle 4 says a game does. WASM guest modules will NOT live here —
+# they build for wasm32-wasip2 and get their own workspace (CONVENTIONS.md §1).
+members = ["crates/*", "examples/*"]
 
 [workspace.package]
 version = "0.0.0"
@@ -13,6 +17,7 @@ repository = "https://github.com/adamloec/slop"
 # Internal crates. External dependencies are added with `cargo add` at the point
 # of first use so that recorded versions are real rather than guessed, then
 # hoisted here so every crate resolves to one version.
+slop-app = { path = "crates/slop-app" }
 slop-core = { path = "crates/slop-core" }
 slop-math = { path = "crates/slop-math" }
 slop-rhi = { path = "crates/slop-rhi" }
@@ -35,6 +40,17 @@ ash = "0.38.0"
 # Error enums for library crates. `anyhow` is for application boundaries only,
 # per CONVENTIONS.md §6.
 thiserror = "2.0.19"
+
+# Windowing. `winit` is the OS window and input layer; `ash-window` and
+# `raw-window-handle` are how a Vulkan surface is created without hand-rolling
+# platform surface code, per DESIGN.md §2.13's trap table.
+#
+# Note the split: only slop-app depends on `winit`. slop-rhi depends on
+# `raw-window-handle` alone, so it stays windowing-system agnostic and the
+# headless path never pulls in a window library.
+winit = "0.30.13"
+ash-window = "0.13.0"
+raw-window-handle = "0.6.2"
 
 [workspace.lints.rust]
 rust_2018_idioms = { level = "warn", priority = -1 }

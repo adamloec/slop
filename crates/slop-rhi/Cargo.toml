@@ -8,6 +8,10 @@ repository.workspace = true
 
 [dependencies]
 ash = { workspace = true }
+# Deliberately not `winit`: the RHI takes raw window handles, so it stays
+# agnostic to the windowing system and the headless path pulls in nothing.
+ash-window = { workspace = true }
+raw-window-handle = { workspace = true }
 slop-core = { workspace = true }
 thiserror = { workspace = true }
 
