@@ -125,7 +125,7 @@ impl Image {
             .view_type(vk::ImageViewType::TYPE_2D)
             .format(config.format)
             .subresource_range(vk::ImageSubresourceRange {
-                aspect_mask: vk::ImageAspectFlags::COLOR,
+                aspect_mask: aspect_of(config.format),
                 base_mip_level: 0,
                 level_count: 1,
                 base_array_layer: 0,
@@ -173,6 +173,82 @@ impl Image {
     pub fn format(&self) -> vk::Format {
         self.format
     }
+
+    /// Which aspect this image's format carries, for barriers and copies.
+    pub fn aspect(&self) -> vk::ImageAspectFlags {
+        aspect_of(self.format)
+    }
+}
+
+/// The aspect mask a format implies.
+///
+/// Derived rather than asked for. An aspect that disagrees with the format is
+/// rejected by validation with a message about the subresource range, several
+/// steps from the call that chose it — and there is exactly one right answer per
+/// format, so asking the caller only creates the opportunity to be wrong.
+pub fn aspect_of(format: vk::Format) -> vk::ImageAspectFlags {
+    match format {
+        // Depth only.
+        vk::Format::D16_UNORM | vk::Format::X8_D24_UNORM_PACK32 | vk::Format::D32_SFLOAT => {
+            vk::ImageAspectFlags::DEPTH
+        }
+        // Depth and stencil together. Both aspects must appear in a barrier
+        // covering such an image, or the transition is incomplete.
+        vk::Format::D16_UNORM_S8_UINT
+        | vk::Format::D24_UNORM_S8_UINT
+        | vk::Format::D32_SFLOAT_S8_UINT => {
+            vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
+        }
+        vk::Format::S8_UINT => vk::ImageAspectFlags::STENCIL,
+        _ => vk::ImageAspectFlags::COLOR,
+    }
+}
+
+/// The best depth format this device supports, and whether it carries stencil.
+///
+/// Preference order is `D32_SFLOAT` first, and that is a `docs/DESIGN.md` §2.7
+/// decision rather than a taste one: `slop-math` commits to **reversed** depth,
+/// which buys its precision from the floating-point exponent. A 24-bit
+/// fixed-point format has uniform spacing and gains nothing from reversal, so
+/// pairing reverse-Z with `D24_UNORM_S8_UINT` would pay the complexity and
+/// collect none of the benefit.
+///
+/// Stencil is not requested. Nothing needs it yet, and a combined format costs
+/// bandwidth on every depth write. It appears in the fallbacks only because a
+/// device offering no pure-depth format leaves no choice.
+///
+/// # Panics
+///
+/// Panics if the device supports no depth format at all as a depth attachment.
+/// Vulkan requires `D16_UNORM` of every implementation, so this is unreachable
+/// on a conformant driver and would mean the device is lying about its formats.
+pub fn preferred_depth_format(device: &Arc<crate::Device>) -> vk::Format {
+    const CANDIDATES: [vk::Format; 4] = [
+        vk::Format::D32_SFLOAT,
+        vk::Format::D32_SFLOAT_S8_UINT,
+        vk::Format::D24_UNORM_S8_UINT,
+        // Required of every conformant implementation, so this is the floor.
+        vk::Format::D16_UNORM,
+    ];
+
+    for format in CANDIDATES {
+        // SAFETY: the physical device came from this instance's enumeration.
+        let properties = unsafe {
+            device
+                .instance()
+                .raw()
+                .get_physical_device_format_properties(device.physical_device(), format)
+        };
+
+        if properties
+            .optimal_tiling_features
+            .contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT)
+        {
+            return format;
+        }
+    }
+
+    unreachable!("Vulkan requires D16_UNORM support on every conformant device")
 }
 
 impl Drop for Image {

@@ -30,6 +30,27 @@ use crate::{Device, RhiError, ShaderModule};
 /// that picked right-handed Y-up in `slop-math`. Vulkan's default agrees.
 const FRONT_FACE: vk::FrontFace = vk::FrontFace::COUNTER_CLOCKWISE;
 
+/// The depth comparison, fixed by the reversed depth convention.
+///
+/// `slop-math` maps the near plane to 1.0 and the far plane to 0.0, so "closer"
+/// means "larger" and a fragment passes when its depth is **greater** than what
+/// is already there. The conventional `LESS` is silently wrong under reverse-Z:
+/// nothing fails, the depth buffer simply keeps the furthest surface at every
+/// pixel and the scene renders inside out.
+///
+/// Three things must agree, and they live in three files: this comparison, the
+/// clear value ([`DEPTH_CLEAR`]), and the projection matrix in `slop-math`. Two
+/// out of three produces a plausible-looking image that is wrong, which is why
+/// `docs/DESIGN.md` §1.2 principle 6 called this a rewrite rather than a
+/// refactor and why it was settled at M0.
+pub const DEPTH_COMPARE: vk::CompareOp = vk::CompareOp::GREATER_OR_EQUAL;
+
+/// The value a depth attachment is cleared to.
+///
+/// Zero, being the far plane under reverse-Z. Clearing to the conventional 1.0
+/// would put the far plane at *near*, and every fragment would fail the test.
+pub const DEPTH_CLEAR: f32 = 0.0;
+
 /// What a shader stage is, and where to find it.
 ///
 /// One cooked module carries every entry point its source declared, so a vertex
@@ -53,6 +74,19 @@ pub struct GraphicsPipelineConfig<'a> {
     ///
     /// Must match the swapchain's, or the driver rejects the draw.
     pub color_format: vk::Format,
+    /// Format of the depth attachment, or `None` for a pipeline that neither
+    /// tests nor writes depth.
+    ///
+    /// Must match the format the depth image was created with, and must be
+    /// `None` when rendering supplies no depth attachment. A mismatch either way
+    /// is a validation error at draw time rather than at pipeline creation.
+    ///
+    /// When present, depth testing and writing are both **on**, comparing with
+    /// [`DEPTH_COMPARE`]. There is no knob: a pipeline that wants depth read
+    /// without write, or a different comparison, is a different pipeline, and
+    /// inventing the configuration surface before a pass needs it would be
+    /// designing against imagined requirements (`docs/PLAN.md` §4.1-D).
+    pub depth_format: Option<vk::Format>,
     /// Whether to discard back faces. Off is useful while debugging geometry
     /// whose winding is in doubt.
     pub cull_back_faces: bool,
@@ -231,9 +265,20 @@ impl GraphicsPipeline {
         let dynamic_state =
             vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
 
+        // Reverse-Z throughout — see `DEPTH_COMPARE`. Depth bounds stay off:
+        // they are a culling optimization needing a separate feature, and using
+        // them with a reversed range inverts their sense too.
+        let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
+            .depth_test_enable(config.depth_format.is_some())
+            .depth_write_enable(config.depth_format.is_some())
+            .depth_compare_op(DEPTH_COMPARE)
+            .depth_bounds_test_enable(false)
+            .stencil_test_enable(false);
+
         let color_formats = [config.color_format];
-        let mut rendering =
-            vk::PipelineRenderingCreateInfo::default().color_attachment_formats(&color_formats);
+        let mut rendering = vk::PipelineRenderingCreateInfo::default()
+            .color_attachment_formats(&color_formats)
+            .depth_attachment_format(config.depth_format.unwrap_or(vk::Format::UNDEFINED));
 
         let create_info = vk::GraphicsPipelineCreateInfo::default()
             .stages(&stages)
@@ -242,6 +287,7 @@ impl GraphicsPipeline {
             .viewport_state(&viewport_state)
             .rasterization_state(&rasterization)
             .multisample_state(&multisample)
+            .depth_stencil_state(&depth_stencil)
             .color_blend_state(&color_blend)
             .dynamic_state(&dynamic_state)
             .layout(layout.handle())

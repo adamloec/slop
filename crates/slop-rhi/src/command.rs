@@ -92,6 +92,98 @@ impl ImageState {
         stage: vk::PipelineStageFlags2::TRANSFER,
         access: vk::AccessFlags2::TRANSFER_READ,
     };
+
+    /// Being depth-tested and written.
+    ///
+    /// Both stages, and both accesses. The early fragment test reads and writes
+    /// depth before the fragment shader runs, and the late test does so after —
+    /// naming only one is the classic depth barrier bug, because it works right
+    /// up until a shader discards or writes its own depth and the driver moves
+    /// the test to the other stage.
+    pub const DEPTH_ATTACHMENT: Self = Self {
+        layout: vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+        stage: vk::PipelineStageFlags2::from_raw(
+            vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS.as_raw()
+                | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS.as_raw(),
+        ),
+        access: vk::AccessFlags2::from_raw(
+            vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ.as_raw()
+                | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE.as_raw(),
+        ),
+    };
+
+    /// Depth being read by a shader, as in a shadow map or a depth prepass
+    /// consumed later in the frame.
+    pub const DEPTH_READ: Self = Self {
+        layout: vk::ImageLayout::DEPTH_READ_ONLY_OPTIMAL,
+        stage: vk::PipelineStageFlags2::FRAGMENT_SHADER,
+        access: vk::AccessFlags2::SHADER_SAMPLED_READ,
+    };
+}
+
+/// A point in a buffer's lifetime.
+///
+/// The same idea as [`ImageState`] minus the layout, which buffers do not have.
+/// Naming the pairs once is what keeps a stage and its access mask from drifting
+/// apart — a barrier with the right stage and the wrong access is not a
+/// validation error, it is a race that reproduces on one vendor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BufferState {
+    /// The pipeline stages that must complete, or must wait.
+    pub stage: vk::PipelineStageFlags2,
+    /// The memory accesses to make visible, or available.
+    pub access: vk::AccessFlags2,
+}
+
+impl BufferState {
+    /// Just written by the CPU through a mapped pointer.
+    pub const HOST_WRITE: Self = Self {
+        stage: vk::PipelineStageFlags2::HOST,
+        access: vk::AccessFlags2::HOST_WRITE,
+    };
+
+    /// About to be read by the CPU.
+    pub const HOST_READ: Self = Self {
+        stage: vk::PipelineStageFlags2::HOST,
+        access: vk::AccessFlags2::HOST_READ,
+    };
+
+    /// The source of a copy.
+    pub const TRANSFER_SRC: Self = Self {
+        stage: vk::PipelineStageFlags2::TRANSFER,
+        access: vk::AccessFlags2::TRANSFER_READ,
+    };
+
+    /// The destination of a copy.
+    pub const TRANSFER_DST: Self = Self {
+        stage: vk::PipelineStageFlags2::TRANSFER,
+        access: vk::AccessFlags2::TRANSFER_WRITE,
+    };
+
+    /// Being fetched as vertex attributes.
+    pub const VERTEX_INPUT: Self = Self {
+        stage: vk::PipelineStageFlags2::VERTEX_ATTRIBUTE_INPUT,
+        access: vk::AccessFlags2::VERTEX_ATTRIBUTE_READ,
+    };
+
+    /// Being fetched as indices.
+    pub const INDEX_INPUT: Self = Self {
+        stage: vk::PipelineStageFlags2::INDEX_INPUT,
+        access: vk::AccessFlags2::INDEX_READ,
+    };
+
+    /// Read by a shader — including through a device address, which is how
+    /// `docs/DESIGN.md` §2.2's GPU-driven passes reach most buffers.
+    pub const SHADER_READ: Self = Self {
+        stage: vk::PipelineStageFlags2::ALL_COMMANDS,
+        access: vk::AccessFlags2::SHADER_READ,
+    };
+
+    /// Supplying draw or dispatch parameters to an indirect command.
+    pub const INDIRECT: Self = Self {
+        stage: vk::PipelineStageFlags2::DRAW_INDIRECT,
+        access: vk::AccessFlags2::INDIRECT_COMMAND_READ,
+    };
 }
 
 /// Allocates command buffers for one thread and one frame in flight.
@@ -249,11 +341,24 @@ impl CommandBuffer {
         Ok(())
     }
 
-    /// Record a layout transition for a whole colour image.
+    /// Record a layout transition for a whole image.
     ///
-    /// Covers the common case — one mip, one array layer, colour aspect — which
-    /// is every swapchain image. Anything else builds its own barrier.
-    pub fn transition_image(&self, image: vk::Image, from: ImageState, to: ImageState) {
+    /// Covers one mip and one array layer, which is every image the engine has
+    /// so far. `aspect` comes from the image's format —
+    /// [`Image::aspect`](crate::Image::aspect) supplies it, and
+    /// [`aspect_of`](crate::aspect_of) derives it for a raw handle such as a
+    /// swapchain image.
+    ///
+    /// It is a parameter rather than a constant because a depth image needs
+    /// `DEPTH`, a depth-stencil image needs both, and a barrier naming the
+    /// wrong aspect transitions nothing while reporting nothing.
+    pub fn transition_image(
+        &self,
+        image: vk::Image,
+        aspect: vk::ImageAspectFlags,
+        from: ImageState,
+        to: ImageState,
+    ) {
         let barrier = vk::ImageMemoryBarrier2::default()
             .src_stage_mask(from.stage)
             .src_access_mask(from.access)
@@ -269,7 +374,7 @@ impl CommandBuffer {
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .image(image)
             .subresource_range(vk::ImageSubresourceRange {
-                aspect_mask: vk::ImageAspectFlags::COLOR,
+                aspect_mask: aspect,
                 base_mip_level: 0,
                 level_count: 1,
                 base_array_layer: 0,
@@ -289,24 +394,17 @@ impl CommandBuffer {
         }
     }
 
-    /// Record a barrier making prior transfer writes to `buffer` readable by the
-    /// CPU.
+    /// Record a barrier moving `buffer` from one state to another.
     ///
-    /// Mapped memory being host-coherent means no cache maintenance is needed,
-    /// but coherence is not ordering: without this barrier the host may observe
-    /// the buffer before the copy that filled it has completed, and the read
-    /// silently returns whatever was there. Waiting on a semaphore is not a
-    /// substitute — it orders execution, and this orders memory.
-    ///
-    /// The `HOST` pipeline stage exists precisely for this, and is the only
-    /// place in the engine it should appear: everything else in a frame is
-    /// ordered GPU-side.
-    pub fn make_visible_to_host(&self, buffer: vk::Buffer) {
+    /// Covers the whole buffer. Sub-range barriers exist and are almost never
+    /// what is wanted — a buffer written in one pass and read in the next is
+    /// read whole.
+    pub fn barrier_buffer(&self, buffer: vk::Buffer, from: BufferState, to: BufferState) {
         let barriers = [vk::BufferMemoryBarrier2::default()
-            .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
-            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-            .dst_stage_mask(vk::PipelineStageFlags2::HOST)
-            .dst_access_mask(vk::AccessFlags2::HOST_READ)
+            .src_stage_mask(from.stage)
+            .src_access_mask(from.access)
+            .dst_stage_mask(to.stage)
+            .dst_access_mask(to.access)
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .buffer(buffer)
@@ -323,6 +421,93 @@ impl CommandBuffer {
                 .raw()
                 .cmd_pipeline_barrier2(self.handle, &dependency);
         }
+    }
+
+    /// Record a copy between two buffers.
+    ///
+    /// The upload path: write into a host-visible staging buffer, copy here,
+    /// and the data lands in device-local memory the GPU reads at full speed.
+    /// Mapping a device-local buffer directly is not possible on most discrete
+    /// hardware, and where it is, writes go over PCIe on every read.
+    ///
+    /// `size` bytes from the start of each. Both buffers need the matching
+    /// `TRANSFER_SRC` and `TRANSFER_DST` usage flags.
+    pub fn copy_buffer(&self, source: vk::Buffer, destination: vk::Buffer, size: u64) {
+        let regions = [vk::BufferCopy::default()
+            .src_offset(0)
+            .dst_offset(0)
+            .size(size)];
+
+        // SAFETY: the buffer is recording, `regions` outlives the call, and
+        // both buffers carrying the right usage flags is the caller's
+        // obligation — one validation reports if broken.
+        unsafe {
+            self.device
+                .raw()
+                .cmd_copy_buffer(self.handle, source, destination, &regions);
+        }
+    }
+
+    /// Record a copy from a buffer into a whole image, tightly packed.
+    ///
+    /// The inverse of [`copy_image_to_buffer`](Self::copy_image_to_buffer), and
+    /// how a texture gets to the GPU. The image must already be in
+    /// [`ImageState::TRANSFER_DST`], and the source rows must be tightly packed
+    /// — zero for both `bufferRowLength` and `bufferImageHeight` means "the same
+    /// as the copy extent", so the stride is `width * bytes_per_pixel` with no
+    /// padding.
+    pub fn copy_buffer_to_image(
+        &self,
+        buffer: vk::Buffer,
+        image: vk::Image,
+        aspect: vk::ImageAspectFlags,
+        extent: vk::Extent2D,
+    ) {
+        let regions = [vk::BufferImageCopy::default()
+            .buffer_offset(0)
+            .buffer_row_length(0)
+            .buffer_image_height(0)
+            .image_subresource(vk::ImageSubresourceLayers {
+                aspect_mask: aspect,
+                mip_level: 0,
+                base_array_layer: 0,
+                layer_count: 1,
+            })
+            .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+            .image_extent(vk::Extent3D {
+                width: extent.width,
+                height: extent.height,
+                depth: 1,
+            })];
+
+        // SAFETY: the buffer is recording, `regions` outlives the call, and the
+        // image being in TRANSFER_DST_OPTIMAL is the caller's documented
+        // obligation.
+        unsafe {
+            self.device.raw().cmd_copy_buffer_to_image(
+                self.handle,
+                buffer,
+                image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &regions,
+            );
+        }
+    }
+
+    /// Record a barrier making prior transfer writes to `buffer` readable by the
+    /// CPU.
+    ///
+    /// Mapped memory being host-coherent means no cache maintenance is needed,
+    /// but coherence is not ordering: without this barrier the host may observe
+    /// the buffer before the copy that filled it has completed, and the read
+    /// silently returns whatever was there. Waiting on a semaphore is not a
+    /// substitute — it orders execution, and this orders memory.
+    ///
+    /// The `HOST` pipeline stage exists precisely for this, and is the only
+    /// place in the engine it should appear: everything else in a frame is
+    /// ordered GPU-side.
+    pub fn make_visible_to_host(&self, buffer: vk::Buffer) {
+        self.barrier_buffer(buffer, BufferState::TRANSFER_DST, BufferState::HOST_READ);
     }
 
     /// Record a copy of a whole colour image into a buffer, tightly packed.

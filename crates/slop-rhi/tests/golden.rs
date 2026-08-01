@@ -176,6 +176,8 @@ impl Headless {
                     entry: c"fragmentMain",
                 },
                 color_format: FORMAT,
+                // No depth: one flat primitive with nothing to occlude it.
+                depth_format: None,
                 // On, matching the windowed path. A triangle wound the wrong way
                 // vanishes silently with no validation complaint, so this is the
                 // only thing that catches it — and here it would produce a
@@ -212,6 +214,7 @@ impl Headless {
         // them. This is also what makes each frame independent of the last.
         command.transition_image(
             self.target.handle(),
+            self.target.aspect(),
             ImageState::UNDEFINED,
             ImageState::COLOR_ATTACHMENT,
         );
@@ -220,6 +223,7 @@ impl Headless {
 
         command.transition_image(
             self.target.handle(),
+            self.target.aspect(),
             ImageState::COLOR_ATTACHMENT,
             ImageState::TRANSFER_SRC,
         );

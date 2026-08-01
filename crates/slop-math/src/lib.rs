@@ -62,8 +62,10 @@
 /// like an import someone chose at random.
 pub mod scalar;
 
+mod projection;
 mod transform;
 
+pub use projection::{look_at, orthographic, perspective};
 pub use transform::Transform;
 
 /// Re-exported so dependent crates need no `glam` dependency of their own, and

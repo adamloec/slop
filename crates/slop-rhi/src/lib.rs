@@ -38,7 +38,7 @@ mod surface;
 mod swapchain;
 mod sync;
 
-pub use command::{CommandBuffer, CommandPool, ImageState};
+pub use command::{BufferState, CommandBuffer, CommandPool, ImageState};
 pub use descriptor::{
     BindlessHeap, BindlessHeapConfig, HEAP_SET, SAMPLED_IMAGE_BINDING, SAMPLER_BINDING,
     STORAGE_IMAGE_BINDING, SampledImage, Sampler, StorageImage,
@@ -50,10 +50,12 @@ pub use device::{
 pub use error::RhiError;
 pub use instance::{Instance, InstanceConfig, Validation};
 pub use pipeline::{
-    GraphicsPipeline, GraphicsPipelineConfig, PipelineLayout, PipelineLayoutConfig, ShaderStage,
+    DEPTH_CLEAR, DEPTH_COMPARE, GraphicsPipeline, GraphicsPipelineConfig, PipelineLayout,
+    PipelineLayoutConfig, ShaderStage,
 };
 pub use resource::{
-    Allocator, AllocatorStats, Buffer, BufferConfig, Image, ImageConfig, MemoryLocation,
+    Allocator, AllocatorStats, Buffer, BufferConfig, Image, ImageConfig, MemoryLocation, aspect_of,
+    preferred_depth_format,
 };
 pub use shader::ShaderModule;
 pub use surface::{Surface, required_surface_extensions};

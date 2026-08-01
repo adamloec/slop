@@ -237,6 +237,9 @@ impl Renderer {
                     entry: c"fragmentMain",
                 },
                 color_format: swapchain.format(),
+                // No depth: the triangle is a single flat primitive with nothing to
+                // occlude it. Depth arrives with the cube.
+                depth_format: None,
                 // On, deliberately. This is the check that the shader agrees
                 // with the engine's counter-clockwise front face: a triangle
                 // wound the wrong way vanishes silently, with no validation
@@ -382,7 +385,12 @@ impl Renderer {
 
         // From UNDEFINED, not from PRESENT_SRC: the previous contents are about
         // to be cleared, so discarding is both correct and faster.
-        command.transition_image(image, ImageState::UNDEFINED, ImageState::COLOR_ATTACHMENT);
+        command.transition_image(
+            image,
+            vk::ImageAspectFlags::COLOR,
+            ImageState::UNDEFINED,
+            ImageState::COLOR_ATTACHMENT,
+        );
 
         let clear = vk::ClearValue {
             color: vk::ClearColorValue {
@@ -437,7 +445,12 @@ impl Renderer {
             raw.cmd_end_rendering(buffer);
         }
 
-        command.transition_image(image, ImageState::COLOR_ATTACHMENT, ImageState::PRESENT);
+        command.transition_image(
+            image,
+            vk::ImageAspectFlags::COLOR,
+            ImageState::COLOR_ATTACHMENT,
+            ImageState::PRESENT,
+        );
         command.end().map_err(|error| error.to_string())?;
 
         Ok(())
