@@ -88,7 +88,7 @@ impl Device {
             })
             .collect();
 
-        let (core, mut vulkan_12, mut vulkan_13) = features::required();
+        let mut wanted = features::required();
 
         // The swapchain extension is enabled exactly when there is something to
         // present to, and never otherwise.
@@ -105,9 +105,10 @@ impl Device {
         };
 
         let mut features2 = vk::PhysicalDeviceFeatures2::default()
-            .features(core)
-            .push_next(&mut vulkan_12)
-            .push_next(&mut vulkan_13);
+            .features(wanted.core)
+            .push_next(&mut wanted.vulkan_11)
+            .push_next(&mut wanted.vulkan_12)
+            .push_next(&mut wanted.vulkan_13);
 
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)

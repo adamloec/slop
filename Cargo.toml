@@ -52,6 +52,13 @@ winit = "0.30.13"
 ash-window = "0.13.0"
 raw-window-handle = "0.6.2"
 
+# Tooling. `anyhow` is permitted only in application crates per CONVENTIONS.md
+# §6, which slop-cli is. `blake3` keys the content-hash cook cache (DESIGN.md
+# §2.8) and will serve every asset type, not just shaders.
+clap = { version = "4.6.5", features = ["derive"] }
+anyhow = "1.0.104"
+blake3 = "1.8.5"
+
 [workspace.lints.rust]
 rust_2018_idioms = { level = "warn", priority = -1 }
 missing_debug_implementations = "warn"

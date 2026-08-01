@@ -30,6 +30,7 @@ mod command;
 mod device;
 mod error;
 mod instance;
+mod shader;
 mod surface;
 mod swapchain;
 mod sync;
@@ -41,6 +42,7 @@ pub use device::{
 };
 pub use error::RhiError;
 pub use instance::{Instance, InstanceConfig, Validation};
+pub use shader::ShaderModule;
 pub use surface::{Surface, required_surface_extensions};
 pub use swapchain::{PresentMode, Swapchain, SwapchainConfig};
 pub use sync::{BinarySemaphore, TimelineSemaphore};

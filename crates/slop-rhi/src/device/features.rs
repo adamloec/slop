@@ -11,15 +11,19 @@
 
 use ash::vk;
 
-/// Features required for `docs/DESIGN.md` §2.2's explicit rendering model.
+/// The required features, in the structs Vulkan splits them across.
 ///
-/// Returned as the three structs Vulkan splits them across, ready to chain into
-/// device creation.
-pub(crate) fn required() -> (
-    vk::PhysicalDeviceFeatures,
-    vk::PhysicalDeviceVulkan12Features<'static>,
-    vk::PhysicalDeviceVulkan13Features<'static>,
-) {
+/// A named struct rather than a tuple: four anonymous fields at a call site is
+/// where the wrong one gets chained into the wrong place.
+pub(crate) struct Required {
+    pub(crate) core: vk::PhysicalDeviceFeatures,
+    pub(crate) vulkan_11: vk::PhysicalDeviceVulkan11Features<'static>,
+    pub(crate) vulkan_12: vk::PhysicalDeviceVulkan12Features<'static>,
+    pub(crate) vulkan_13: vk::PhysicalDeviceVulkan13Features<'static>,
+}
+
+/// Features required for `docs/DESIGN.md` §2.2's explicit rendering model.
+pub(crate) fn required() -> Required {
     let core = vk::PhysicalDeviceFeatures::default()
         // Indirect draws with a GPU-supplied count are the basis of the
         // GPU-driven pipeline in §4.2 stage B.
@@ -33,6 +37,21 @@ pub(crate) fn required() -> (
         // shader able to pick a material per draw.
         .shader_sampled_image_array_dynamic_indexing(true)
         .shader_storage_buffer_array_dynamic_indexing(true);
+
+    let vulkan_11 = vk::PhysicalDeviceVulkan11Features::default()
+        // Exposes the base vertex and base instance of a draw to the vertex
+        // shader.
+        //
+        // Not optional, and not obvious: Slang's `SV_VertexID` follows HLSL
+        // semantics and is relative to the draw's base vertex, so Slang emits a
+        // subtraction of `gl_BaseVertex` to match — which declares the
+        // `DrawParameters` SPIR-V capability. Every Slang vertex shader using
+        // `SV_VertexID` therefore requires this, and omitting it is a spec
+        // violation that permissive drivers accept silently.
+        //
+        // Wanted independently for §4.2 stage B, where indirect draws need the
+        // shader to know which draw it is part of.
+        .shader_draw_parameters(true);
 
     let vulkan_12 = vk::PhysicalDeviceVulkan12Features::default()
         // §2.2: timeline semaphores, not fences plus binary semaphores.
@@ -59,7 +78,12 @@ pub(crate) fn required() -> (
         // in §4.2 would otherwise have to cache and invalidate.
         .dynamic_rendering(true);
 
-    (core, vulkan_12, vulkan_13)
+    Required {
+        core,
+        vulkan_11,
+        vulkan_12,
+        vulkan_13,
+    }
 }
 
 /// Names of required features this device does not support.
@@ -69,7 +93,9 @@ pub(crate) fn required() -> (
 pub(crate) fn missing(instance: &ash::Instance, device: vk::PhysicalDevice) -> Vec<&'static str> {
     let mut vulkan_13 = vk::PhysicalDeviceVulkan13Features::default();
     let mut vulkan_12 = vk::PhysicalDeviceVulkan12Features::default();
+    let mut vulkan_11 = vk::PhysicalDeviceVulkan11Features::default();
     let mut supported = vk::PhysicalDeviceFeatures2::default()
+        .push_next(&mut vulkan_11)
         .push_next(&mut vulkan_12)
         .push_next(&mut vulkan_13);
 
@@ -97,6 +123,8 @@ pub(crate) fn missing(instance: &ash::Instance, device: vk::PhysicalDevice) -> V
     require!(core, fill_mode_non_solid);
     require!(core, shader_sampled_image_array_dynamic_indexing);
     require!(core, shader_storage_buffer_array_dynamic_indexing);
+
+    require!(vulkan_11, shader_draw_parameters);
 
     require!(vulkan_12, timeline_semaphore);
     require!(vulkan_12, descriptor_indexing);

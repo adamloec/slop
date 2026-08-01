@@ -76,6 +76,27 @@ pub enum RhiError {
     #[error("the surface reports no supported formats")]
     NoSurfaceFormats,
 
+    /// The bytes handed to a shader module are not SPIR-V.
+    ///
+    /// Usually a cooked artifact that was never written, was truncated, or is
+    /// actually a text file. Carries what it found so the distinction is
+    /// visible.
+    #[error("not a SPIR-V module: expected magic 0x07230203, found {found_magic:#010x}")]
+    NotSpirv {
+        /// The first word actually present.
+        found_magic: u32,
+    },
+
+    /// SPIR-V byte length is not a multiple of four.
+    ///
+    /// SPIR-V is a sequence of 32-bit words, so this means a truncated or
+    /// corrupt artifact.
+    #[error("SPIR-V must be a whole number of 32-bit words, got {length} bytes")]
+    SpirvNotWordAligned {
+        /// The byte count received.
+        length: usize,
+    },
+
     /// A Vulkan call returned a failure code.
     #[error("Vulkan call failed: {0}")]
     Vulkan(#[from] ash::vk::Result),
