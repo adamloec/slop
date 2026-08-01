@@ -10,10 +10,21 @@
 
 name: CI
 
+# PAUSED 2026-07-31 — manual trigger only.
+#
+# An empty workspace has no platform-specific code to break, so this buys
+# nothing yet. Re-enable by restoring the push/pull_request triggers below, and
+# do it before the first Linux-specific or platform-conditional code lands
+# (realistically: the winit window and Vulkan surface creation in M0 task E).
+#
+# Note DESIGN.md §2.13 exists precisely to prevent this from becoming permanent.
+#
+#   push:
+#     branches: [main]
+#   pull_request:
+
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
