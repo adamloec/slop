@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 slop-app = { workspace = true }
+slop-core.workspace = true
 slop-rhi = { workspace = true }
 
 [lints]

@@ -59,6 +59,20 @@ struct Graphics {
     window: slop_app::winit::window::Window,
 }
 
+impl Drop for Graphics {
+    fn drop(&mut self) {
+        slop_core::diagnostics::tracing::info!("shutting down");
+
+        // Nothing is ever submitted here, so there is genuinely no work to wait
+        // for — but the pattern is the point. `Device::drop` waits too, and that
+        // is always too late for fields declared before it, so an owner of
+        // Vulkan objects waits in its own `Drop`. Examples get copied.
+        if let Err(error) = self.device.wait_idle() {
+            slop_core::diagnostics::tracing::error!(%error, "device did not go idle");
+        }
+    }
+}
+
 #[derive(Default)]
 struct App {
     graphics: Option<Graphics>,

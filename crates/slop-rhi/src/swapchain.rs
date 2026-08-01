@@ -404,6 +404,8 @@ impl Swapchain {
 
 impl Drop for Swapchain {
     fn drop(&mut self) {
+        debug!(images = self.images.len(), "destroying swapchain");
+
         // Presented images may still be in flight.
         let _ = self.device.wait_idle();
 

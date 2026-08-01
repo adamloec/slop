@@ -253,6 +253,15 @@ impl Instance {
 
 impl Drop for Instance {
     fn drop(&mut self) {
+        // Teardown is logged as well as construction. A log that simply stops
+        // is indistinguishable from a crash, and "did it shut down cleanly" is
+        // the first question asked of a log from someone else's machine.
+        //
+        // `debug` rather than `info`: an application already knows it is
+        // exiting, so this is engine-developer detail rather than a lifecycle
+        // event a user cares about (`docs/CONVENTIONS.md` §13).
+        debug!("destroying Vulkan instance");
+
         if let Some(debug) = self.debug.take() {
             // SAFETY: the messenger was created from `self.raw`, which is still
             // alive, and this is the only place it is destroyed.

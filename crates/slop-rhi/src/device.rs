@@ -23,7 +23,7 @@ pub use queues::QueueFamilies;
 use std::sync::Arc;
 
 use ash::vk;
-use slop_core::diagnostics::tracing::info;
+use slop_core::diagnostics::tracing::{debug, info, warn};
 
 use crate::{Instance, RhiError};
 
@@ -202,12 +202,22 @@ impl Device {
 
 impl Drop for Device {
     fn drop(&mut self) {
+        debug!("destroying logical device");
+
         // Outstanding GPU work referencing objects this device owns must finish
         // before any of it is destroyed. Skipping this is the classic
         // shutdown-crash that only reproduces under load.
         //
+        // Note this is a backstop, not the protection it looks like: anything
+        // declared *before* the device in an owning struct is already destroyed
+        // by the time this runs. Owners must wait in their own `Drop`.
+        //
         // SAFETY: the device is still alive here.
-        let _ = unsafe { self.raw.device_wait_idle() };
+        if let Err(error) = unsafe { self.raw.device_wait_idle() } {
+            // Worth reporting rather than swallowing: a device lost during
+            // shutdown usually means something went wrong well before it.
+            warn!(%error, "device did not go idle during shutdown");
+        }
 
         // SAFETY: every child object is destroyed by this point, and the
         // instance outlives this call because we hold an `Arc` to it.

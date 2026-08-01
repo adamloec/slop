@@ -753,6 +753,19 @@ info!(
 | `debug` | Engine-developer detail, off in shipping |
 | `trace` | Per-frame or per-item volume |
 
+**Log teardown, not only construction.** A log that simply stops is
+indistinguishable from a crash, and "did it shut down cleanly?" is the first
+question asked of a log from a machine you cannot inspect. Construction without
+destruction also hides leaks completely.
+
+```rust
+// ✓ the application's own lifecycle
+info!(frames = self.frame_counter, "shutting down");
+
+// ✓ engine internals, at debug — an application already knows it is exiting
+debug!(images = self.images.len(), "destroying swapchain");
+```
+
 Nothing above `debug` fires per frame — a log line in the frame loop is a perf
 bug that also drowns the signal. Use a span:
 

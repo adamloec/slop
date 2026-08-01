@@ -24,6 +24,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use slop_core::diagnostics::tracing::{error, info};
+
 use slop_app::window::{self, WindowConfig};
 use slop_app::winit::application::ApplicationHandler;
 use slop_app::winit::event::WindowEvent;
@@ -56,8 +58,20 @@ fn main() {
 
     event_loop.run_app(&mut app).expect("the event loop failed");
 
-    if let Some(error) = app.failure {
-        eprintln!("\nfailed: {error}");
+    if let Some(failure) = &app.failure {
+        error!(error = %failure, "the renderer failed");
+    }
+
+    // Dropped explicitly so shutdown finishes — and logs that it finished —
+    // before the process exits. Letting it fall out of scope after the exit
+    // check would work, but "shutdown complete" is only trustworthy if it is
+    // printed after the teardown it describes.
+    let failed = app.failure.is_some();
+    drop(app);
+
+    info!("shutdown complete");
+
+    if failed {
         std::process::exit(1);
     }
 }
@@ -503,6 +517,8 @@ impl Renderer {
 
 impl Drop for Renderer {
     fn drop(&mut self) {
+        info!(frames = self.frame_counter, "shutting down");
+
         // Every Vulkan object below is destroyed when this struct's fields drop,
         // which happens *after* this function returns — and the GPU may still be
         // executing the last submitted frame.
@@ -511,8 +527,8 @@ impl Drop for Renderer {
         // is declared after the pools and semaphores, so those are already
         // destroyed by the time it runs. Waiting here, before any field drops,
         // is what actually makes teardown safe.
-        if let Err(error) = self.device.wait_idle() {
-            eprintln!("waiting for the device to go idle failed during shutdown: {error}");
+        if let Err(failure) = self.device.wait_idle() {
+            error!(error = %failure, "device did not go idle; teardown may be unsafe");
         }
     }
 }

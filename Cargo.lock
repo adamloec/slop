@@ -484,6 +484,7 @@ name = "example-triangle"
 version = "0.0.0"
 dependencies = [
  "slop-app",
+ "slop-core",
  "slop-rhi",
 ]
 
@@ -492,6 +493,7 @@ name = "example-window"
 version = "0.0.0"
 dependencies = [
  "slop-app",
+ "slop-core",
  "slop-rhi",
 ]
 
