@@ -10,3 +10,11 @@
 //! work-stealing implementation follows in M1, once ECS system scheduling
 //! supplies real requirements. The API must not assume single-threaded
 //! execution — that assumption is the part which becomes unfixable later.
+
+mod alloc;
+mod handle;
+mod slotmap;
+
+pub use alloc::HandleAllocator;
+pub use handle::{Handle, RawHandle};
+pub use slotmap::SlotMap;
