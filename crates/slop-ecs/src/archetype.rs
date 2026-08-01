@@ -206,6 +206,29 @@ impl Archetype {
         self.entities.get(row.0).copied()
     }
 
+    /// Drop `row` from the entity list only, leaving the columns alone.
+    ///
+    /// Returns the entity swapped into `row`, as [`remove_row`](Self::remove_row).
+    ///
+    /// The other half of a migration whose columns the caller has already
+    /// emptied one at a time. Splitting it out is what lets a move relocate some
+    /// components and drop others in one pass, which
+    /// [`move_row_out`](Self::move_row_out) cannot express because it does the
+    /// same thing to every column.
+    ///
+    /// `pub(crate)` because calling it without having emptied the columns leaves
+    /// invariant 1 broken — the entity list would be one shorter than every
+    /// column, and the next row's components would belong to the wrong entity.
+    pub(crate) fn take_row(&mut self, row: Row) -> Option<Entity> {
+        if row.0 >= self.entities.len() {
+            return None;
+        }
+
+        self.entities.swap_remove(row.0);
+
+        self.entities.get(row.0).copied()
+    }
+
     /// Drop every entity's components and forget every entity.
     pub fn clear(&mut self) {
         for column in &mut self.columns {

@@ -41,11 +41,13 @@ mod archetype;
 mod column;
 mod error;
 mod signature;
+mod world;
 
 pub use archetype::{Archetype, EntityTag, Row};
 pub use column::Column;
 pub use error::EcsError;
 pub use signature::Signature;
+pub use world::World;
 
 /// An entity: an id, and nothing else.
 ///

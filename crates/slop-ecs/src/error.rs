@@ -17,4 +17,20 @@ pub enum EcsError {
         /// The type that could not be resolved.
         type_id: TypeId,
     },
+
+    /// The entity is not alive.
+    ///
+    /// Either never spawned, or despawned since the handle was issued —
+    /// `Handle`'s generation distinguishes a stale handle from a fresh one
+    /// reusing the same slot, so this is never a case of silently addressing
+    /// the wrong entity.
+    ///
+    /// An error rather than a panic on the paths that return `Result`, per
+    /// `docs/PLAN.md` §4.1-C: holding a handle to something already destroyed
+    /// is routine in an editor and during hot reload.
+    #[error("entity {entity:?} is not alive")]
+    NoSuchEntity {
+        /// The handle that did not resolve.
+        entity: crate::Entity,
+    },
 }
