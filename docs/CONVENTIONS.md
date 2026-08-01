@@ -28,7 +28,7 @@ slop/
 │   └── ...                 one directory per crate, added as milestones need them
 │
 ├── shaders/                Slang source — one tree, not per-crate (see below)
-│   ├── lib/                shared modules: brdf, lighting, shared structs
+│   ├── lib/                shared includes — NEVER cooked standalone
 │   └── passes/             entry points, one per render pass
 │
 ├── assets/                 SOURCE assets only, committed. Never cooked output.
@@ -41,8 +41,9 @@ slop/
 │
 ├── guests/                 WASM guest modules — SEPARATE workspace (see below)
 │
-├── tests/                  workspace-level integration tests
-│   └── golden/             approved reference images, binary per .gitattributes
+├── tests/                  workspace-level integration tests, when one spans crates
+│                           (per-crate tests live in crates/<name>/tests/, and a
+│                           crate's golden images live in its own tests/golden/)
 │
 ├── tools/                  dev scripts, CI helpers, cook utilities
 │
@@ -80,6 +81,18 @@ Four of these are decisions rather than obvious defaults:
 and struct definitions imported across passes. Scattering shaders across crate
 directories fights the thing we picked the language for. They are also cooked
 content (§2.8), not Rust source, so they do not belong under `src/`.
+
+`shaders/lib/` is excluded from cooking: those files declare no entry points, so
+compiling one standalone fails. Include them by a path from the shader root —
+`#include "lib/bindless.slang"` — which resolves because the cook step puts
+`shaders/` on the include path, so a shader moving between directories does not
+break its includes.
+
+Editing anything in `shaders/lib/` recooks **every** shader. That is deliberately
+coarse: the alternative is per-shader dependency tracking, and the failure mode
+of getting it wrong is a cache that is *incorrect* rather than merely stale —
+an include changes what every dependent compiles to while no dependent's own
+source changes, so every stamp still matches.
 
 **Source and cooked assets are physically separate trees.** `assets/` is
 committed and human-authored; `.slop/cache/` is generated, content-hash-keyed,

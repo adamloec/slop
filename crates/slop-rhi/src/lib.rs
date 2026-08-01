@@ -27,6 +27,7 @@
 //! `clippy::undocumented_unsafe_blocks`.
 
 mod command;
+mod descriptor;
 mod device;
 mod error;
 mod instance;
@@ -38,13 +39,19 @@ mod swapchain;
 mod sync;
 
 pub use command::{CommandBuffer, CommandPool, ImageState};
+pub use descriptor::{
+    BindlessHeap, BindlessHeapConfig, HEAP_SET, SAMPLED_IMAGE_BINDING, SAMPLER_BINDING,
+    STORAGE_IMAGE_BINDING, SampledImage, Sampler, StorageImage,
+};
 pub use device::{
     Device, DeviceInfo, DeviceKind, DeviceSelection, QueueFamilies, Queues, Rejection, enumerate,
     select,
 };
 pub use error::RhiError;
 pub use instance::{Instance, InstanceConfig, Validation};
-pub use pipeline::{GraphicsPipeline, GraphicsPipelineConfig, PipelineLayout, ShaderStage};
+pub use pipeline::{
+    GraphicsPipeline, GraphicsPipelineConfig, PipelineLayout, PipelineLayoutConfig, ShaderStage,
+};
 pub use resource::{
     Allocator, AllocatorStats, Buffer, BufferConfig, Image, ImageConfig, MemoryLocation,
 };

@@ -34,7 +34,8 @@ Started. This is the bulk of M0 and the largest single body of work in it.
 | `gpu-allocator` integration — `Allocator`, suballocation, stats | Landed | M0 |
 | `Buffer`, `Image`, and image-to-buffer readback | Landed | M0 |
 | Headless rendering, verified by a golden image | Landed | M0 |
-| Bindless descriptor heap | Planned | M0 |
+| Bindless descriptor heap — sampled images, samplers, storage images | Landed | M0 |
+| Pipeline layouts over the heap, with push constants | Landed | M0 |
 | Depth attachments, mip chains, cube maps | Planned — when the cube needs them | M0 |
 | Dedicated versus suballocated policy for large targets | Planned — needs measurements, not a guessed threshold | M1 |
 | Shader reflection, pipeline layout derivation | Planned | M2–M3 |
@@ -53,6 +54,7 @@ flowchart TD
     queues["device/queues.rs"]
     surface["surface.rs"]
     swapchain["swapchain.rs"]
+    descriptor["descriptor.rs"]
     resource["resource.rs"]
     allocator["resource/allocator.rs"]
     buffer["resource/buffer.rs"]
@@ -63,6 +65,7 @@ flowchart TD
     lib --> device
     lib --> surface
     lib --> swapchain
+    lib --> descriptor
     lib --> resource
 
     device --> physical
@@ -90,8 +93,13 @@ queue families. `instance.rs` stays at the top level because an instance is a
 device's *parent*, not one of its parts.
 
 `resource/` is the memory story: something hands out device memory, and two
-kinds of object consume it. `command.rs`, `pipeline.rs` and `shader.rs` stay flat
-because each is a subject with one module, which is a file and not a directory.
+kinds of object consume it. `command.rs`, `descriptor.rs`, `pipeline.rs` and
+`shader.rs` stay flat because each is a subject with one module, which is a file
+and not a directory.
+
+`descriptor.rs` is deliberately *not* under `resource/`. A descriptor is not
+memory the allocator hands out — it is a slot in a table that points at
+something, and the heap owns none of the images it references.
 
 ## 4. Scope at M0 — primitives, not abstraction
 
@@ -329,6 +337,9 @@ overwritten.
 | Pools reset wholesale, never per-buffer | §11 above |
 | Suballocate from day one via `gpu-allocator` | `resource.rs` module docs |
 | Resources own an allocation, not a `vk::DeviceMemory` | `resource.rs` module docs |
+| One bindless heap, at set 0, from M0 | `DESIGN.md` §2.2, `descriptor.rs` module docs |
+| Buffers reached by device address, not by descriptor | `descriptor.rs` module docs |
+| Separate images and samplers, never combined | `descriptor.rs` module docs |
 | M0 ships primitives, not abstraction | `PLAN.md` §4.1-D |
 | Slang as the shading language, library-integrated | `DESIGN.md` §2.11 |
 | Which Slang Rust binding | `DESIGN.md` §8 item 2 — revisit at M3 |
@@ -426,3 +437,23 @@ overwritten.
     on every error branch.** These types have no `Drop` until they are fully
     built, so the leak is silent and validation reports it only at device
     destruction, far from the cause.
+32. **The heap's set and binding numbers are a shader ABI.** They are duplicated
+    in `shaders/lib/bindless.slang`, and nothing checks that the two agree. A
+    mismatch is neither a compile error nor a validation error — it is a shader
+    reading a different array than the engine wrote to. Shader reflection at M2
+    is what will remove the duplication.
+33. **Bindless array indexing uses `NonUniformResourceIndex`, always.** Without
+    it the compiler may assume one index per wave and read a single lane's
+    texture for all of them. Correct for a draw with one material, silently
+    wrong the moment a GPU-driven pass mixes materials in a wave — which is the
+    entire point of the heap.
+34. **Heap capacity is clamped to device limits, never rejected.** A device
+    supporting fewer textures than requested is usable; rejecting it would be
+    §2.1's capability-tier branching in its harshest form. What was granted is
+    readable through `capacity()`.
+35. **A full heap returns `None`.** Running out of texture slots is a content
+    problem a game may want to report, and it is exactly where a panic helps
+    least.
+36. **Capacity cannot grow after creation.** The set is allocated once and every
+    pipeline is built against its layout, so the defaults are sized for a scene
+    rather than for what M0 happens to need.

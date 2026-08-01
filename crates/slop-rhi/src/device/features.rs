@@ -36,7 +36,9 @@ pub(crate) fn required() -> Required {
         // Non-uniform indexing into resource arrays is what makes a bindless
         // shader able to pick a material per draw.
         .shader_sampled_image_array_dynamic_indexing(true)
-        .shader_storage_buffer_array_dynamic_indexing(true);
+        .shader_storage_buffer_array_dynamic_indexing(true)
+        // The same, for the storage-image binding compute passes write through.
+        .shader_storage_image_array_dynamic_indexing(true);
 
     let vulkan_11 = vk::PhysicalDeviceVulkan11Features::default()
         // Exposes the base vertex and base instance of a draw to the vertex
@@ -56,7 +58,7 @@ pub(crate) fn required() -> Required {
     let vulkan_12 = vk::PhysicalDeviceVulkan12Features::default()
         // §2.2: timeline semaphores, not fences plus binary semaphores.
         .timeline_semaphore(true)
-        // §2.2: the bindless descriptor model. These six together are what
+        // §2.2: the bindless descriptor model. These nine together are what
         // "bindless" actually means in Vulkan terms.
         .descriptor_indexing(true)
         .runtime_descriptor_array(true)
@@ -64,6 +66,18 @@ pub(crate) fn required() -> Required {
         .descriptor_binding_variable_descriptor_count(true)
         .descriptor_binding_sampled_image_update_after_bind(true)
         .shader_sampled_image_array_non_uniform_indexing(true)
+        // Storage images, for the compute passes in §4.2 stage B. Required
+        // alongside the sampled-image pair rather than added when compute
+        // arrives: a binding added to the global set layout later invalidates
+        // every pipeline built against it, and the layout is a shader ABI.
+        .descriptor_binding_storage_image_update_after_bind(true)
+        .shader_storage_image_array_non_uniform_indexing(true)
+        // Lets a descriptor be written while a command buffer using the set is
+        // still pending, provided that particular descriptor is not the one
+        // being used. This is what makes texture streaming possible at all —
+        // without it, uploading a texture means waiting for every frame that
+        // might touch the heap to retire.
+        .descriptor_binding_update_unused_while_pending(true)
         // Lets shaders hold raw pointers into buffers, which is how GPU-driven
         // passes walk structures the CPU never binds.
         .buffer_device_address(true)
@@ -123,6 +137,7 @@ pub(crate) fn missing(instance: &ash::Instance, device: vk::PhysicalDevice) -> V
     require!(core, fill_mode_non_solid);
     require!(core, shader_sampled_image_array_dynamic_indexing);
     require!(core, shader_storage_buffer_array_dynamic_indexing);
+    require!(core, shader_storage_image_array_dynamic_indexing);
 
     require!(vulkan_11, shader_draw_parameters);
 
@@ -136,6 +151,12 @@ pub(crate) fn missing(instance: &ash::Instance, device: vk::PhysicalDevice) -> V
         descriptor_binding_sampled_image_update_after_bind
     );
     require!(vulkan_12, shader_sampled_image_array_non_uniform_indexing);
+    require!(
+        vulkan_12,
+        descriptor_binding_storage_image_update_after_bind
+    );
+    require!(vulkan_12, shader_storage_image_array_non_uniform_indexing);
+    require!(vulkan_12, descriptor_binding_update_unused_while_pending);
     require!(vulkan_12, buffer_device_address);
     require!(vulkan_12, draw_indirect_count);
 

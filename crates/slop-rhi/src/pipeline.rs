@@ -19,6 +19,8 @@ use std::sync::Arc;
 
 use ash::vk;
 
+use crate::BindlessHeap;
+
 use crate::{Device, RhiError, ShaderModule};
 
 /// Front faces wind counter-clockwise.
@@ -56,12 +58,29 @@ pub struct GraphicsPipelineConfig<'a> {
     pub cull_back_faces: bool,
 }
 
-/// The resources a pipeline's shaders can access.
+/// What a pipeline's shaders can reach.
 ///
-/// Empty for now. `docs/DESIGN.md` §2.2's bindless model means this eventually
-/// holds one global descriptor set layout shared by nearly every pipeline,
-/// rather than a bespoke layout per material — but that needs shader reflection
-/// (§2.11) to derive, so it waits for M2.
+/// `docs/DESIGN.md` §2.2's bindless model means nearly every pipeline in the
+/// engine shares one layout: the global heap, plus a small block of push
+/// constants carrying the indices into it. A bespoke layout per material is
+/// what bindless exists to remove.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PipelineLayoutConfig<'a> {
+    /// The bindless heap, bound at [`HEAP_SET`](crate::HEAP_SET).
+    ///
+    /// `None` produces a layout with no descriptor sets, which suits a shader
+    /// reading nothing — the M0 triangle, and little else.
+    pub heap: Option<&'a BindlessHeap>,
+    /// Bytes of push constants, visible to all stages.
+    ///
+    /// Push constants rather than a uniform buffer for per-draw data, because
+    /// they need no descriptor, no allocation, and no synchronization. The
+    /// guaranteed minimum is 128 bytes and creation fails past the device's
+    /// limit, so this is not the place for anything that grows.
+    pub push_constant_bytes: u32,
+}
+
+/// The resources a pipeline's shaders can access.
 pub struct PipelineLayout {
     handle: vk::PipelineLayout,
     device: Arc<Device>,
@@ -74,10 +93,41 @@ impl PipelineLayout {
     ///
     /// Fails if the driver rejects creation.
     pub fn empty(device: &Arc<Device>) -> Result<Self, RhiError> {
-        let create_info = vk::PipelineLayoutCreateInfo::default();
+        Self::new(device, &PipelineLayoutConfig::default())
+    }
 
-        // SAFETY: `create_info` is a fully initialized default with nothing
-        // borrowed to outlive.
+    /// A layout over the bindless heap and a push-constant block.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the driver rejects creation — in practice, a
+    /// `push_constant_bytes` above `maxPushConstantsSize`.
+    pub fn new(device: &Arc<Device>, config: &PipelineLayoutConfig<'_>) -> Result<Self, RhiError> {
+        let set_layouts: Vec<vk::DescriptorSetLayout> =
+            config.heap.map(|heap| heap.layout()).into_iter().collect();
+
+        // ALL stages, matching the heap's own visibility. Declaring push
+        // constants per stage means a vertex and fragment shader reading the
+        // same struct need two ranges that must agree, and a disagreement is a
+        // silent read of the wrong offset.
+        let ranges = [vk::PushConstantRange::default()
+            .stage_flags(vk::ShaderStageFlags::ALL)
+            .offset(0)
+            .size(config.push_constant_bytes)];
+        let ranges: &[vk::PushConstantRange] = if config.push_constant_bytes == 0 {
+            // A zero-sized range is invalid, so an empty slice is how "no push
+            // constants" is expressed.
+            &[]
+        } else {
+            &ranges
+        };
+
+        let create_info = vk::PipelineLayoutCreateInfo::default()
+            .set_layouts(&set_layouts)
+            .push_constant_ranges(ranges);
+
+        // SAFETY: `create_info` is fully initialized, and both borrowed slices
+        // outlive the call.
         let handle = unsafe { device.raw().create_pipeline_layout(&create_info, None) }?;
 
         Ok(Self {
