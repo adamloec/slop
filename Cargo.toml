@@ -11,10 +11,17 @@ repository = "https://github.com/adamloec/slop"
 
 [workspace.dependencies]
 # Internal crates. External dependencies are added with `cargo add` at the point
-# of first use so that recorded versions are real rather than guessed.
+# of first use so that recorded versions are real rather than guessed, then
+# hoisted here so every crate resolves to one version.
 slop-core = { path = "crates/slop-core" }
 slop-math = { path = "crates/slop-math" }
 slop-rhi = { path = "crates/slop-rhi" }
+
+# Structured logging. Crates depend on the `tracing` facade only; installing a
+# subscriber is an application concern, which is why `tracing-subscriber` is
+# behind slop-core's optional `subscriber` feature rather than always present.
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 
 [workspace.lints.rust]
 rust_2018_idioms = { level = "warn", priority = -1 }

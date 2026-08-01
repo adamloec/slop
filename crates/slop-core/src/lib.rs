@@ -18,6 +18,8 @@ mod jobs;
 mod slotmap;
 mod time;
 
+pub mod diagnostics;
+
 pub use alloc::HandleAllocator;
 pub use arena::FrameArena;
 pub use handle::{Handle, RawHandle};

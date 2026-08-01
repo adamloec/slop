@@ -7,7 +7,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-slop-core = { workspace = true }
+# `subscriber` is enabled here rather than in slop-core: this is the application
+# layer, and installing a process-wide subscriber is an application's decision.
+slop-core = { workspace = true, features = ["subscriber"] }
 slop-math = { workspace = true }
 slop-rhi = { workspace = true }
 

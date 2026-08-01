@@ -23,7 +23,8 @@ domain-specific, and anything requiring a dependency beyond `std`.
 | Work-stealing pool behind that API | Planned — deferred until ECS scheduling gives real requirements | M1 |
 | System read/write access declaration | Planned — no consumer exists until the ECS does | M1 |
 | String interning | Planned | M1 |
-| `tracing` setup, profiling markers | Planned | M0 |
+| `diagnostics` — `tracing` facade, subscriber install | Landed | M0 |
+| Profiling markers, `tracy` integration | Planned | M2 |
 
 ## 3. Module map
 
@@ -44,14 +45,22 @@ flowchart TD
     lib --> arena
     lib --> time
     lib --> jobs
-    lib -.-> diag
+    lib --> diag
 
     slotmap --> handle
     alloc --> handle
-
-    classDef planned stroke-dasharray: 5 5
-    class diag planned
 ```
+
+## 3.1 Features
+
+| Feature | Default | Effect |
+|---|---|---|
+| `subscriber` | off | Pulls `tracing-subscriber` and enables `diagnostics::init` |
+
+Off by default because emitting spans and events is a library's job while
+installing a process-wide subscriber is an application's. `slop-app` enables it;
+nothing else should. Every crate in the graph would otherwise pay the compile
+cost of a subscriber it never installs.
 
 ## 4. Key types
 
@@ -66,6 +75,7 @@ flowchart TD
 | `Clock` | The only reader of the system clock | `DESIGN.md` §5 |
 | `JobSystem` | Dispatches work across threads | `DESIGN.md` §2.5, `PLAN.md` §4.1-C |
 | `Scope` | Spawns tasks that borrow caller stack data | `DESIGN.md` §2.5 |
+| `diagnostics` | `tracing` re-export, subscriber install | `CONVENTIONS.md` §13 |
 
 ## 5. Diagrams
 
@@ -209,3 +219,8 @@ tasks are many, which is what will be true.
    same reason nothing else here is a singleton.
 10. **One thread is a supported configuration**, not a degraded fallback — it is
     how deterministic runs remove scheduling as a variable.
+11. **Libraries emit; applications install.** No engine crate may call
+    `diagnostics::init`. A library that installs a global subscriber takes a
+    decision away from every application embedding it.
+12. **Log fields, not sentences**, and never above `debug` in the frame loop
+    (`CONVENTIONS.md` §13).

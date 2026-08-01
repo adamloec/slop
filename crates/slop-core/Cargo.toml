@@ -7,6 +7,15 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, optional = true }
+
+[features]
+# Pulls in a subscriber implementation and enables `diagnostics::init`.
+# Off by default: emitting spans and events is a library's job, installing a
+# subscriber is the application's, and every crate in the graph would otherwise
+# pay the compile cost of a subscriber it never installs.
+subscriber = ["dep:tracing-subscriber"]
 
 [lints]
 workspace = true
