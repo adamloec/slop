@@ -215,8 +215,44 @@ contained. §2.11 already requires exactly this for the Slang bindings; making i
 the general pattern costs nothing.
 
 Everything else is vertical. A concept gets a file; a concept with genuine
-internal parts gets a directory of the same name beside it. Do not create a
-directory in anticipation of parts that do not exist yet.
+internal parts gets a directory of the same name beside it.
+
+**Promote to a directory when both hold:**
+
+1. **Three or more modules share a subject.** One is a part, two is a pair,
+   three is a group.
+2. **The subject is already a name in the crate** — a type or concept its users
+   would recognise. If you have to invent a word to name the directory, the
+   grouping is not real and the files belong flat.
+
+```
+✗ a directory for a pair, and one whose name had to be invented
+    src/surface.rs
+    src/presentation/
+        swapchain.rs
+
+✓ three parts of a concept that already exists as a type
+    src/device.rs          ← the Device type
+    src/device/
+        physical.rs        ← choosing which device
+        features.rs        ← what a device must support
+        queues.rs          ← a device's queue families
+    src/instance.rs        ← a device's *parent*, not one of its parts
+```
+
+Note the shape: `device.rs` is not a façade or an empty re-export file — it is
+the concept, and the directory holds the things that exist only to serve it.
+Read top to bottom, the file is the answer and the directory is the working.
+
+**Two guardrails:**
+
+- **Never a directory for one or two files.** It adds a path segment and hides
+  nothing, which is strictly worse than flat.
+- **Keep the top-level list scannable — roughly ten entries.** Past that, go
+  looking for a subject to promote. A smell, not a limit, in the sense of §2.4.
+
+Do not create a directory in anticipation of parts that do not exist yet. The
+trigger fires on its own soon enough.
 
 ### 2.4 Size is a smell, not a rule
 

@@ -16,7 +16,8 @@
 use ash::vk;
 use slop_core::diagnostics::tracing::{info, warn};
 
-use crate::{Instance, QueueFamilies, RhiError, Surface};
+use super::QueueFamilies;
+use crate::{Instance, RhiError, Surface};
 
 /// Broad category of adapter, as the driver reports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,7 +256,7 @@ fn describe(
             Rejection::NoSuitableQueues
         })
     } else {
-        match crate::features::missing(instance.raw(), handle) {
+        match super::features::missing(instance.raw(), handle) {
             missing if missing.is_empty() => None,
             missing => Some(Rejection::MissingFeatures(missing)),
         }

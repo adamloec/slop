@@ -28,18 +28,16 @@
 
 mod device;
 mod error;
-mod features;
 mod instance;
-mod physical;
-mod queues;
 mod surface;
 mod swapchain;
 
-pub use device::{Device, Queues};
+pub use device::{
+    Device, DeviceInfo, DeviceKind, DeviceSelection, QueueFamilies, Queues, Rejection, enumerate,
+    select,
+};
 pub use error::RhiError;
 pub use instance::{Instance, InstanceConfig, Validation};
-pub use physical::{DeviceInfo, DeviceKind, DeviceSelection, Rejection, enumerate, select};
-pub use queues::QueueFamilies;
 pub use surface::{Surface, required_surface_extensions};
 pub use swapchain::{PresentMode, Swapchain, SwapchainConfig};
 

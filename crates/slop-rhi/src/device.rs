@@ -10,12 +10,22 @@
 //! resource lifetime that Rust cannot otherwise see, and the instance is
 //! immutable once created.
 
+// The parts of the device concept: what an adapter must support, how one is
+// chosen, and the queue families it exposes. See `docs/CONVENTIONS.md` §2.3 —
+// three modules sharing a subject that is already a name in the crate.
+mod features;
+mod physical;
+mod queues;
+
+pub use physical::{DeviceInfo, DeviceKind, DeviceSelection, Rejection, enumerate, select};
+pub use queues::QueueFamilies;
+
 use std::sync::Arc;
 
 use ash::vk;
 use slop_core::diagnostics::tracing::info;
 
-use crate::{DeviceInfo, Instance, QueueFamilies, RhiError, features};
+use crate::{Instance, RhiError};
 
 /// The queues the engine submits through.
 ///

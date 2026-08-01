@@ -35,7 +35,41 @@ Started. This is the bulk of M0 and the largest single body of work in it.
 | Shader reflection, pipeline layout derivation | Planned | M2–M3 |
 | Consumer-facing RHI API extraction | Planned | M3 |
 
-## 3. Scope at M0 — primitives, not abstraction
+## 3. Module map
+
+```mermaid
+flowchart TD
+    lib["lib.rs"]
+    error["error.rs"]
+    instance["instance.rs"]
+    device["device.rs"]
+    physical["device/physical.rs"]
+    features["device/features.rs"]
+    queues["device/queues.rs"]
+    surface["surface.rs"]
+    swapchain["swapchain.rs"]
+
+    lib --> error
+    lib --> instance
+    lib --> device
+    lib --> surface
+    lib --> swapchain
+
+    device --> physical
+    device --> features
+    device --> queues
+
+    physical --> features
+    physical --> queues
+    swapchain --> surface
+```
+
+`device.rs` holds the `Device` type; `device/` holds the three things that exist
+only to serve it — choosing an adapter, the feature tier it must meet, and its
+queue families. `instance.rs` stays at the top level because an instance is a
+device's *parent*, not one of its parts (`CONVENTIONS.md` §2.3).
+
+## 4. Scope at M0 — primitives, not abstraction
 
 M0 sits close to `ash` and defers the consumer-facing API to M3.
 
@@ -69,7 +103,7 @@ flowchart TD
 Get the left side right and the M3 extraction is a refactor. Get it wrong and it
 is a rewrite.
 
-## 4. Vulkan 1.3 is the required API version
+## 5. Vulkan 1.3 is the required API version
 
 Not 1.4, despite the development machine reporting 1.4.341. Everything §2.2
 commits to is core in 1.3:
@@ -86,7 +120,7 @@ needs. The version is checked at instance creation and reported as a typed error
 naming both the required and found versions, since "update your driver" is only
 actionable with numbers.
 
-## 5. Validation
+## 6. Validation
 
 Enabled automatically in debug builds, off in release — validation costs
 substantial CPU per call and has no place in a shipping frame loop.
@@ -102,7 +136,7 @@ same filtering as everything else and appears in captured logs. Vulkan's `INFO`
 severity maps to `debug` here, keeping `CONVENTIONS.md` §13's rule that `info`
 stays meaningful.
 
-## 6. Device selection is player-facing
+## 7. Device selection is player-facing
 
 A game built on the engine will expose a GPU picker in its graphics settings, so
 enumeration is public API rather than an internal step (`DESIGN.md` §7). Three
@@ -149,7 +183,7 @@ images render on (`PLAN.md` §4.1-G), and selecting it by accident on real
 hardware would mean rendering thousands of times slower with nothing reporting
 it.
 
-## 7. One feature tier, declared once
+## 8. One feature tier, declared once
 
 `DESIGN.md` §2.1 buys "one GPU feature tier, no capability-tier branching in the
 renderer" by targeting desktop only. That guarantee is worth nothing unless the
@@ -182,7 +216,7 @@ on a headless instance is a spec violation that permissive drivers accept and
 strict ones reject. Validation caught this during bring-up; NVIDIA had been
 creating the device anyway.
 
-## 8. Swapchain: four choices, each with a plausible wrong answer
+## 9. Swapchain: four choices, each with a plausible wrong answer
 
 Every one of these looks correct on the development machine if you get it wrong,
 which is why each is explicit and tested.
@@ -209,7 +243,7 @@ physical; the value passed to `WindowConfig` is not.
 families is an explicit ownership-transfer barrier, which §2.2's explicit model
 wants anyway.
 
-## 9. Decisions
+## 10. Decisions
 
 | Decision | Where |
 |---|---|
@@ -224,7 +258,7 @@ wants anyway.
 | Which Slang Rust binding | `DESIGN.md` §8 item 2 — revisit at M3 |
 | Desktop only; one GPU feature tier | `DESIGN.md` §2.1 |
 
-## 10. Invariants
+## 11. Invariants
 
 1. **This crate and the allocator are the only sanctioned homes for `unsafe`.**
    `unsafe` anywhere else is a design discussion, not a review comment.
