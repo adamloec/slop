@@ -14,11 +14,13 @@
 mod alloc;
 mod arena;
 mod handle;
+mod jobs;
 mod slotmap;
 mod time;
 
 pub use alloc::HandleAllocator;
 pub use arena::FrameArena;
 pub use handle::{Handle, RawHandle};
+pub use jobs::{JobSystem, Scope};
 pub use slotmap::SlotMap;
 pub use time::{Clock, FixedTimestep};

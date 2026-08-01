@@ -19,8 +19,9 @@ domain-specific, and anything requiring a dependency beyond `std`.
 | Handles, `SlotMap`, `HandleAllocator` | Landed | M0 |
 | `FrameArena` | Landed | M0 |
 | `FixedTimestep`, `Clock` | Landed | M0 |
-| Job system | API shape only, plain thread pool behind it | M0 |
-| Work-stealing scheduler | Planned — deferred until ECS scheduling gives real requirements | M1 |
+| Job system — `JobSystem`, `Scope`, parallel iteration | Landed, **implementation provisional** | M0 |
+| Work-stealing pool behind that API | Planned — deferred until ECS scheduling gives real requirements | M1 |
+| System read/write access declaration | Planned — no consumer exists until the ECS does | M1 |
 | String interning | Planned | M1 |
 | `tracing` setup, profiling markers | Planned | M0 |
 
@@ -42,14 +43,14 @@ flowchart TD
     lib --> alloc
     lib --> arena
     lib --> time
-    lib -.-> jobs
+    lib --> jobs
     lib -.-> diag
 
     slotmap --> handle
     alloc --> handle
 
     classDef planned stroke-dasharray: 5 5
-    class jobs,diag planned
+    class diag planned
 ```
 
 ## 4. Key types
@@ -63,6 +64,8 @@ flowchart TD
 | `FrameArena` | Fixed-capacity bump allocator, reset per frame | `CONVENTIONS.md` §8 |
 | `FixedTimestep` | Accumulates time, releases fixed steps | `DESIGN.md` §2.7 |
 | `Clock` | The only reader of the system clock | `DESIGN.md` §5 |
+| `JobSystem` | Dispatches work across threads | `DESIGN.md` §2.5, `PLAN.md` §4.1-C |
+| `Scope` | Spawns tasks that borrow caller stack data | `DESIGN.md` §2.5 |
 
 ## 5. Diagrams
 
@@ -147,6 +150,27 @@ The arena never grows. An arena that silently falls back to the heap hides the
 per-frame allocation it exists to eliminate — the frame still hitches and
 nothing reports it.
 
+### 5.5 Job dispatch — a final seam over a provisional implementation
+
+The API assumes parallel execution and many cheap tasks. The M0 implementation
+spawns OS threads per call, which is correct but slow. Callers written against
+this shape do not change when the work-stealing pool replaces it at M1.
+
+```mermaid
+flowchart TD
+    api["JobSystem — scope, for_each, for_each_mut"]
+    m0("M0: std::thread::scope — safe, correct, slow")
+    m1("M1: work-stealing pool")
+    access["read/write access declaration"]
+
+    api --> m0
+    api -.->|"replaces, without touching callers"| m1
+    access -.->|"lands with slop-ecs, when a consumer exists"| api
+```
+
+Do not optimize against the current cost model — assume dispatch is cheap and
+tasks are many, which is what will be true.
+
 ## 6. Decisions
 
 | Decision | Where |
@@ -177,3 +201,11 @@ nothing reports it.
    possible. `Clock` is the only place `Instant::now` is called.
 7. **Excess accumulated time is discarded, never carried.** Carrying it produces
    the spiral of death.
+8. **Job execution order is unspecified.** `for_each` chunking, thread
+   assignment, and completion order are not part of the contract and will change
+   when the work-stealing pool lands. Anything order-dependent belongs in a
+   sequential pass or must be sorted afterwards.
+9. **No global job system.** It is constructed and passed explicitly, for the
+   same reason nothing else here is a singleton.
+10. **One thread is a supported configuration**, not a degraded fallback — it is
+    how deterministic runs remove scheduling as a variable.
