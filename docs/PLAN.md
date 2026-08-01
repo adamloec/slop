@@ -121,7 +121,43 @@ Two consequences worth carrying into M0:
 
 ## 3. Current state
 
-**M0 tasks A and C are done: workspace scaffolding, and `slop-core` complete.**
+**M0 tasks A, B, C, E and F are done. The triangle renders.**
+
+Verified on the RTX 5090: window, surface, device, swapchain, cooked Slang
+shader, graphics pipeline, and a frame loop with two frames in flight, running
+with validation active and reporting no errors, and shutting down cleanly. A
+one-second run completes roughly 5,400 frames, which is the evidence that the
+frames-in-flight pipelining works rather than stalling on the GPU each frame.
+
+Remaining for M0:
+
+| Task | State |
+|---|---|
+| D — `slop-rhi` | Mostly done. `gpu-allocator`, buffers, images and descriptors remain, and are needed for the cube rather than the triangle. |
+| G — verification skeleton | Not started. Headless mode, one golden image. |
+| §4.2 exit criteria | The cube, dual-platform CI, and a golden image are all outstanding. |
+
+The triangle deliberately allocates nothing — positions come from `SV_VertexID`
+— so the first render did not also depend on the allocator, buffer uploads, or
+descriptor sets being correct. Those arrive together with the cube.
+
+**Three bugs reached a running program that review did not catch**, which is the
+argument for pulling task G forward rather than leaving it last:
+
+1. A missing `shaderDrawParameters` feature: 18 validation errors, zero test
+   failures, and correct output on this driver regardless.
+2. A backwards triangle winding: invisible geometry, no validation complaint,
+   and reasoning about it produced the wrong answer twice.
+3. A drop-order crash on shutdown, which only appeared when a human closed the
+   window rather than when the process was killed.
+
+None of the three was visible to the type system, clippy, or the test suite.
+
+---
+
+### 3.1 Earlier state
+
+**M0 tasks A and C: workspace scaffolding, and `slop-core` complete.**
 
 `slop-core` ships `Handle<T>` / `RawHandle`, `SlotMap<T>`, `HandleAllocator<T>`,
 `FrameArena`, `FixedTimestep` / `Clock`, `JobSystem` / `Scope`, and
