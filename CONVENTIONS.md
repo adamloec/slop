@@ -11,24 +11,72 @@ that decays.
 
 ---
 
-## 1. Crate and module layout
-
-Crates depend only downward (`DESIGN.md` §4). No cycles, no upward reach. Use
-`foo.rs` beside a `foo/` directory; never `mod.rs` — it makes every file in the
-editor's file switcher read `mod.rs`.
+## 1. Repository layout
 
 ```
-crates/slop-ecs/src/
-    lib.rs
-    prelude.rs
-    archetype.rs          ← the concept
-    archetype/
-        column.rs         ← its parts
-        table.rs
-    query.rs
+slop/
+├── crates/                 workspace members — the engine (DESIGN.md §4)
+│   ├── slop-math/
+│   ├── slop-core/
+│   ├── slop-rhi/
+│   └── ...                 one directory per crate, added as milestones need them
+│
+├── shaders/                Slang source — one tree, not per-crate (see below)
+│   ├── lib/                shared modules: brdf, lighting, shared structs
+│   └── passes/             entry points, one per render pass
+│
+├── assets/                 SOURCE assets only, committed. Never cooked output.
+│   ├── meshes/
+│   ├── textures/
+│   └── env/
+│
+├── examples/               runnable native demos, each its own workspace member
+│   └── cube/
+│
+├── guests/                 WASM guest modules — SEPARATE workspace (see below)
+│
+├── tests/                  workspace-level integration tests
+│   └── golden/             approved reference images, binary per .gitattributes
+│
+├── tools/                  dev scripts, CI helpers, cook utilities
+│
+├── .slop/                  tool-owned local state — gitignored
+│   └── cache/              cooked assets, keyed by content hash (§2.8)
+│
+├── target/                 cargo output — gitignored
+│
+├── DESIGN.md  PLAN.md  CONVENTIONS.md  README.md
+├── Cargo.toml              workspace root
+├── rust-toolchain.toml  rustfmt.toml  clippy.toml  .gitattributes
+└── .github/workflows/
 ```
 
-Invert rather than reach upward:
+Four of these are decisions rather than obvious defaults:
+
+**Shaders live in one central tree, not beside the crates that use them.**
+§2.11 chose Slang specifically for its module system — shared BRDF, lighting,
+and struct definitions imported across passes. Scattering shaders across crate
+directories fights the thing we picked the language for. They are also cooked
+content (§2.8), not Rust source, so they do not belong under `src/`.
+
+**Source and cooked assets are physically separate trees.** `assets/` is
+committed and human-authored; `.slop/cache/` is generated, content-hash-keyed,
+and gitignored. Interleaving them is how a cooked artifact eventually gets
+committed and then silently goes stale against its source.
+
+**WIT definitions live at `crates/slop-abi/wit/`,** the `wit-bindgen`
+convention, so they sit with the crate that versions them (`DESIGN.md` §7).
+
+**`guests/` is a separate Cargo workspace, excluded from the root one.** WASM
+guest modules build for `wasm32-wasip2`, not the host target. Keeping them as
+members of the main workspace means every `cargo build --workspace` tries to
+build them for the host and every `cargo test` drags them in. This costs nothing
+to arrange now and is genuinely annoying to untangle at M4.
+
+## 2. Crate and module layout
+
+Crates depend only downward (`DESIGN.md` §4). No cycles, no upward reach —
+invert instead:
 
 ```rust
 // ✗ slop-ecs must not know slop-render exists
@@ -39,16 +87,162 @@ pub fn extract_meshes(&self) -> Vec<Mesh> { .. }
 pub trait Component: 'static + Send + Sync {}
 ```
 
-`unreachable_pub` is on, so `pub` means genuinely public. Each consumer-facing
-crate exposes a prelude of types the caller cannot avoid — types and traits only,
-never functions, and never "everything":
+Use `foo.rs` beside a `foo/` directory; never `mod.rs` — it makes every file in
+the editor's file switcher read `mod.rs`.
+
+**Coming from a layered web application:** a FastAPI or Spring app puts its
+layers in directories — `routes/`, `services/`, `repositories/`, `models/` —
+because the language cannot enforce the boundary between them. Cargo can. Here
+the layers *are* the crates, the dependency direction is checked by the compiler,
+and a cycle is a build error rather than a review comment. So the equivalent
+structure lives one level up:
+
+| Layered web app | Slop equivalent | Note |
+|---|---|---|
+| `models/` | component structs, in whichever crate owns them | no shared model layer; data lives with the system that uses it |
+| `repositories/` | `slop-asset` for persistence, `SlotMap` registries for in-memory | one crate, not a folder repeated per feature |
+| `services/` | ECS systems | free functions over columns, not stateful service objects |
+| `routes/` | `slop-abi` WIT definitions, `slop-cli` | the external surface, versioned independently (§7) |
+| `schemas/` | `slop-reflect` | derived from types, never hand-written (§2.4) |
+| `middleware/` | render graph passes, job scheduling | |
+| `config/` | `slop-app` | |
+
+The consequence: **do not recreate those directories inside a crate.** A
+`services/` folder in `slop-ecs` would be grouping by role again, and §2.2 is
+about why that fails here.
+
+### 2.1 `lib.rs` is a table of contents
+
+It holds crate docs, module declarations, and the public re-exports. Logic in
+`lib.rs` is how a crate starts becoming one file.
+
+```rust
+//! One-paragraph statement of what this crate owns, and the DESIGN.md section
+//! it implements.
+
+// Private by default. Each is one concept.
+mod error;
+mod concept_a;
+mod concept_b;
+mod concept_c;
+
+pub mod prelude;
+
+// The public surface, named explicitly. Never `pub use concept_a::*`, which
+// makes the API whatever the module happens to contain today.
+pub use concept_a::{TypeOne, TypeTwo};
+pub use concept_b::TypeThree;
+pub use error::CrateError;
+```
+
+Modules are private and the crate re-exports a chosen surface. That keeps the
+internal file layout free to change without breaking callers, which is what makes
+§2.4's "split it when it grows" cheap rather than a breaking change.
+
+### 2.2 Split by concept, never by kind
+
+Grouping by what a thing *is* rather than what it is *about* means every feature
+change touches every file, and each file grows without bound.
+
+```
+✗ banned filenames — no domain meaning, unbounded growth
+    utils.rs  helpers.rs  common.rs  misc.rs  shared.rs
+    types.rs  traits.rs   structs.rs  impls.rs
+
+✓ named for the concept they own
+    swapchain.rs  descriptor.rs  barrier.rs  archetype.rs
+```
+
+If a helper has no home, it belongs to a concept that has not been named yet.
+Name the concept and give it a file.
+
+### 2.3 The standard crate skeleton
+
+Every crate has the same shape. Only three files are fixed; the rest is named
+for whatever that crate owns.
+
+```
+crates/slop-<name>/
+├── Cargo.toml
+├── src/
+│   ├── lib.rs          declarations and re-exports, no logic
+│   ├── prelude.rs      the types a caller cannot avoid
+│   ├── error.rs        this crate's error enum
+│   ├── <concept>.rs    one file per concept the crate owns  ← the bulk
+│   ├── <concept>/      only when that concept has real parts
+│   └── backend/        FFI seam, only where the crate wraps something external
+├── tests/              integration: round-trip, golden, determinism
+├── benches/            frame-budget benchmarks (DESIGN.md §5)
+└── examples/           runnable demos of this crate in isolation
+```
+
+**`backend/` is the one role-shaped directory that legitimately recurs.** Several
+crates exist largely to wrap an external library — `slop-rhi` over `ash`,
+`slop-host` over `wasmtime`, `slop-physics` over `rapier`, `slop-audio` over
+`cpal`. Keeping the FFI seam in one directory means the rest of the crate is
+written against our own types, and swapping or vendoring the dependency stays
+contained. §2.11 already requires exactly this for the Slang bindings; making it
+the general pattern costs nothing.
+
+Everything else is vertical. A concept gets a file; a concept with genuine
+internal parts gets a directory of the same name beside it. Do not create a
+directory in anticipation of parts that do not exist yet.
+
+### 2.4 Size is a smell, not a rule
+
+There is no line limit — limits produce artificial splitting, which is its own
+kind of mess. Use these signals instead:
+
+- **A file past ~500 lines** is a prompt to ask whether it is still one concept.
+  Often the answer is yes; `swapchain.rs` legitimately owns recreation, format
+  selection, and present modes.
+- **A function needing section comments** — `// --- setup ---`, `// --- record
+  ---` — is already two functions and is telling you where to cut.
+- **A `use` block importing from five sibling modules** means the file is
+  coordinating rather than owning something.
+- **Struggling to name a file** means its contents have no single reason to
+  exist.
+
+Vulkan-specific: every Vulkan object gets its own module with its own
+constructor, so the top-level call reads as a summary rather than a script.
+
+```rust
+// ✗ one 800-line init() — the classic RHI god function
+pub fn init(window: &Window) -> Result<Renderer, RhiError> { /* everything */ }
+
+// ✓ each step owns its module; this function stays readable
+pub fn init(window: &Window) -> Result<Renderer, RhiError> {
+    let instance = Instance::new(InstanceConfig::default())?;
+    let surface = Surface::new(&instance, window)?;
+    let physical = physical::select(&instance, &surface, features::required())?;
+    let device = Device::new(&instance, physical)?;
+    let swapchain = Swapchain::new(&device, &surface, window.inner_size())?;
+    Ok(Renderer { instance, surface, device, swapchain })
+}
+```
+
+### 2.5 Visibility
+
+`unreachable_pub` is on, so `pub` means genuinely public. Use `pub(crate)` for
+cross-module internals — the moment you reach for it, you are deciding where the
+crate's real seam is, which is the point.
+
+Each consumer-facing crate exposes a prelude of types the caller cannot avoid.
+Types and traits only, never functions, and never "everything in the crate":
 
 ```rust
 // slop-ecs/src/prelude.rs
 pub use crate::{Component, Entity, Query, World};
 ```
 
-## 2. Naming
+### 2.6 Test placement
+
+Colocated `#[cfg(test)] mod tests` at the bottom of the file under test. When the
+tests outgrow the code — common for `slotmap.rs`, where the interesting cases are
+all about reuse and staleness — move them to `slotmap/tests.rs` rather than
+letting the file double in size.
+
+## 3. Naming
 
 Standard Rust naming (RFC 430), plus: **name for the data, not the role.** If no
 precise name suggests itself, the type is usually doing two things.
@@ -82,7 +276,7 @@ fn get(&self, handle: Handle<Node>) -> Option<&Node>;
 Names in `slop-abi`'s WIT are permanent public contract (`DESIGN.md` §7).
 Renaming one later breaks every third party.
 
-## 3. Data-oriented rules
+## 4. Data-oriented rules
 
 Implements `DESIGN.md` §1.2 principle 2. These are the rules most easily broken
 by writing perfectly ordinary idiomatic Rust.
@@ -147,7 +341,7 @@ struct Particles {
 }
 ```
 
-## 4. API design
+## 5. API design
 
 **No hidden global state.** No singletons, no `static mut`, no implicit "current
 device." Globals are what make headless mode, multiple editor worlds, and
@@ -193,7 +387,7 @@ fn write_transforms(&mut self, entities: &[Entity], transforms: &[Transform]);
 immutable API means the API is wrong; the borrow checker is describing real
 aliasing.
 
-## 5. Errors and panics
+## 6. Errors and panics
 
 `thiserror` in libraries, `anyhow` only at application boundaries. Errors are
 typed enums — a caller must be able to match and respond.
@@ -236,7 +430,7 @@ let sc = self.swapchain.expect("swapchain recreated before frame begin");
 
 Use `debug_assert!` for invariants too expensive to check in shipping builds.
 
-## 6. `unsafe`
+## 7. `unsafe`
 
 Confined to `slop-rhi` and the allocator. `unsafe` elsewhere is a design
 discussion, not a review comment. Every block carries `// SAFETY:` stating the
@@ -260,7 +454,7 @@ Wrap at the lowest level and expose a safe API — the unsafe surface is a thin
 layer over `ash`, not a family of unsafe functions propagating outward. No
 `unsafe` for performance without a benchmark; §5's budget harness arbitrates.
 
-## 7. Allocation and performance
+## 8. Allocation and performance
 
 No heap allocation in per-frame paths — use the frame arena and reset once per
 frame.
@@ -283,7 +477,7 @@ let mut draws = Vec::with_capacity(snapshot.mesh_count());
 Measure with the §5 budget harness, not by eye. Performance claims in commit
 messages cite a number. Instrument subsystem boundaries as they are written.
 
-## 8. Concurrency
+## 9. Concurrency
 
 Use the job system, never raw threads (§2.5) — a subsystem spawning its own
 threads is invisible to the scheduler and competes with it for cores.
@@ -318,7 +512,7 @@ lands, make it structurally impossible for the renderer to hold a `&World`.
 Structural ECS changes go through command buffers applied at explicit sync
 points, never immediately (§2.10).
 
-## 9. Platform portability
+## 10. Platform portability
 
 Each rule maps to a row of `DESIGN.md` §2.13's trap table.
 
@@ -346,7 +540,7 @@ ash_window::create_surface(&entry, &instance, display_handle, window_handle, Non
 Asset paths are lowercase, enforced at cook time. Text files are LF, governed by
 `.gitattributes`, with repo-local `core.autocrlf = false`.
 
-## 10. Documentation
+## 11. Documentation
 
 Module-level `//!` explains why the module exists and cites the design section.
 Every public item documented — **[gap]**, enable `missing_docs` per crate as each
@@ -368,7 +562,7 @@ slot.generation = slot.generation.saturating_add(1);
 
 No commented-out code. Git remembers.
 
-## 11. Testing
+## 12. Testing
 
 Implements §5. Unit tests colocated in `#[cfg(test)] mod tests`; integration and
 golden-image tests in `tests/`.
@@ -407,7 +601,7 @@ Bugs get a regression test written *before* the fix, so it is demonstrated to
 fail first. Reflected types round-trip automatically once §2.4 lands — generated
 from the registry, not written per type.
 
-## 12. Logging and diagnostics
+## 13. Logging and diagnostics
 
 `tracing`, structured, never `println!`. Log fields, not prose — records can be
 filtered and aggregated; sentences cannot.
@@ -451,7 +645,7 @@ bug that also drowns the signal. Use a span:
 let _span = trace_span!("cull", entities = scene.len()).entered();
 ```
 
-## 13. Dependencies
+## 14. Dependencies
 
 Adding one requires justifying it against `DESIGN.md` §3's write/take line. The
 question is not "does this crate work" but "does this subsystem define engine
@@ -475,7 +669,7 @@ platform third parties ship on (§7). Prefer one well-maintained dependency to
 three convenient ones; each is a supply-chain entry and a build cost on both
 platforms.
 
-## 14. Lints, formatting, suppressions
+## 15. Lints, formatting, suppressions
 
 rustfmt is the authority — formatting is never a review topic. Lints are
 centralized in the root manifest's `[workspace.lints]` and inherited, never added
@@ -496,7 +690,7 @@ fn create_graphics_pipeline(..) -> Result<Pipeline, RhiError> { .. }
 
 `PLAN.md` §4.2 makes "no `#[allow]` hiding real problems" an M0 exit criterion.
 
-## 15. Commits
+## 16. Commits
 
 Imperative subject under ~72 chars. The body explains *why* — the diff says what.
 Cite the design section, and note rejected alternatives.
