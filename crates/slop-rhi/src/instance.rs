@@ -18,7 +18,7 @@ use crate::RhiError;
 /// 1.3 — timeline semaphores and descriptor indexing from 1.2, dynamic rendering
 /// and synchronization2 from 1.3 — so requiring 1.4 would narrow the supported
 /// hardware without buying a feature we need.
-const REQUIRED_API_VERSION: u32 = vk::API_VERSION_1_3;
+pub(crate) const REQUIRED_API_VERSION: u32 = vk::API_VERSION_1_3;
 
 /// The Khronos validation layer, shipped with the Vulkan SDK.
 const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";

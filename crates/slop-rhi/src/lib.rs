@@ -28,6 +28,12 @@
 
 mod error;
 mod instance;
+mod physical;
+mod queues;
 
 pub use error::RhiError;
 pub use instance::{Instance, InstanceConfig, Validation};
+pub use physical::{DeviceInfo, DeviceKind, DeviceSelection, Rejection, enumerate, select};
+pub use queues::QueueFamilies;
+
+pub(crate) use instance::REQUIRED_API_VERSION;

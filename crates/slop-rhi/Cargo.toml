@@ -16,3 +16,4 @@ workspace = true
 
 [dev-dependencies]
 ash.workspace = true
+slop-core = { workspace = true, features = ["subscriber"] }

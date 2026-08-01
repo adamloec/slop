@@ -20,8 +20,9 @@ Started. This is the bulk of M0 and the largest single body of work in it.
 | Area | State | Milestone |
 |---|---|---|
 | Instance, validation layers, debug messenger | Landed | M0 |
-| Physical device selection and scoring | Planned | M0 |
-| Logical device, queue families | Planned | M0 |
+| Physical device enumeration, scoring, selection | Landed | M0 |
+| Queue family discovery | Landed | M0 |
+| Logical device, queue creation | Planned | M0 |
 | `gpu-allocator` integration | Planned | M0 |
 | Surface, swapchain and recreation | Planned | M0 |
 | Command pools and buffers | Planned | M0 |
@@ -98,18 +99,66 @@ same filtering as everything else and appears in captured logs. Vulkan's `INFO`
 severity maps to `debug` here, keeping `CONVENTIONS.md` §13's rule that `info`
 stays meaningful.
 
-## 6. Decisions
+## 6. Device selection is player-facing
+
+A game built on the engine will expose a GPU picker in its graphics settings, so
+enumeration is public API rather than an internal step (`DESIGN.md` §7). Three
+consequences shape the design:
+
+**Selection keys on `deviceUUID`, not an enumeration index.** A player's saved
+choice must survive adding a GPU, removing one, or a driver update reordering
+them. Indices do not survive any of those; a saved index silently points at a
+different card.
+
+**A saved choice degrades rather than fails.** If the named device is gone or has
+become unusable, selection falls back to automatic with a warning. Swapping a
+graphics card must not prevent a game from launching. `ByIndex` deliberately does
+*not* fall back — it exists for test harnesses, which want to fail loudly rather
+than silently measure a different device.
+
+**Unusable devices are listed with a reason**, not hidden, so a settings UI can
+grey an entry out and say why.
+
+```mermaid
+flowchart TD
+    all["every adapter the driver reports"] --> filter{"meets requirements?"}
+    filter -->|"no"| reject["listed with a Rejection reason"]
+    filter -->|"yes"| usable["usable"]
+    usable --> pick{"selection mode"}
+    pick -->|"ByUuid, found"| chosen["chosen"]
+    pick -->|"ByUuid, missing"| fallback["warn, fall back to automatic"]
+    pick -->|"Automatic"| score["score: kind, then memory"]
+    fallback --> score
+    score --> chosen
+    reject -.->|"never selectable"| chosen
+```
+
+Filtering happens **before** scoring, so scoring can never pick a device that
+cannot do the job.
+
+Kind outranks memory in the score, which is not arbitrary: an integrated GPU
+reports shared system RAM as device-local memory. On this development machine
+the UHD 770 claims 16 GiB against the 5090's 32 GiB, and on a machine with an
+8 GiB card and 32 GiB of RAM a memory-only score would pick the iGPU.
+
+A software rasterizer ranks last by a wide margin. lavapipe is what CI golden
+images render on (`PLAN.md` §4.1-G), and selecting it by accident on real
+hardware would mean rendering thousands of times slower with nothing reporting
+it.
+
+## 7. Decisions
 
 | Decision | Where |
 |---|---|
 | Own the RHI; Vulkan via `ash`; not `wgpu` | `DESIGN.md` §2.2 |
 | Require Vulkan 1.3, not 1.4 | §4 above |
+| Device selection by UUID, degrading to automatic | §6 above |
 | M0 ships primitives, not abstraction | `PLAN.md` §4.1-D |
 | Slang as the shading language, library-integrated | `DESIGN.md` §2.11 |
 | Which Slang Rust binding | `DESIGN.md` §8 item 2 — revisit at M3 |
 | Desktop only; one GPU feature tier | `DESIGN.md` §2.1 |
 
-## 7. Invariants
+## 8. Invariants
 
 1. **This crate and the allocator are the only sanctioned homes for `unsafe`.**
    `unsafe` anywhere else is a design discussion, not a review comment.
@@ -135,3 +184,8 @@ stays meaningful.
 9. **GPU-dependent tests live in `tests/` and skip only on a missing loader.**
    Any other failure is reported. Skipping on every error would make the suite
    worthless the first time it mattered.
+10. **Filter before scoring.** A device that cannot meet requirements is never
+    scored, so it can never be selected — including by an explicit request,
+    which errors with the reason instead.
+11. **Never select by index in player-facing paths.** Indices are not stable
+    across hardware or driver changes; `deviceUUID` is.

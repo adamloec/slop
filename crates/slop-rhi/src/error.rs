@@ -48,6 +48,26 @@ pub enum RhiError {
     )]
     ValidationUnavailable,
 
+    /// No adapter can run the engine.
+    ///
+    /// Carries how many were examined so the message distinguishes "no GPU
+    /// found at all" from "three were found and all were rejected", which point
+    /// at very different problems.
+    #[error("no suitable graphics device found among {considered} candidate(s)")]
+    NoSuitableDevice {
+        /// How many adapters were enumerated.
+        considered: usize,
+    },
+
+    /// A specifically requested device cannot run the engine.
+    #[error("graphics device '{name}' cannot be used: {reason}")]
+    DeviceUnsuitable {
+        /// The device's reported name.
+        name: String,
+        /// Why it was rejected, in words a settings UI can show.
+        reason: String,
+    },
+
     /// A Vulkan call returned a failure code.
     #[error("Vulkan call failed: {0}")]
     Vulkan(#[from] ash::vk::Result),
