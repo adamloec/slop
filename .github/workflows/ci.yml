@@ -1,0 +1,61 @@
+# Dual-platform CI — DESIGN.md §2.13.
+#
+# Windows and Linux are both first-class from M0. Portability breakage caught
+# within hours of the causing commit is a three-line fix; the same breakage
+# found months later is a multi-week project. Do not let either platform go red.
+#
+# Deliberately dependency-light: no caching or third-party actions yet. Add them
+# when build times justify it, not before — a CI matrix is far easier to debug
+# while it is this simple.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    name: check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Never mask one platform's failure with the other's.
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the version; this materializes it up front so
+      # the toolchain install is a distinct, legible step in the log.
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Versions
+        run: |
+          rustc --version
+          cargo --version
+          cargo clippy --version
+          cargo fmt --version
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features
+
+      - name: Build
+        run: cargo build --workspace --all-targets
+
+      - name: Test
+        run: cargo test --workspace

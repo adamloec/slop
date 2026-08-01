@@ -1,0 +1,39 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.97"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/adamloec/slop"
+
+[workspace.dependencies]
+# Internal crates. External dependencies are added with `cargo add` at the point
+# of first use so that recorded versions are real rather than guessed.
+slop-core = { path = "crates/slop-core" }
+slop-math = { path = "crates/slop-math" }
+slop-rhi = { path = "crates/slop-rhi" }
+
+[workspace.lints.rust]
+rust_2018_idioms = { level = "warn", priority = -1 }
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+# PLAN.md §7 confines `unsafe` to slop-rhi and the allocator; where it does
+# appear, the unsafe block must be explicit rather than inherited from the fn.
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+# Mechanically enforces PLAN.md §7's "every unsafe block carries a // SAFETY:
+# comment" convention, rather than relying on review to catch omissions.
+undocumented_unsafe_blocks = "warn"
+
+[profile.dev]
+# Engine code is unusable at opt-level 0 well before M0 ends; dependencies are
+# optimized while our own crates stay debuggable.
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

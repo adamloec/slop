@@ -75,16 +75,39 @@ as the work that does not compress. Crippling those tools is the wrong trade.
 anyway (`DESIGN.md` §2.1), and §2.13 requires CI on both platforms so Linux
 never silently rots.
 
-### 2.2 Windows setup checklist
+### 2.2 Windows setup — complete as of 2026-07-31
 
-- [ ] Clone to a **native Windows path** (e.g. `C:\dev\slop`). **Not** under
-      `/mnt/c` or a WSL path — cross-boundary Rust builds are slow and hot-reload
-      file watching is unreliable.
-- [ ] Visual Studio Build Tools (for the MSVC linker)
-- [ ] `rustup` with the `x86_64-pc-windows-msvc` toolchain
-- [ ] LunarG Vulkan SDK — provides validation layers and `slangc`
-- [ ] RenderDoc — install now, not when already stuck
-- [ ] Optional: NVIDIA Nsight Graphics
+Installed and verified end to end (hello-world `cargo run` links and executes,
+so the MSVC linker is genuinely wired up, not merely present):
+
+| Component | Version |
+|---|---|
+| Repo location | `C:\Users\adaml\development\slop` — native path, not `/mnt/c` |
+| VS Build Tools | MSVC 14.44.35207 |
+| Windows SDK | 10.0.26100 |
+| Rust | 1.97.1 `stable-x86_64-pc-windows-msvc`, + clippy and rustfmt |
+| Vulkan SDK | 1.4.350.0 (LunarG) |
+| Slang (`slangc`) | 2026.8 — ships inside the Vulkan SDK |
+| RenderDoc | 1.45 |
+
+Not installed: NVIDIA Nsight Graphics (optional).
+
+**Vulkan runtime, confirmed via `vulkaninfo --summary`:**
+
+```
+Instance version   1.4.350
+RTX 5090           apiVersion 1.4.341, driver 610.47, DISCRETE_GPU
+Intel UHD 770      apiVersion 1.4.323, driver 101.7082, INTEGRATED_GPU
+```
+
+Two consequences worth carrying into M0:
+
+- **Vulkan 1.4 is available natively**, so timeline semaphores, dynamic
+  rendering, and descriptor indexing are all core features rather than
+  extensions. `DESIGN.md` §2.2's explicit model needs no extension juggling.
+- **Two physical devices enumerate.** Device selection must score on
+  `deviceType` and prefer `DISCRETE_GPU`. Taking index 0 is the difference
+  between the 5090 and silently rendering on the iGPU.
 
 ### 2.3 Repo
 
@@ -94,8 +117,24 @@ never silently rots.
 
 ## 3. Current state
 
-Nothing implemented. The repository contains `README.md`, `DESIGN.md`, and this
-file.
+**M0 task A (workspace scaffolding) is done; no engine code yet.** The repository
+contains the design docs plus:
+
+- `.gitattributes` — LF normalization (§2.13). Repo-local `core.autocrlf` set to
+  `false` so the attributes file is the sole authority; the machine's global
+  setting was `true`, which would have defeated §2.8's content-hash cache.
+- `rust-toolchain.toml` pinning 1.97.1, `rustfmt.toml`, `clippy.toml`
+- Cargo workspace, edition 2024, resolver 3, with `slop-math`, `slop-core`,
+  `slop-rhi`, `slop-app` — all libraries, per `DESIGN.md` §1.2 principle 4. The
+  M0 cube lands as an example, not a binary.
+- Workspace lints centralized in the root manifest. Notably
+  `clippy::undocumented_unsafe_blocks` is on, which turns §7's "every `unsafe`
+  block carries a `// SAFETY:` comment" convention into a machine-checked rule
+  rather than a review responsibility.
+- `.github/workflows/ci.yml` — Windows + Linux matrix running fmt, clippy,
+  build, and test with `-D warnings` and `fail-fast: false`.
+
+All four crates pass fmt, clippy, build, and test locally on Windows.
 
 **Design decisions locked** (`DESIGN.md` §2): target platforms, owned Vulkan RHI,
 WASM gameplay ABI, reflection-first, job-system-first, handles everywhere, fixed
@@ -139,10 +178,14 @@ The cube is deliberately unambitious. Its job is integration, not looks.
 - Arena / bump allocator for per-frame scratch
 - Time and frame pacing primitives
 - `tracing` setup for structured logging
-- Job system: **a work-stealing scheduler is §2.5 and foundational.** It is
-  acceptable to land a minimal but *correctly shaped* API in M0 and deepen it in
-  M1 — but the API shape must not assume single-threaded execution, because
-  that assumption is what becomes unfixable later.
+- Job system: **a work-stealing scheduler is §2.5 and foundational**, but
+  **decided 2026-07-31: M0 lands the API shape only, backed by a plain thread
+  pool; the work-stealing implementation follows in M1.** M0 has nothing to
+  schedule, so writing the scheduler now means designing against imagined
+  workloads — ECS system scheduling at M1 is what supplies real requirements.
+  The API shape must not assume single-threaded execution, because that
+  assumption is the part that becomes unfixable later. The implementation
+  behind it can be replaced freely.
 
 **D. `slop-rhi` — the bulk of M0**
 - `ash` instance creation, validation layers wired in debug builds
@@ -155,10 +198,30 @@ The cube is deliberately unambitious. Its job is integration, not looks.
   start**, per §2.2
 - Minimal pipeline creation path
 
-> **This is where M0's real design judgment lives.** Everything else in M0 is
-> mechanical. The RHI's API shape determines whether §2.2's explicit model
-> actually holds up, so it deserves genuine thought rather than transcription
-> from a tutorial. Expect roughly a thousand lines before the first triangle —
+> **Decided 2026-07-31 — M0 ships RHI primitives, not RHI abstraction.**
+>
+> An earlier draft of this section held that the RHI's consumer-facing API shape
+> was M0's central design problem. That is now considered a trap. An abstraction
+> designed with zero consumers is designed against imagined requirements; the
+> render graph and frame renderer at M3 are what actually determine what the API
+> must be, and a shape guessed now gets rebuilt then anyway. Building it twice is
+> fine. Building it once, early, and then living with it is worse.
+>
+> So M0 sits close to `ash` and defers the extraction to M3.
+>
+> What M0 *must* get right is the **feature model**, because that is the part
+> which cannot be retrofitted (`DESIGN.md` §2.2):
+>
+> - Timeline semaphores, not fences plus binary semaphores
+> - Explicit barriers, never implicit synchronization
+> - A bindless descriptor heap allocated from the start, even though the cube
+>   uses one texture
+> - Graphics, compute, and transfer queues acquired up front
+> - Physical device selection scoring on `deviceType` — see §2.2, two devices
+>   enumerate on this machine
+>
+> Get those right and the M3 extraction is a refactor. Get them wrong and it is a
+> rewrite. Expect roughly a thousand lines before the first triangle regardless —
 > that is the tax §2.2 knowingly accepted.
 
 **E. Window + surface**
@@ -175,6 +238,27 @@ The cube is deliberately unambitious. Its job is integration, not looks.
 - Headless mode that renders N frames without a window
 - One golden-image test wired into CI
 - Establishes the §5 pattern early, while it is trivial
+
+> **Decided 2026-07-31 — golden images run on lavapipe in CI.**
+>
+> GitHub-hosted runners have no GPU, so the §4.2 exit criterion "one
+> golden-image test passing on both platforms" cannot be met by hosted CI as
+> written. `DESIGN.md` §2.13's expectation that images match across operating
+> systems also quietly assumed self-hosted runners with identical hardware — a
+> standing cost this project should not take on yet.
+>
+> Resolution is two tiers:
+>
+> 1. **Hosted CI, both platforms, lavapipe** (Mesa's CPU rasterizer). Being a
+>    software rasterizer it is bit-deterministic with no vendor divergence, so
+>    comparison is **exact match, not tolerance**, and a Windows/Linux diff
+>    becomes a real signal instead of driver noise. This catches the class of bug
+>    golden images actually catch: state, ordering, and logic errors.
+> 2. **Real-GPU goldens on the 5090**, in a separate opt-in lane, run locally.
+>    Covers what lavapipe cannot — driver behavior and actual hardware features.
+>
+> Note this uses lavapipe for exactly the purpose §2.1 rejected it for: it is
+> useless for *development* and well suited to *deterministic verification*.
 
 ### 4.2 Definition of done
 

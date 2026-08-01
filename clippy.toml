@@ -1,0 +1,2 @@
+# Clippy will not suggest anything requiring a newer toolchain than we pin.
+msrv = "1.97"

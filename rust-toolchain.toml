@@ -1,0 +1,7 @@
+# Pinned toolchain — PLAN.md §7. Bump deliberately, never incidentally.
+# CI and local development resolve to exactly this version on both platforms.
+
+[toolchain]
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

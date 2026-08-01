@@ -1,0 +1,35 @@
+# Line-ending normalization — DESIGN.md §2.13.
+#
+# Every text file is stored and checked out as LF on both platforms. This is not
+# cosmetic: DESIGN.md §2.8 keys the asset cook cache on content hash, so a file
+# that differs only by line ending hashes differently on Windows and Linux and
+# silently defeats the cache and CI artifact reuse.
+#
+# This overrides core.autocrlf, which is set to `true` globally on the primary
+# development machine.
+
+* text=auto eol=lf
+
+# Explicitly binary — never touch these.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.tga   binary
+*.bmp   binary
+*.hdr   binary
+*.exr   binary
+*.ktx   binary
+*.ktx2  binary
+*.dds   binary
+*.basis binary
+*.glb   binary
+*.bin   binary
+*.spv   binary
+*.wasm  binary
+*.ogg   binary
+*.wav   binary
+*.ttf   binary
+*.otf   binary
+
+# Golden-image references (DESIGN.md §5) must survive byte-identical.
+tests/golden/**  binary

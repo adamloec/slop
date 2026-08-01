@@ -1,0 +1,8 @@
+# Stable rustfmt options only — nightly-gated options are deliberately excluded
+# so that formatting is reproducible on the pinned stable toolchain.
+
+max_width = 100
+use_small_heuristics = "Default"
+
+# Enforced rather than assumed — see .gitattributes and DESIGN.md §2.13.
+newline_style = "Unix"

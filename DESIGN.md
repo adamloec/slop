@@ -152,6 +152,22 @@ every later subsystem cheaper. Skipping it is the single most common fatal
 mistake in from-scratch engines — it produces five incompatible hand-written
 serializers and a rewrite around month 18.
 
+**Derived constraint: types must be registrable at runtime, not only at compile
+time.** This follows necessarily from §2.3 and §2.12 taken together. A WASM
+guest module declares its own components — `struct Inventory { ... }` — that the
+host was never compiled against, and §2.12's editor is expected to render a
+property panel for exactly those components. So reflection cannot be a derive
+macro populating a static registry of host-known types. It needs a runtime
+registration path where size, alignment, field offsets, and drop behavior arrive
+as *data* at module load time, with the derive macro being merely the
+convenient front end for host-native types.
+
+The same constraint propagates into §2.10: archetype columns must support
+component types whose layout is known only at runtime. This is a materially
+different design from "every component is a Rust type known at compile time,"
+and it is cheap to design in and expensive to retrofit. It is therefore an M1
+concern, alongside the ECS itself — see `PLAN.md` §8.
+
 ### 2.5 Job-system-first threading
 
 A work-stealing task scheduler is foundational, not additive. Systems declare
@@ -487,7 +503,10 @@ architecture. The bottleneck in this project is verification, not authoring.
 - **Deterministic headless mode.** Run N simulation ticks with no window, seeded
   RNG, stable iteration order. Reproducible bug reports and CI.
 - **Golden-image regression tests.** Render fixed scenes at fixed frames,
-  compare against approved references within tolerance.
+  compare against approved references. Two tiers: hosted CI on both platforms
+  renders through **lavapipe**, a CPU rasterizer, which is bit-deterministic and
+  vendor-independent and so compares by **exact match**; a separate opt-in lane
+  renders on real hardware to cover driver behavior. See `PLAN.md` §4.1-G.
 - **Serialization round-trip tests.** Every reflected type: serialize →
   deserialize → compare. Runs automatically for all registered types.
 - **Frame-budget harness.** Per-subsystem timing budgets asserted in CI against
@@ -576,6 +595,22 @@ demo:
    is why reflection matters even though networking is far out.
 7. **Naming.** "Slop" is a joke that becomes load-bearing if the project gets
    serious. Worth revisiting before any public surface exists.
+8. **Which tier of determinism we are buying.** §2.3, §2.7, and §5 each cite
+   determinism, for different purposes, and the tiers differ enormously in cost.
+   *Same-build, same-machine* determinism is nearly free and is sufficient for
+   replay, CI, and regression testing. *Cross-platform lockstep* — the tier
+   netcode would need — is not free and is not something `rapier` provides:
+   its `enhanced-determinism` feature is scoped to identical platform and build.
+   Provisional position: commit to same-build determinism only, which still
+   justifies every decision currently citing it, and treat cross-platform
+   lockstep as out of scope until networking is actually scoped (item 6).
+   **Decide before M5.**
+
+   This decision also selects `glam`'s feature set rather than merely being
+   affected by it: glam's SIMD paths can yield differing results across CPU
+   feature levels, and it ships `scalar-math` and `libm` features precisely to
+   trade throughput for reproducibility. So the question is never "glam or our
+   own math" (§3.2) — it is which glam configuration. Settle both together.
 
 **Resolved:**
 - macOS support — dropped, see §2.1.

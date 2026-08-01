@@ -1,0 +1,15 @@
+[package]
+name = "slop-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+slop-core = { workspace = true }
+slop-math = { workspace = true }
+slop-rhi = { workspace = true }
+
+[lints]
+workspace = true
