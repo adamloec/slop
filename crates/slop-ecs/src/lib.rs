@@ -55,6 +55,7 @@ mod column;
 mod command;
 mod error;
 mod query;
+mod resource;
 mod schedule;
 mod signature;
 mod system;
@@ -66,8 +67,8 @@ pub use column::Column;
 pub use command::{CommandBuffer, Target};
 pub use error::EcsError;
 pub use query::{
-    Access, Added, Changed, Mut, Or, Query, QueryData, QueryFilter, ReadOnlyQueryData, With,
-    Without,
+    Access, AccessKind, Added, Changed, Mut, Or, Query, QueryData, QueryFilter, ReadOnlyQueryData,
+    With, Without,
 };
 pub use schedule::{Schedule, Stage};
 pub use signature::Signature;

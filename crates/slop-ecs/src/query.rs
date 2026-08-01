@@ -73,10 +73,31 @@ use slop_reflect::{Reflect, TypeId};
 
 use crate::{Archetype, Entity, Tick, Ticks};
 
-/// What a query wants from one component type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What an [`Access`] names.
+///
+/// The scheduler treats the two as separate namespaces: a component `Time` and a
+/// resource `Time` are different things, and a system touching one does not
+/// conflict with a system touching the other. Folding them into one id would
+/// serialize systems that never meet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AccessKind {
+    /// Data held per entity, in archetype columns.
+    Component,
+    /// Data of which the world holds exactly one — see
+    /// [`World::insert_resource`](crate::World::insert_resource).
+    Resource,
+}
+
+/// What a system wants from one type.
+///
+/// The unit the scheduler reasons in. A [`QueryData`] produces these for the
+/// components it names; a system declares them for everything it will touch,
+/// resources included.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Access {
-    /// The component type.
+    /// Whether this names a component or a resource.
+    pub kind: AccessKind,
+    /// The type.
     pub type_id: TypeId,
     /// Whether it is requested mutably.
     pub mutable: bool,
@@ -138,6 +159,7 @@ unsafe impl<T: Reflect> QueryData for &T {
 
     fn collect_access(out: &mut Vec<Access>) {
         out.push(Access {
+            kind: AccessKind::Component,
             type_id: T::type_id(),
             mutable: false,
         });
@@ -186,6 +208,25 @@ pub struct Mut<'w, T> {
 }
 
 impl<'w, T> Mut<'w, T> {
+    /// Wrap a value and the stamp that records writing it.
+    ///
+    /// # Safety
+    ///
+    /// `changed` must be the stamp belonging to `value`, and both must live for
+    /// `'w`. Pairing a value with another element's stamp would report the wrong
+    /// entity as changed.
+    pub(crate) unsafe fn new(
+        value: &'w mut T,
+        changed: &'w std::cell::Cell<Tick>,
+        this_run: Tick,
+    ) -> Self {
+        Self {
+            value,
+            changed,
+            this_run,
+        }
+    }
+
     /// Take the reference out, stamping the component as changed.
     ///
     /// For handing a component to something that takes `&mut T`.
@@ -257,6 +298,7 @@ unsafe impl<T: Reflect> QueryData for &mut T {
 
     fn collect_access(out: &mut Vec<Access>) {
         out.push(Access {
+            kind: AccessKind::Component,
             type_id: T::type_id(),
             mutable: true,
         });

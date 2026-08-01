@@ -18,6 +18,18 @@ pub enum EcsError {
         type_id: TypeId,
     },
 
+    /// A resource type is not in the registry.
+    ///
+    /// Separate from [`UnregisteredComponent`](Self::UnregisteredComponent)
+    /// because the two are separate namespaces — a component `Time` and a
+    /// resource `Time` are different things — and an error that said the wrong
+    /// one would send the reader to the wrong registration call.
+    #[error("resource type {type_id} is not registered")]
+    UnregisteredResource {
+        /// The type that could not be resolved.
+        type_id: TypeId,
+    },
+
     /// The entity is not alive.
     ///
     /// Either never spawned, or despawned since the handle was issued —

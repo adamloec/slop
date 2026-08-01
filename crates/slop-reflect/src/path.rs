@@ -92,10 +92,10 @@ impl From<String> for TypePath {
 pub struct TypeId(u64);
 
 /// FNV-1a's 64-bit offset basis.
-const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+pub(crate) const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 
 /// FNV-1a's 64-bit prime.
-const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+pub(crate) const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
 impl TypeId {
     /// Derive an id from a path.

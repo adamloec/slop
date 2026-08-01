@@ -474,3 +474,156 @@ fn every_derived_component_in_the_workspace_style_passes_the_audit() {
 
     assert!(registry.padded_blittable().is_empty());
 }
+
+#[test]
+fn a_layout_fingerprint_changes_when_a_field_is_added() {
+    // The version-skew check. `TypeId` cannot catch this — it hashes the path,
+    // which is exactly what stays the same across a rebuild that changed the
+    // struct. A guest compiled against the four-field version would read
+    // adjacent entities' bytes as its own, silently.
+    let three = TypeInfo::new(
+        "game::Position",
+        std::alloc::Layout::from_size_align(12, 4).expect("valid"),
+        Transfer::Blittable,
+        TypeKind::Struct {
+            fields: vec![
+                FieldInfo::new("x", 0, <f32 as Reflect>::type_id()),
+                FieldInfo::new("y", 4, <f32 as Reflect>::type_id()),
+                FieldInfo::new("z", 8, <f32 as Reflect>::type_id()),
+            ],
+        },
+    );
+
+    let four = TypeInfo::new(
+        "game::Position",
+        std::alloc::Layout::from_size_align(16, 4).expect("valid"),
+        Transfer::Blittable,
+        TypeKind::Struct {
+            fields: vec![
+                FieldInfo::new("x", 0, <f32 as Reflect>::type_id()),
+                FieldInfo::new("y", 4, <f32 as Reflect>::type_id()),
+                FieldInfo::new("z", 8, <f32 as Reflect>::type_id()),
+                FieldInfo::new("w", 12, <f32 as Reflect>::type_id()),
+            ],
+        },
+    );
+
+    assert_eq!(
+        three.id(),
+        four.id(),
+        "the path, and so the id, is unchanged"
+    );
+    assert_ne!(
+        three.fingerprint(),
+        four.fingerprint(),
+        "but the layout is not"
+    );
+}
+
+#[test]
+fn a_layout_fingerprint_is_stable_for_one_definition() {
+    assert_eq!(
+        Position::type_info().fingerprint(),
+        Position::type_info().fingerprint()
+    );
+}
+
+#[test]
+fn a_layout_fingerprint_notices_a_reordered_field() {
+    // Same fields, same size, different offsets. A guest reading `y` would get
+    // `x`, which is the quietest possible failure.
+    let forward = TypeInfo::new(
+        "game::Pair",
+        std::alloc::Layout::from_size_align(8, 4).expect("valid"),
+        Transfer::Blittable,
+        TypeKind::Struct {
+            fields: vec![
+                FieldInfo::new("x", 0, <f32 as Reflect>::type_id()),
+                FieldInfo::new("y", 4, <f32 as Reflect>::type_id()),
+            ],
+        },
+    );
+
+    let swapped = TypeInfo::new(
+        "game::Pair",
+        std::alloc::Layout::from_size_align(8, 4).expect("valid"),
+        Transfer::Blittable,
+        TypeKind::Struct {
+            fields: vec![
+                FieldInfo::new("x", 4, <f32 as Reflect>::type_id()),
+                FieldInfo::new("y", 0, <f32 as Reflect>::type_id()),
+            ],
+        },
+    );
+
+    assert_ne!(forward.fingerprint(), swapped.fingerprint());
+}
+
+#[test]
+fn a_layout_fingerprint_notices_a_renamed_field() {
+    // A rename is a layout change from a serializer's point of view, since
+    // fields are addressed by name.
+    let named = |name: &str| {
+        TypeInfo::new(
+            "game::One",
+            std::alloc::Layout::from_size_align(4, 4).expect("valid"),
+            Transfer::Blittable,
+            TypeKind::Struct {
+                fields: vec![FieldInfo::new(name, 0, <f32 as Reflect>::type_id())],
+            },
+        )
+    };
+
+    assert_ne!(named("x").fingerprint(), named("width").fingerprint());
+}
+
+#[test]
+fn a_layout_fingerprint_ignores_the_path() {
+    // The path is the identity two fingerprints are compared *under*, so folding
+    // it in would only ever compare a type to itself.
+    let at = |path: &str| {
+        TypeInfo::new(
+            path,
+            std::alloc::Layout::new::<f32>(),
+            Transfer::Blittable,
+            TypeKind::Primitive,
+        )
+    };
+
+    assert_eq!(at("game::A").fingerprint(), at("other::B").fingerprint());
+}
+
+#[test]
+fn a_registry_fingerprint_covers_which_types_exist() {
+    // At table scope, unlike at type scope, *which* types are present is part of
+    // what must agree — so paths are folded in here.
+    let mut small = TypeRegistry::new();
+    register_builtins(&mut small).expect("fresh");
+
+    let mut large = TypeRegistry::new();
+    register_builtins(&mut large).expect("fresh");
+    large.register(Position::type_info()).expect("fresh");
+
+    assert_ne!(small.fingerprint(), large.fingerprint());
+}
+
+#[test]
+fn a_registry_fingerprint_does_not_depend_on_registration_order() {
+    // §2.14: two hosts that registered the same types differently must agree, or
+    // the check would reject valid modules at random.
+    let one = {
+        let mut registry = TypeRegistry::new();
+        registry.register(Position::type_info()).expect("fresh");
+        registry.register(Health::type_info()).expect("fresh");
+        registry
+    };
+
+    let other = {
+        let mut registry = TypeRegistry::new();
+        registry.register(Health::type_info()).expect("fresh");
+        registry.register(Position::type_info()).expect("fresh");
+        registry
+    };
+
+    assert_eq!(one.fingerprint(), other.fingerprint());
+}

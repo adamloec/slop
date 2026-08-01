@@ -33,29 +33,24 @@
 
 use slop_reflect::{Reflect, TypeId};
 
-use crate::query::{Access, Query, QueryData};
+use crate::query::{Access, AccessKind, Query, QueryData};
 use crate::{CommandBuffer, Entity, Tick, Ticks, World};
 
 impl Access {
-    /// Declare a read of `T`.
+    /// Declare a read of component `T`.
     pub fn read<T: Reflect>() -> Self {
-        Self {
-            type_id: T::type_id(),
-            mutable: false,
-        }
+        Self::read_id(T::type_id())
     }
 
-    /// Declare a write of `T`.
+    /// Declare a write of component `T`.
     pub fn write<T: Reflect>() -> Self {
-        Self {
-            type_id: T::type_id(),
-            mutable: true,
-        }
+        Self::write_id(T::type_id())
     }
 
     /// Declare a read of a component named at runtime — the guest path.
     pub fn read_id(type_id: TypeId) -> Self {
         Self {
+            kind: AccessKind::Component,
             type_id,
             mutable: false,
         }
@@ -64,6 +59,35 @@ impl Access {
     /// Declare a write of a component named at runtime.
     pub fn write_id(type_id: TypeId) -> Self {
         Self {
+            kind: AccessKind::Component,
+            type_id,
+            mutable: true,
+        }
+    }
+
+    /// Declare a read of resource `T`.
+    pub fn read_resource<T: Reflect>() -> Self {
+        Self::read_resource_id(T::type_id())
+    }
+
+    /// Declare a write of resource `T`.
+    pub fn write_resource<T: Reflect>() -> Self {
+        Self::write_resource_id(T::type_id())
+    }
+
+    /// Declare a read of a resource named at runtime.
+    pub fn read_resource_id(type_id: TypeId) -> Self {
+        Self {
+            kind: AccessKind::Resource,
+            type_id,
+            mutable: false,
+        }
+    }
+
+    /// Declare a write of a resource named at runtime.
+    pub fn write_resource_id(type_id: TypeId) -> Self {
+        Self {
+            kind: AccessKind::Resource,
             type_id,
             mutable: true,
         }
@@ -84,9 +108,11 @@ impl Access {
 /// revisited, but it is not revisited here.
 pub fn conflicts(left: &[Access], right: &[Access]) -> bool {
     left.iter().any(|left| {
-        right
-            .iter()
-            .any(|right| left.type_id == right.type_id && (left.mutable || right.mutable))
+        right.iter().any(|right| {
+            left.kind == right.kind
+                && left.type_id == right.type_id
+                && (left.mutable || right.mutable)
+        })
     })
 }
 
@@ -192,29 +218,104 @@ impl<'w> WorldCell<'w> {
         Query::new(self.world.archetypes(), self.ticks)
     }
 
+    /// Read the resource of type `T`, if there is one.
+    ///
+    /// # Panics
+    ///
+    /// If this system did not declare [`Access::read_resource::<T>()`] or
+    /// [`Access::write_resource::<T>()`]. Resources go through the same check as
+    /// components, because the scheduler reasons about them the same way.
+    pub fn resource<T: Reflect>(&self) -> Option<&'w T> {
+        self.assert_covers(Access::read_resource::<T>());
+
+        let pointer = self.world.resources().get(T::type_id())?;
+
+        // SAFETY: the column was built from `T`'s own registration, so the
+        // element is an initialized `T`. `new`'s contract says nothing
+        // conflicting with this system's declared access runs beside it, and the
+        // check above says this resource is within it.
+        Some(unsafe { &*pointer.cast::<T>() })
+    }
+
+    /// Mutate the resource of type `T`, if there is one.
+    ///
+    /// Yields [`Mut<T>`](crate::Mut), so the change stamp is written when the
+    /// value is reached rather than when it is looked up — as a query does, and
+    /// unlike [`World::resource_mut`], which is a point lookup outside any
+    /// schedule.
+    ///
+    /// # Panics
+    ///
+    /// If this system did not declare [`Access::write_resource::<T>()`].
+    pub fn resource_mut<T: Reflect>(&self) -> Option<crate::Mut<'w, T>> {
+        self.assert_covers(Access::write_resource::<T>());
+
+        let column = self.world.resources().column(T::type_id())?;
+
+        // SAFETY: as `resource`, and the declaration check above established
+        // exclusive access to this resource for the duration of the batch. The
+        // stamp at index 0 belongs to the value at index 0, which is the only
+        // element a resource column ever holds.
+        Some(unsafe {
+            crate::Mut::new(
+                &mut *column.as_ptr().cast::<T>(),
+                &*column.changed_ticks_ptr(),
+                self.ticks.this_run,
+            )
+        })
+    }
+
+    /// Whether a resource of type `T` is present.
+    ///
+    /// # Panics
+    ///
+    /// If this system did not declare access to it. Presence is information
+    /// about the resource, and a system that did not declare it may be running
+    /// beside one installing it.
+    pub fn contains_resource<T: Reflect>(&self) -> bool {
+        self.assert_covers(Access::read_resource::<T>());
+
+        self.world.resources().contains(T::type_id())
+    }
+
     /// Panic unless `D` is covered by what this system declared.
     fn assert_declared<D: QueryData>(&self) {
         let mut wanted = Vec::new();
         D::collect_access(&mut wanted);
 
         for wanted in wanted {
-            let covered = self.access.iter().any(|declared| {
-                declared.type_id == wanted.type_id && (declared.mutable || !wanted.mutable)
-            });
-
-            assert!(
-                covered,
-                "a system queried component {} {} without declaring it; \
-                 the scheduler decided what could run alongside this system \
-                 from the declaration, so the query is outside what was proved",
-                wanted.type_id,
-                if wanted.mutable {
-                    "mutably"
-                } else {
-                    "immutably"
-                },
-            );
+            self.assert_covers(wanted);
         }
+    }
+
+    /// Panic unless `wanted` is covered by what this system declared.
+    ///
+    /// Covered means: same kind, same type, and mutable if `wanted` is mutable.
+    /// Declaring a write and performing a read is fine — over-declaring costs
+    /// parallelism, never soundness.
+    fn assert_covers(&self, wanted: Access) {
+        let covered = self.access.iter().any(|declared| {
+            declared.kind == wanted.kind
+                && declared.type_id == wanted.type_id
+                && (declared.mutable || !wanted.mutable)
+        });
+
+        assert!(
+            covered,
+            "a system used {} {} {} without declaring it; \
+             the scheduler decided what could run alongside this system \
+             from the declaration, so this is outside what was proved",
+            match wanted.kind {
+                AccessKind::Component => "component",
+                AccessKind::Resource => "resource",
+            },
+            wanted.type_id,
+            if wanted.mutable {
+                "mutably"
+            } else {
+                "immutably"
+            },
+        );
     }
 }
 

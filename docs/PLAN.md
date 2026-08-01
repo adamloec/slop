@@ -1,7 +1,7 @@
 # Slop Engine — Implementation Plan & Session Handoff
 
-**Status:** M0 functionally complete — the lit textured cube renders. Only
-dual-platform CI remains.
+**Status:** M0 complete; M1 functionally complete — the ECS, its scheduler, and
+the job pool underneath it are built.
 **Last updated:** 2026-08-01
 
 This document is the working companion to `DESIGN.md`. **`DESIGN.md` is
@@ -122,11 +122,11 @@ Two consequences worth carrying into M0:
 
 ## 3. Current state
 
-**M0 is functionally complete and M1 is underway.** The lit textured cube
+**M0 is complete and M1 is functionally complete.** The lit textured cube
 renders with a golden image guarding it, and the reflection and ECS foundations
 are built through queries.
 
-446 tests. Clippy and rustdoc clean under `-D warnings` in both feature
+530 tests. Clippy and rustdoc clean under `-D warnings` in both feature
 configurations, Vulkan validation reporting nothing, and every crate containing
 `unsafe` passing under Miri — `slop-ecs` under both Stacked and Tree Borrows.
 
@@ -139,9 +139,14 @@ configurations, Vulkan validation reporting nothing, and every crate containing
 | Command buffers — deferred structural change | Landed |
 | Query filters — `With`, `Without`, `Or`, `Option<&T>` | Landed |
 | Change detection — `Tick`, `Mut<T>`, `Changed<T>`, `Added<T>` | Landed |
-| Work-stealing job pool behind the M0 API | **Next.** §4.1-C deferred it so ECS scheduling would supply the requirements, and it now can |
-| System scheduling from read/write sets | Outstanding — needs the work-stealing pool |
-| Serialization round-trip harness (§5) | Outstanding — needs serializers, which `slop-reflect` deliberately excludes |
+| Work-stealing job pool behind the M0 API | Landed |
+| System scheduling from read/write sets — `System`, `WorldCell`, `Schedule` | Landed |
+| Resources — data the world holds exactly one of | Landed |
+| Layout fingerprints for the §2.3 guest boundary | Landed |
+| Serialization round-trip harness (§5) | Outstanding |
+
+**M1 is functionally complete.** What remains for it is the serialization
+harness, which is really the head of M2's content work.
 
 **Deferred structural change diverges from the conventional answer, on purpose.**
 Bevy and Unity's `EntityCommandBuffer` both return a usable entity id from a
@@ -608,6 +613,12 @@ freely, never seams.
 | A stamp older than `Tick::MAX_AGE` reads as recently changed | `slop-ecs` | A periodic pass clamping stamps that old | **Replaced.** The comparison is by age and already correct; what is missing is the scan that stops ages growing without bound. Reachable only after ~2<sup>31</sup> ticks. | M2 |
 | `last_run` is supplied by hand through `Query::since` | `slop-ecs` | The scheduler supplying each system's own last run | **Replaced.** The filters do not change; only who fills in the window does. | M1 |
 | `World::get_mut` stamps eagerly rather than on write | `slop-ecs` | Nothing planned | **Kept.** A point lookup is a caller who already named the single component they intend to write, so the cost is one false positive per call — and the alternative is `Mut<T>` leaking into every single-entity access path. | — |
+| Batches, not a dependency graph | `slop-ecs` | Run a system the moment its predecessors finish | **Replaced.** Derived from the same access sets, so it is a scheduling policy change rather than a data model one. What it additionally needs is a deterministic tie-break, so buffers still apply in schedule order rather than completion order — which batching gets for free. | M3 |
+| A system cannot *create* a resource, only mutate one | `slop-ecs` | `CommandBuffer` recording resource insertion | **Extended.** Resources are installed at setup with `&mut World`; a system computing a new one is the rare case, and deferring it needs the same staging the buffer already does for components. | M2 |
+| `WorldCell::query` allocates a small `Vec` per call to check the declaration | `slop-ecs` | The access set precomputed per system | **Replaced.** A handful of elements, once per query rather than per row — but it is in the frame loop, which `CONVENTIONS.md` §8 says should allocate nothing. | M2 |
+| The layout fingerprint has no consumer | `slop-reflect` | A module loader comparing the guest's against the host's | **Joined by.** Built now because `TypeInfo` is the contract a guest is compiled against, and the check is a pure function of data already there. | M4 |
+| Type identity is a path, so renaming a type breaks saves | `slop-reflect` | An alias table mapping old paths to current ids | **Extended.** `#[reflect(path)]` already covers a type *moving modules*. What is missing is renaming with old saves in existence — and nothing is serialized yet, so the alias table wants designing against a real format rather than an imagined one. | M2 |
+| No parent/child hierarchy | `slop-ecs` | A relationship component, plus cascade-despawn and a topological transform pass | **Joined by.** Deliberately not M1: it changes none of the scheduler's conflict rules, since parent-before-child is ordering *within* a system rather than between systems. It is a subsystem rather than a feature — Bevy reworked theirs more than once — and wants designing when transform propagation is a real consumer. | M2 |
 | `TypeKind` models structs, primitives and opaque types only | `slop-reflect` | Enums, tuples, lists, maps | **Extended**, one variant each. A consumer's `match` fails to compile when one lands rather than silently ignoring it. | M2 |
 | `Reflect` rejects generic types | `slop-reflect-derive` | A path encoding the type arguments | **Replaced.** Rejected loudly today rather than silently giving every instantiation one id. | M2 |
 | `World::remove` drops the component rather than returning it | `slop-ecs` | A typed take that hands the value back | **Extended.** Needs a path that can name the type's Rust identity, which the erased core deliberately cannot. | M1 |

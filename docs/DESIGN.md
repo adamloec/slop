@@ -690,6 +690,35 @@ demo:
    composite; and non-image assertions for what pixels cannot see, such as a
    culler retaining objects it should have rejected. The first two need the
    render graph to name and expose passes. **Revisit at M3.**
+9. **How the render snapshot is produced.** §2.9 settled *that* the renderer
+   reads an immutable copy rather than live world state, and calls it the most
+   load-bearing invariant in the engine. It did not settle how that copy is made
+   120 times a second without copying the world. The options, roughly in
+   increasing order of both benefit and difficulty:
+
+   - **Double-buffer the components the renderer reads.** Simple, obviously
+     correct, and pays full copy cost every frame for data that mostly did not
+     move.
+   - **Copy only what changed.** §2.10's change detection now exists and is
+     exactly the input this needs — the renderer keeps last frame's snapshot and
+     patches the rows whose stamps are newer than its own last extract. Cost
+     scales with churn rather than with scene size, which is the right shape.
+   - **Hand the renderer a read lock on last frame's archetypes.** No copy at
+     all, and it constrains what simulation may do to storage while a frame is in
+     flight — which is a constraint on the ECS, not on the renderer.
+
+   The second is the current expectation, and the third is the one that would
+   reach back into storage. **This is the decision that most shapes the ECS from
+   outside it, and nothing downstream should assume an answer. Settle before
+   M3.**
+10. **Change detection's memory cost.** Two `u32` stamps per component per
+    entity — eight bytes riding along with, say, twelve bytes of `Position`.
+    Defensible and argued in `slop-ecs`'s docs, but it works against the cache
+    locality §2.10 chose archetype storage *for*. The mitigations if it measures
+    badly are per-chunk stamps or opting a type out; both are storage changes, so
+    the measurement wants taking before there is much built on top.
+    **Revisit at M3**, when there is a real scene to measure.
+
 **Resolved:**
 - Determinism tier — same build, any machine, either platform, see §2.14.
 - macOS support — dropped, see §2.1.

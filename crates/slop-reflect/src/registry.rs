@@ -206,8 +206,6 @@ impl TypeRegistry {
     /// Only structs whose every field type is registered can be checked; one
     /// with an unresolved field is reported by `unresolved_fields` instead, and
     /// is skipped here rather than guessed at.
-    ///
-
     pub fn padded_blittable(&self) -> Vec<(&TypePath, usize)> {
         let mut offenders = Vec::new();
 
@@ -245,6 +243,39 @@ impl TypeRegistry {
         }
 
         offenders
+    }
+
+    /// A hash of every registered type's path and layout.
+    ///
+    /// The whole-table version of [`TypeInfo::fingerprint`], and the check a
+    /// module loader actually performs: a guest declaring the types it was
+    /// compiled against sends this one number, and a mismatch means some type it
+    /// depends on is not the type the host has.
+    ///
+    /// Paths are folded in here — unlike in a single type's fingerprint — because
+    /// at table scope *which* types exist is part of what must agree. Ordered by
+    /// path, so the result does not depend on registration order or hash
+    /// iteration (`docs/DESIGN.md` §2.14).
+    ///
+    /// A mismatch says only *that* the tables differ. To say which type,
+    /// compare [`TypeInfo::fingerprint`] per path — this is the cheap check that
+    /// decides whether the expensive one is needed.
+    pub fn fingerprint(&self) -> u64 {
+        let mut hash = crate::path::FNV_OFFSET;
+
+        let mut eat = |value: u64| {
+            for byte in value.to_le_bytes() {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(crate::path::FNV_PRIME);
+            }
+        };
+
+        for info in self.sorted() {
+            eat(info.id().to_bits());
+            eat(info.fingerprint());
+        }
+
+        hash
     }
 }
 

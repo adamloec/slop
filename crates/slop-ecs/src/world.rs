@@ -58,6 +58,8 @@ pub struct World {
     by_signature: FxHashMap<Signature, usize>,
     locations: FxHashMap<Entity, Location>,
     registry: TypeRegistry,
+    /// Data the world holds exactly one of — see the `resource` module.
+    resources: crate::resource::Resources,
     /// What every write is stamped with — see [`advance_tick`](Self::advance_tick).
     tick: Tick,
 }
@@ -80,6 +82,7 @@ impl World {
             by_signature,
             locations: FxHashMap::default(),
             registry,
+            resources: crate::resource::Resources::default(),
             // One, not zero. A query that has never run compares against
             // `Tick::ZERO`, and starting there would make the world's first
             // writes indistinguishable from nothing having happened.
@@ -545,6 +548,91 @@ impl World {
         Ok(index)
     }
 
+    /// Install a resource, replacing and dropping any previous value.
+    ///
+    /// A resource is data the world holds exactly one of — the clock, the input
+    /// state, the active camera. See the `resource` module for
+    /// why it is not a component on a singleton entity.
+    ///
+    /// The type must be registered, as a component type must, and for the same
+    /// reason: a column cannot be allocated without a layout or freed without a
+    /// destructor, and `docs/DESIGN.md` §2.4 requires both to arrive as data.
+    ///
+    /// # Errors
+    ///
+    /// [`EcsError::UnregisteredResource`] if `T` is not registered.
+    pub fn insert_resource<T: Reflect>(&mut self, value: T) -> Result<(), EcsError> {
+        let tick = self.tick;
+        let info = crate::resource::require_registered::<T>(&self.registry)?.clone();
+
+        let value = std::mem::ManuallyDrop::new(value);
+
+        // SAFETY: `value` is an initialized `T`, `info` is `T`'s own registration
+        // so the column is built for exactly this layout, and `ManuallyDrop`
+        // stops the local destructor running after the resource takes ownership.
+        unsafe {
+            self.resources
+                .insert(&info, std::ptr::from_ref(&*value).cast::<u8>(), tick);
+        }
+
+        Ok(())
+    }
+
+    /// Read the resource of type `T`, if there is one.
+    pub fn resource<T: Reflect>(&self) -> Option<&T> {
+        let pointer = self.resources.get(T::type_id())?;
+
+        // SAFETY: the column was built from the `TypeInfo` registered for
+        // `T::type_id()`, which is `T`'s own, so the element is an initialized
+        // `T`. The borrow is tied to `&self`.
+        Some(unsafe { &*pointer.cast::<T>() })
+    }
+
+    /// Mutate the resource of type `T`, if there is one.
+    ///
+    /// Stamps it changed whether or not it is written, as
+    /// [`get_mut`](Self::get_mut) does and for the same reason.
+    pub fn resource_mut<T: Reflect>(&mut self) -> Option<&mut T> {
+        let tick = self.tick;
+        let pointer = self.resources.get_mut(T::type_id(), tick)?;
+
+        // SAFETY: as `resource`, and the borrow is tied to `&mut self`.
+        Some(unsafe { &mut *pointer.cast::<T>() })
+    }
+
+    /// Whether a resource of type `T` is present.
+    pub fn contains_resource<T: Reflect>(&self) -> bool {
+        self.resources.contains(T::type_id())
+    }
+
+    /// Drop the resource of type `T`. Returns whether there was one.
+    pub fn remove_resource<T: Reflect>(&mut self) -> bool {
+        self.resources.remove(T::type_id())
+    }
+
+    /// How many resources the world holds.
+    pub fn resource_count(&self) -> usize {
+        self.resources.len()
+    }
+
+    /// Every resource type currently present, ordered by id.
+    ///
+    /// What a serializer walks. Ordered rather than merely reproducible, because
+    /// a file format needs a defined order (`docs/DESIGN.md` §2.14).
+    pub fn resource_types(&self) -> Vec<TypeId> {
+        self.resources.type_ids()
+    }
+
+    /// When the resource of type `T` was added and last changed.
+    pub fn resource_ticks<T: Reflect>(&self) -> Option<crate::ElementTicks> {
+        self.resources.ticks(T::type_id())
+    }
+
+    /// The resource store, for [`WorldCell`](crate::WorldCell) to read through.
+    pub(crate) fn resources(&self) -> &crate::resource::Resources {
+        &self.resources
+    }
+
     /// Register a component type, for convenience at call sites that would
     /// otherwise reach through [`registry_mut`](Self::registry_mut).
     ///
@@ -577,6 +665,8 @@ impl World {
         for archetype in &self.archetypes {
             archetype.assert_consistent();
         }
+
+        self.resources.assert_consistent();
 
         let rows: usize = self.archetypes.iter().map(Archetype::len).sum();
         assert_eq!(

@@ -280,6 +280,79 @@ impl PartialEq for TypeInfo {
 
 impl Eq for TypeInfo {}
 
+impl TypeInfo {
+    /// A hash of this type's **memory layout**, for checking that a separately
+    /// compiled module agrees about it.
+    ///
+    /// # The problem this exists for
+    ///
+    /// `docs/DESIGN.md` §2.3 hands a guest module a column of raw bytes and lets
+    /// it iterate them as its own struct. Nothing in that exchange checks the two
+    /// sides agree about what the struct *is*. If the host has
+    /// `Position { x, y, z }` and the guest was compiled against a version with a
+    /// fourth field, the guest reads adjacent entities' data as its own — no
+    /// crash, no error, just wrong numbers a long way from the cause.
+    ///
+    /// The [`TypeId`](crate::TypeId) cannot catch it: it hashes the *path*, which
+    /// is exactly what stays the same across a version skew. Identity and layout
+    /// are different questions, and this answers the second.
+    ///
+    /// A loader compares the guest's declared fingerprint against the host's and
+    /// refuses the module on a mismatch — a startup error naming the type,
+    /// instead of corruption at runtime.
+    ///
+    /// # What it covers
+    ///
+    /// Size, alignment, transfer, kind, and every field's name, offset and type
+    /// id — everything a reader of these bytes depends on. Deliberately **not**
+    /// the path: the path is the identity under which two fingerprints are
+    /// compared, so folding it in would only ever compare a type to itself.
+    ///
+    /// Field types are covered by id rather than by their own fingerprint, so a
+    /// full check fingerprints every type in the table. That is what
+    /// [`TypeRegistry::fingerprint`](crate::TypeRegistry::fingerprint) is for,
+    /// and it is why the two exist as a pair.
+    ///
+    /// FNV-1a, for the same reason [`TypeId`](crate::TypeId) uses it: a guest in
+    /// any language must be able to reproduce it from a written specification.
+    pub fn fingerprint(&self) -> u64 {
+        let mut hash = crate::path::FNV_OFFSET;
+
+        let mut eat = |value: u64| {
+            for byte in value.to_le_bytes() {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(crate::path::FNV_PRIME);
+            }
+        };
+
+        eat(self.layout.size() as u64);
+        eat(self.layout.align() as u64);
+        eat(match self.transfer {
+            Transfer::Blittable => 1,
+            Transfer::Owning => 2,
+        });
+
+        match &self.kind {
+            TypeKind::Primitive => eat(1),
+            TypeKind::Opaque => eat(2),
+            TypeKind::Struct { fields } => {
+                eat(3);
+                eat(fields.len() as u64);
+
+                for field in fields {
+                    for byte in field.name.as_bytes() {
+                        eat(u64::from(*byte));
+                    }
+                    eat(field.offset as u64);
+                    eat(field.type_id.to_bits());
+                }
+            }
+        }
+
+        hash
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
