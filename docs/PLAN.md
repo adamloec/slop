@@ -126,7 +126,7 @@ Two consequences worth carrying into M0:
 renders with a golden image guarding it, and the reflection and ECS foundations
 are built through queries.
 
-705 tests. Clippy and rustdoc clean under `-D warnings` in both feature
+718 tests. Clippy and rustdoc clean under `-D warnings` in both feature
 configurations, Vulkan validation reporting nothing, and every crate containing
 `unsafe` passing under Miri — `slop-ecs` under both Stacked and Tree Borrows.
 
@@ -159,11 +159,11 @@ world at once. Save, load and save again produces byte-identical text.
 | Shader cooking driven onto the shared cache | Landed |
 | The cooked mesh format — binary, versioned, validated on load | Landed |
 | glTF import — positions, normals, UVs, indices | Landed |
-| Texture cooking — PNG to a versioned RGBA8 artifact | Landed |
+| Texture cooking — PNG to a versioned artifact | Landed |
 | `examples/cube` drawing entirely from cooked assets | Landed |
 | `Assets<T>` — the registry, handles, load/reload/unload | Landed |
 | Hot reload — `Assets::reload_changed` + `slop-cli cook --watch` | Landed |
-| Block compression (BC7) | Outstanding |
+| Block compression — BC7, 4:1, with the golden image unchanged | Landed |
 | Async streaming | Outstanding |
 | Debug UI (§10.2) | Outstanding — wanted before renderer bring-up |
 
@@ -172,6 +172,18 @@ staleness were already working for shaders and are not shader-specific. What was
 deliberately *not* lifted is a `Cooker` trait — a shader is one source to one
 artifact and a glTF is one source to many, so a trait shaped by the first would
 break on the second (§6.1).
+
+**BC7 landed without the golden image moving**, which is a smaller claim than it
+looks and worth stating precisely. A two-colour checkerboard is the easy case for
+a block codec — two endpoints reproduce it exactly — so the reference approved
+before the content pipeline existed still matches bit for bit through a lossy
+encoder. That says the pipeline is intact, not that the encoder is good on hard
+content; the quality claim rests on Intel's ISPC compressor being the industry
+default, not on anything tested here. What *is* tested here is the arithmetic
+that silently corrupts: `intel_tex_2` sizes its output as `ceil(w × h / 16) × 16`,
+which is the block count only when both dimensions are already multiples of four,
+so an unpadded 5×5 surface loses half its blocks. The importer pads first, and
+breaking the padding on purpose fails two tests.
 
 **The registry landed before the things that need it, and the ordering is the
 point.** A `Handle<Mesh>` is a **seam**, not an implementation, and §1.2
@@ -654,6 +666,8 @@ freely, never seams.
 | The asset VFS reads synchronously | `slop-asset` | Async streaming alongside it | **Joined by, not replaced.** A blocking read stays correct for startup, for tools, and for the cooker itself; §2.8's streaming is an additional entry point rather than a different one. Recorded because "the VFS is sync" reads like a shortcut and is not. | M2 |
 | An asset is unloaded by hand, never by refcount | `slop-asset` | Reference counting, once something holds handles long enough to outlive its need for them | **Extended.** `unload` is explicit and correct; what is missing is *who decides*, and nothing holds a handle past a frame yet. Counting references now would count them from one place. | M2/M3 |
 | `Assets<T>` is single-threaded — every mutation takes `&mut` | `slop-asset` | Interior mutability or a job-system-owned loader, once streaming decodes off the main thread | **Extended.** `Asset: Send + Sync` is already required so the bound does not have to be added later; only the *ownership* is provisional, and no public signature changes when the loader moves. | M2 |
+| Every texture is cooked to BC7 with one fixed encoder setting | `slop-cli/src/texture_import.rs` | Per-asset import settings — format, sRGB, alpha mode, mip policy | **Extended.** BC7 is right for colour and wrong for a normal map (BC5) or HDR (BC6H), and the alpha modes differ in whether they preserve alpha at all. Nothing yet knows what a texture *is for*; the material system is what will. | M2/M3 |
+| No mipmaps | `slop-cli/src/texture_import.rs` | A mip chain generated at cook time, compressed per level | **Extended.** Block compression without mips aliases badly at distance, and the cube never gets far enough away to show it. Generating them is another pass over the same pixels and changes no format — the header would gain a level count. | M2 |
 | `cook --watch` polls the source tree on a timer | `slop-cli/src/main.rs` | An event-driven watcher (`notify` or the platform API) | **Replaced.** A tree walk four times a second is nothing here and wrong for a large project. Correctness does not depend on the watcher being right about what changed — the cache decides that, on the same code path a one-shot cook uses — so the loop is all that is replaced. | M2/M3 |
 | The runtime polls cooked mtimes rather than subscribing | `slop-asset/src/vfs.rs` | Watching the cache directory for events | **Replaced.** One `stat` per loaded asset, throttled; fine for tens, wasteful for thousands. `Version` is already opaque, so where the answer comes from can change without a caller noticing. | M2/M3 |
 | Hot reload waits for the device to go idle before swapping | `examples/cube/src/scene.rs` | Deferred deletion — free after the last frame that could reference it retires | **Replaced.** Correct, and the blunt instrument: a stall nobody perceives when a human saves a file. A renderer streaming assets per frame cannot do this, and that is what forces the queue. | M3 |

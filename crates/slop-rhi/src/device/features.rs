@@ -33,6 +33,20 @@ pub(crate) fn required() -> Required {
         .sampler_anisotropy(true)
         // Wireframe, for the debug UI in §10.2.
         .fill_mode_non_solid(true)
+        // Block-compressed textures — BC7 for colour today, BC5 and BC6H when
+        // normal maps and HDR arrive. Required rather than detected: §2.1 buys
+        // one feature tier by targeting desktop only, and every desktop GPU
+        // since roughly 2010 has this. Detecting it would mean the cooker
+        // emitting two artifacts per texture and the renderer choosing between
+        // them, which is exactly the capability branching that decision exists
+        // to avoid.
+        .texture_compression_bc(true)
+        // Block-compressed textures — BC7 for colour, and BC5/BC6H when normal
+        // maps and HDR arrive. Required rather than detected: §2.1 buys one
+        // feature tier by targeting desktop only, and every desktop GPU since
+        // roughly 2010 has this. Detecting it would mean the cooker producing
+        // two artifacts and the renderer choosing between them, which is the
+        // capability branching that decision exists to avoid.
         // Non-uniform indexing into resource arrays is what makes a bindless
         // shader able to pick a material per draw.
         .shader_sampled_image_array_dynamic_indexing(true)
@@ -135,6 +149,7 @@ pub(crate) fn missing(instance: &ash::Instance, device: vk::PhysicalDevice) -> V
     require!(core, draw_indirect_first_instance);
     require!(core, sampler_anisotropy);
     require!(core, fill_mode_non_solid);
+    require!(core, texture_compression_bc);
     require!(core, shader_sampled_image_array_dynamic_indexing);
     require!(core, shader_storage_buffer_array_dynamic_indexing);
     require!(core, shader_storage_image_array_dynamic_indexing);

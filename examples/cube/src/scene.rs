@@ -708,7 +708,7 @@ fn upload_texture(
             // UNORM rather than SRGB, so the shader reads the bytes that were
             // uploaded. The golden image then compares shader output rather
             // than the result of a colour space conversion.
-            format: vk::Format::R8G8B8A8_UNORM,
+            format: vulkan_format(cooked.format),
             usage: vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
         },
     )
@@ -802,6 +802,24 @@ fn submit_once(device: &Arc<Device>, record: impl FnOnce(&CommandBuffer)) -> Res
     }
 
     Ok(())
+}
+
+/// The Vulkan format a cooked texture's bytes are in.
+///
+/// UNORM rather than the `_SRGB` variants for both, so the shader reads the
+/// bytes that were uploaded and the golden image compares shader output rather
+/// than a colour space conversion the driver performed. The cooked format
+/// deliberately does not encode that choice — see `slop_asset::texture::Format`.
+///
+/// A BC7 image is uploaded as blocks and never expanded: the copy below hands
+/// the GPU exactly the bytes on disk, and the texture units decompress at sample
+/// time. That is the whole point — the saving is in VRAM and bandwidth, not just
+/// on disk.
+fn vulkan_format(format: slop_asset::Format) -> vk::Format {
+    match format {
+        slop_asset::Format::Rgba8 => vk::Format::R8G8B8A8_UNORM,
+        slop_asset::Format::Bc7 => vk::Format::BC7_UNORM_BLOCK,
+    }
 }
 
 /// The project this example's assets were cooked into.

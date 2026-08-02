@@ -22,6 +22,21 @@
 //! The bytes are whatever the file held. Whether they are *interpreted* as sRGB
 //! is the image view's business at upload time, and baking the choice into the
 //! pixels would make one texture unusable as a normal map.
+//!
+//! # Then compressed to BC7
+//!
+//! `docs/DESIGN.md` §2.8 wants block compression, and this is where it happens.
+//! BC7 is a quarter the size of RGBA8 **in VRAM**, not merely on disk: the GPU
+//! samples the compressed blocks directly and never expands them. On a real
+//! scene that is the difference between a texture budget that fits and one that
+//! does not.
+//!
+//! The encoder is Intel's ISPC texture compressor via `intel_tex_2`. Writing a
+//! BC7 encoder is a serious project on its own — eight modes, partition tables,
+//! endpoint fitting — and `docs/DESIGN.md` §3's write/take line puts it firmly on
+//! the take side: it is a solved, self-contained, offline problem with no bearing
+//! on the engine's architecture. It is a dependency of the **cooker only**, so
+//! nothing it brings in can reach a shipped build (`slop-asset` invariant 7).
 
 use std::path::{Path, PathBuf};
 
@@ -33,10 +48,15 @@ use slop_core::diagnostics::tracing::{debug, info, warn};
 use crate::cook::Summary;
 
 /// Bump to invalidate every cooked texture.
-const COOKER_VERSION: u32 = 1;
+///
+/// 2 — textures are compressed to BC7.
+const COOKER_VERSION: u32 = 2;
 
 /// Where source images live, relative to the project root.
 const SOURCE_DIRECTORY: &str = "assets";
+
+/// Texels along each edge of a block-compressed block.
+const BLOCK: u32 = 4;
 
 /// Cook every PNG under `root/assets` into `root/.slop/cache/textures`.
 ///
@@ -80,7 +100,9 @@ pub(crate) fn textures(root: &Path, force: bool) -> Result<Summary> {
             continue;
         }
 
-        let texture = decode(&bytes).with_context(|| format!("decoding {}", source.display()))?;
+        let decoded = decode(&bytes).with_context(|| format!("decoding {}", source.display()))?;
+        let uncompressed = decoded.pixels.len();
+        let texture = compress(decoded);
 
         cache.prepare(&artifact)?;
         std::fs::write(&artifact, texture.write())
@@ -91,6 +113,9 @@ pub(crate) fn textures(root: &Path, force: bool) -> Result<Summary> {
             logical,
             width = texture.width,
             height = texture.height,
+            format = ?texture.format,
+            bytes = texture.pixels.len(),
+            was = uncompressed,
             "cooked"
         );
         summary.cooked += 1;
@@ -127,6 +152,81 @@ fn decode(bytes: &[u8]) -> Result<Texture> {
         format: Format::Rgba8,
         pixels,
     })
+}
+
+/// Compress an RGBA8 texture to BC7.
+///
+/// The dimensions are unchanged — the *real* ones are what the header carries.
+/// What changes is the payload, which becomes 4×4 blocks.
+fn compress(texture: Texture) -> Texture {
+    debug_assert_eq!(texture.format, Format::Rgba8, "only RGBA8 is compressible");
+
+    let padded_width = texture.width.div_ceil(BLOCK) * BLOCK;
+    let padded_height = texture.height.div_ceil(BLOCK) * BLOCK;
+    let padded = pad_to_blocks(&texture, padded_width, padded_height);
+
+    // `alpha` rather than `opaque`: the opaque modes ignore the alpha channel
+    // entirely and reconstruct it as 255. That is right for an albedo with no
+    // transparency and silently wrong for anything using alpha for cutout or
+    // blending, and nothing here knows which this is — that is what per-asset
+    // import settings decide, and `docs/PLAN.md` §6.1 records their absence.
+    //
+    // `slow` because cooking is offline and cached. The quality difference
+    // between the settings is visible on gradients, and the time difference is
+    // paid once per source change rather than per run.
+    let settings = intel_tex_2::bc7::alpha_slow_settings();
+    let surface = intel_tex_2::RgbaSurface {
+        width: padded_width,
+        height: padded_height,
+        stride: padded_width * 4,
+        data: &padded,
+    };
+
+    // `intel_tex_2::bc7::calc_output_size` sizes the output as
+    // `ceil(width * height / 16) * 16`, which is the block count only when both
+    // dimensions are already multiples of four — for a 5×5 surface it returns
+    // two blocks where four are needed. Padding first is what makes its
+    // arithmetic and this crate's agree; passing an unpadded surface would
+    // under-allocate and lose the last row of blocks.
+    let pixels = intel_tex_2::bc7::compress_blocks(&settings, &surface);
+    debug_assert_eq!(
+        pixels.len(),
+        Format::Bc7.payload_bytes(texture.width, texture.height)
+    );
+
+    Texture {
+        width: texture.width,
+        height: texture.height,
+        format: Format::Bc7,
+        pixels,
+    }
+}
+
+/// Grow an RGBA8 image to `width × height` by repeating its edge pixels.
+///
+/// Edge replication rather than zero fill. The padding sits inside blocks whose
+/// other texels *are* sampled, and BC7 fits one pair of endpoints per block — so
+/// filling with black drags those endpoints toward black and dims the real
+/// texels beside it. Repeating the edge costs the fit nothing.
+fn pad_to_blocks(texture: &Texture, width: u32, height: u32) -> Vec<u8> {
+    if texture.width == width && texture.height == height {
+        return texture.pixels.clone();
+    }
+
+    let mut padded = Vec::with_capacity(width as usize * height as usize * 4);
+
+    for y in 0..height {
+        let source_y = y.min(texture.height - 1);
+
+        for x in 0..width {
+            let source_x = x.min(texture.width - 1);
+            let at = ((source_y * texture.width + source_x) * 4) as usize;
+
+            padded.extend_from_slice(&texture.pixels[at..at + 4]);
+        }
+    }
+
+    padded
 }
 
 /// Expand whatever the file held into eight-bit RGBA.
@@ -270,6 +370,125 @@ mod tests {
         let pixels = to_rgba8(&raw, png::ColorType::Rgb, png::BitDepth::Sixteen).expect("valid");
 
         assert_eq!(pixels, vec![0xAB, 0x12, 0x56, 255]);
+    }
+
+    /// An RGBA8 texture of `width × height`, with a recognisable pattern.
+    fn sample(width: u32, height: u32) -> Texture {
+        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+
+        for y in 0..height {
+            for x in 0..width {
+                let bright = ((x / 4) + (y / 4)) % 2 == 0;
+                let value = if bright { 220 } else { 40 };
+
+                pixels.extend_from_slice(&[value, value / 2, x as u8, 255]);
+            }
+        }
+
+        Texture {
+            width,
+            height,
+            format: Format::Rgba8,
+            pixels,
+        }
+    }
+
+    #[test]
+    fn compression_keeps_the_real_dimensions() {
+        // The header carries the true size, never the padded one. Storing the
+        // padded size would make every consumer undo it, and one would forget.
+        let compressed = compress(sample(64, 64));
+
+        assert_eq!(compressed.width, 64);
+        assert_eq!(compressed.height, 64);
+        assert_eq!(compressed.format, Format::Bc7);
+    }
+
+    #[test]
+    fn compression_is_four_to_one() {
+        let source = sample(64, 64);
+        let uncompressed = source.pixels.len();
+        let compressed = compress(source);
+
+        assert_eq!(uncompressed, 64 * 64 * 4);
+        assert_eq!(compressed.pixels.len(), uncompressed / 4);
+    }
+
+    #[test]
+    fn a_size_that_is_not_a_multiple_of_four_still_covers_whole_blocks() {
+        // The hazard `intel_tex_2` presents: its `calc_output_size` is
+        // `ceil(width * height / 16) * 16`, which is the block count only when
+        // both dimensions are already multiples of four. For 5x5 it returns two
+        // blocks where four are needed. Padding first is what reconciles it, and
+        // this is the test that fails if the padding is ever dropped.
+        let compressed = compress(sample(5, 5));
+
+        assert_eq!(compressed.width, 5);
+        assert_eq!(compressed.height, 5);
+        assert_eq!(
+            compressed.pixels.len(),
+            2 * 2 * 16,
+            "5x5 needs 2x2 blocks, not ceil(25/16)"
+        );
+        assert_eq!(
+            compressed.pixels.len(),
+            Format::Bc7.payload_bytes(5, 5),
+            "and the format crate must agree"
+        );
+    }
+
+    #[test]
+    fn every_awkward_size_agrees_with_the_format_crate() {
+        // The cooker and the reader compute the payload size independently. If
+        // they ever disagree, the reader either truncates the last blocks or
+        // refuses the file as short.
+        for (width, height) in [(1, 1), (3, 7), (4, 4), (13, 4), (4, 13), (17, 31), (64, 64)] {
+            let compressed = compress(sample(width, height));
+
+            assert_eq!(
+                compressed.pixels.len(),
+                Format::Bc7.payload_bytes(width, height),
+                "{width}x{height}"
+            );
+        }
+    }
+
+    #[test]
+    fn compressing_the_same_pixels_twice_gives_the_same_bytes() {
+        // The cook cache keys on inputs and assumes the cooker is a function of
+        // them. An encoder that varied run to run — a thread count leaking into
+        // the result, say — would make every cook produce a different artifact
+        // while every stamp still matched.
+        let first = compress(sample(32, 32));
+        let second = compress(sample(32, 32));
+
+        assert_eq!(first.pixels, second.pixels);
+    }
+
+    #[test]
+    fn padding_repeats_the_edge_rather_than_filling_with_black() {
+        // BC7 fits one pair of endpoints per 4x4 block, so padding with black
+        // drags the endpoints of an edge block toward black and dims the real
+        // texels beside it. Repeating the edge costs the fit nothing.
+        let texture = sample(2, 2);
+        let padded = pad_to_blocks(&texture, 4, 4);
+
+        assert_eq!(padded.len(), 4 * 4 * 4);
+
+        let texel = |x: usize, y: usize| &padded[(y * 4 + x) * 4..(y * 4 + x) * 4 + 4];
+
+        assert_eq!(texel(2, 0), texel(1, 0), "the last column repeats");
+        assert_eq!(texel(3, 0), texel(1, 0));
+        assert_eq!(texel(0, 2), texel(0, 1), "and the last row");
+        assert_eq!(texel(3, 3), texel(1, 1), "including the corner");
+    }
+
+    #[test]
+    fn padding_an_already_aligned_image_changes_nothing() {
+        let texture = sample(8, 8);
+        let padded = pad_to_blocks(&texture, 8, 8);
+
+        assert_eq!(padded, texture.pixels);
     }
 
     #[test]

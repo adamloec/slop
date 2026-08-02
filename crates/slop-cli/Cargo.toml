@@ -15,6 +15,7 @@ path = "src/main.rs"
 anyhow = { workspace = true }
 clap = { workspace = true }
 gltf = { workspace = true }
+intel_tex_2 = "0.5.0"
 png = { workspace = true }
 slop-asset = { workspace = true }
 slop-core = { workspace = true, features = ["subscriber"] }

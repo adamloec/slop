@@ -20,13 +20,21 @@
 //! property of the format rather than of whichever machine cooked it. Pixels are
 //! bytes, so only the header is parsed and the payload is copied.
 //!
-//! # Uncompressed, for now
+//! # Two payload shapes, one header
 //!
-//! `docs/DESIGN.md` §2.8 wants block compression — BC7 and friends — which is
-//! what makes a texture cheap in VRAM rather than merely cheap to parse. That is
-//! another step over the same pixels, recorded in `docs/PLAN.md` §6.1. The
-//! header carries a [`Format`] discriminant now precisely so that adding one is
-//! a new variant rather than a new format.
+//! [`Format::Rgba8`] stores `width × height × 4` loose bytes. [`Format::Bc7`]
+//! stores 4×4 blocks of sixteen bytes each, `ceil(w/4) × ceil(h/4)` of them —
+//! four times smaller, and the GPU samples it without ever expanding it, which
+//! is what `docs/DESIGN.md` §2.8 wants block compression *for*. The saving is in
+//! VRAM and bandwidth at sample time, not in file size.
+//!
+//! The dimensions in the header are always the **real** ones. A 63×63 BC7
+//! texture stores 16×16 blocks covering 64×64 texels, and the extra row and
+//! column are padding that is never sampled. Storing the padded size instead
+//! would make every consumer undo it, and one of them would forget.
+//!
+//! This module never decodes BC7 — nothing on the CPU needs to. It knows how
+//! many bytes a payload should be, and the hardware does the rest.
 
 use thiserror::Error;
 
@@ -51,26 +59,64 @@ pub enum Format {
     /// image view's business, and baking that choice into the pixels would make
     /// one texture unusable as a normal map.
     Rgba8,
+
+    /// BC7, four bits per texel, in 4×4 blocks of sixteen bytes.
+    ///
+    /// The desktop colour-texture format: four channels, and the only BC format
+    /// that handles both sharp colour transitions and alpha well. Lossy, but
+    /// near-perceptually-lossless on photographic content, which is why it is
+    /// what a shipped game uses for albedo.
+    ///
+    /// Also **not** sRGB-encoded, for the same reason as [`Format::Rgba8`] —
+    /// BC7 has an sRGB Vulkan format and a UNORM one over identical bytes, so
+    /// the choice stays with the view.
+    Bc7,
 }
+
+/// Texels along each edge of a block-compressed block.
+const BLOCK: usize = 4;
+
+/// Bytes one BC7 block occupies. Fixed, which is what makes the size arithmetic
+/// exact rather than a bound.
+const BC7_BLOCK_BYTES: usize = 16;
 
 impl Format {
     /// The discriminant written into the header.
     const fn code(self) -> u32 {
         match self {
             Self::Rgba8 => 0,
+            Self::Bc7 => 1,
         }
     }
 
-    /// Bytes per pixel.
-    pub const fn bytes_per_pixel(self) -> usize {
+    /// Whether the payload is 4×4 blocks rather than loose pixels.
+    pub const fn is_block_compressed(self) -> bool {
         match self {
-            Self::Rgba8 => 4,
+            Self::Rgba8 => false,
+            Self::Bc7 => true,
+        }
+    }
+
+    /// How many bytes a `width × height` image occupies in this format.
+    ///
+    /// The one place the two payload shapes are reconciled. A block format
+    /// rounds *up* to whole blocks, so a 63×63 BC7 image is the same size as a
+    /// 64×64 one — the padding is real bytes on disk and in VRAM, and pretending
+    /// otherwise is how a buffer ends up one block short.
+    pub const fn payload_bytes(self, width: u32, height: u32) -> usize {
+        let width = width as usize;
+        let height = height as usize;
+
+        match self {
+            Self::Rgba8 => width * height * 4,
+            Self::Bc7 => width.div_ceil(BLOCK) * height.div_ceil(BLOCK) * BC7_BLOCK_BYTES,
         }
     }
 
     fn from_code(code: u32) -> Option<Self> {
         match code {
             0 => Some(Self::Rgba8),
+            1 => Some(Self::Bc7),
             _ => None,
         }
     }
@@ -183,7 +229,7 @@ impl Texture {
             return Err(TextureError::Empty { width, height });
         }
 
-        let expected = HEADER + width as usize * height as usize * format.bytes_per_pixel();
+        let expected = HEADER + format.payload_bytes(width, height);
         if bytes.len() < expected {
             return Err(TextureError::Truncated {
                 expected,
@@ -199,9 +245,26 @@ impl Texture {
         })
     }
 
-    /// Bytes one row occupies.
+    /// Bytes one row of pixels occupies.
+    ///
+    /// # Panics
+    ///
+    /// If the format is block-compressed. A BC7 payload has no rows — it has
+    /// rows of *blocks*, each covering four scanlines — so a stride is not a
+    /// thing it has. Returning something plausible instead would be handing a
+    /// caller a number that reads four rows at once.
     pub const fn stride(&self) -> usize {
-        self.width as usize * self.format.bytes_per_pixel()
+        assert!(
+            !self.format.is_block_compressed(),
+            "a block-compressed texture has no row stride"
+        );
+
+        self.width as usize * 4
+    }
+
+    /// How many bytes this texture's payload should be.
+    pub const fn payload_bytes(&self) -> usize {
+        self.format.payload_bytes(self.width, self.height)
     }
 }
 
@@ -244,6 +307,78 @@ mod tests {
         assert_eq!(read_u32(&bytes, 16), 2, "height");
         assert_eq!(read_u32(&bytes, 20), 0, "Rgba8");
         assert_eq!(bytes.len(), HEADER + 16);
+    }
+
+    /// A BC7 texture of `width × height`, with plausible block bytes.
+    fn compressed(width: u32, height: u32) -> Texture {
+        Texture {
+            width,
+            height,
+            format: Format::Bc7,
+            pixels: (0..Format::Bc7.payload_bytes(width, height))
+                .map(|index| index as u8)
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_block_compressed_texture_round_trips() {
+        let texture = compressed(8, 8);
+
+        assert_eq!(Texture::read(&texture.write()), Ok(texture));
+    }
+
+    #[test]
+    fn a_block_payload_rounds_up_to_whole_blocks() {
+        // A 63x63 image is 16x16 blocks, the same as a 64x64 one. The padding is
+        // real bytes on disk and in VRAM; pretending otherwise is how a buffer
+        // ends up one block short.
+        assert_eq!(Format::Bc7.payload_bytes(64, 64), 16 * 16 * 16);
+        assert_eq!(Format::Bc7.payload_bytes(63, 63), 16 * 16 * 16);
+        assert_eq!(Format::Bc7.payload_bytes(1, 1), 16, "one block minimum");
+        assert_eq!(Format::Bc7.payload_bytes(5, 5), 4 * 16, "2x2 blocks");
+    }
+
+    #[test]
+    fn a_block_format_is_a_quarter_of_raw_pixels() {
+        // True only for sizes that are already whole blocks, which is the
+        // comparison worth making — it is the ratio the format exists for.
+        assert_eq!(
+            Format::Bc7.payload_bytes(256, 256) * 4,
+            Format::Rgba8.payload_bytes(256, 256)
+        );
+    }
+
+    #[test]
+    fn a_truncated_block_payload_is_refused() {
+        // The failure a wrong size rule produces: the reader accepts a file with
+        // its last row of blocks missing and hands the GPU a short buffer.
+        let mut bytes = compressed(8, 8).write();
+        bytes.truncate(bytes.len() - 16);
+
+        assert!(matches!(
+            Texture::read(&bytes),
+            Err(TextureError::Truncated { .. })
+        ));
+    }
+
+    #[test]
+    fn the_two_formats_have_different_codes() {
+        // A shared discriminant would make every cooked texture decode as
+        // whichever variant came first, with the payload size rule to match.
+        let raw = small().write();
+        let block = compressed(8, 8).write();
+
+        assert_eq!(read_u32(&raw, 20), 0, "Rgba8");
+        assert_eq!(read_u32(&block, 20), 1, "Bc7");
+    }
+
+    #[test]
+    #[should_panic(expected = "no row stride")]
+    fn a_block_compressed_texture_has_no_row_stride() {
+        // Returning something plausible would hand a caller a number that reads
+        // four scanlines at once.
+        let _ = compressed(8, 8).stride();
     }
 
     #[test]

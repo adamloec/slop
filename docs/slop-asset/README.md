@@ -32,7 +32,9 @@ cooked it is the one that understands the format.
 | Proven end to end — `examples/cube` draws only cooked assets | Landed — see §5.4 | M2 |
 | `Assets<T>` — the registry, `Handle<T>`, load, reload, unload | Landed — see §5.5 | M2 |
 | Hot reload — `reload_changed` plus `cook --watch` | Landed — see §5.6 | M2 |
-| Block compression (BC7) | Planned | M2 |
+| Block compression — BC7 in the importer | Landed — see §5.7 | M2 |
+| Mipmaps | Planned — BC7 without them aliases at distance | M2 |
+| Per-asset import settings | Planned — what decides format, sRGB, alpha mode | M2/M3 |
 | Async streaming | Planned — **beside** the sync read, not replacing it | M2 |
 | Reference counting to decide when to unload | Planned — waits for something holding handles | M2/M3 |
 | Dependency graph across assets | Planned | M2 |
@@ -167,9 +169,10 @@ cache lookup, the logical path, decoding, and the upload.
 
 The narrower assertions live beside it — `examples/cube/tests/mesh.rs` and
 `tests/texture.rs` — and say what the image cannot: that the winding is
-counter-clockwise, that no index is out of range, that the checkerboard actually
-alternates. These are the mistakes that still *draw something*, which is why they
-are checked against the cooked artifact rather than left to the pixels.
+counter-clockwise, that no index is out of range, that the albedo did not
+compress to a flat colour. These are the mistakes that still *draw something*,
+which is why they are checked against the cooked artifact rather than left to the
+pixels.
 
 ### 5.5 The registry, and why it came before its consumers
 
@@ -277,6 +280,52 @@ mean reading every byte of every asset on every poll — the cost the check exis
 to avoid — and the failure mode is a missed reload, which costs one more save.
 The cook cache still hashes content, so nothing about *correctness* rests on
 this.
+
+### 5.7 Block compression
+
+BC7 is a quarter the size of RGBA8 **in VRAM**, not merely on disk. The GPU's
+texture units sample the compressed blocks directly and never expand them, so
+the saving is in memory and in bandwidth at every sample — which is the reason
+`DESIGN.md` §2.8 asks for it, and why a general-purpose compressor over the file
+would not do.
+
+```
+ RGBA8   64×64 × 4 bytes             = 16 384 bytes
+ BC7     16×16 blocks × 16 bytes      =  4 096 bytes
+```
+
+The dimensions in the header stay the **real** ones. A 63×63 BC7 texture is
+16×16 blocks covering 64×64 texels; the extra row and column are padding nothing
+samples. Storing the padded size instead would make every consumer undo it, and
+one of them would forget.
+
+Three things worth knowing:
+
+- **Padding is mandatory, not an optimisation.** `intel_tex_2`'s
+  `calc_output_size` is `ceil(width × height / 16) × 16`, which equals the block
+  count only when both dimensions are already multiples of four — for 5×5 it
+  returns two blocks where four are needed. The importer pads first, and a test
+  covers exactly that size.
+- **Padding replicates the edge rather than filling with black.** BC7 fits one
+  pair of endpoints per block, so black padding drags an edge block's endpoints
+  toward black and dims the real texels beside it.
+- **The encoder must be deterministic.** The cook cache keys on inputs and
+  assumes the cooker is a function of them. An encoder that varied run to run
+  would produce a different artifact every cook while every stamp still matched —
+  the failure mode §5.1 exists to prevent.
+
+The encoder is Intel's ISPC texture compressor, and taking it rather than writing
+it is `DESIGN.md` §3's write/take line applied literally: eight modes, partition
+tables and endpoint fitting, all offline, none of it touching the engine's
+architecture. It is a dependency of `slop-cli` **only**, so invariant 7 keeps it
+out of anything that ships.
+
+**The golden image did not change.** A two-colour checkerboard is BC7's easy
+case — two endpoints reproduce it — so the reference approved before any of this
+existed still matches exactly. That is worth stating precisely because it proves
+less than it appears to: it says BC7 did not break the pipeline, not that the
+encoder is good on hard content. The quality claim rests on the encoder's
+reputation, not on this repository's tests.
 
 ## 6. Decisions
 
