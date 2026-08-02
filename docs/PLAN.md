@@ -183,9 +183,10 @@ finished.
 | Materials — the cooked format, glTF import, referenced images | Landed |
 | Node transforms flattened into a cooked model | Landed |
 | Rendering a model's meshes with their materials | Landed — `MeshRenderer`, `examples/model` |
-| A Sponza-scale scene loading and drawing | **Outstanding** — the exit criterion |
+| A Sponza-scale scene loading and drawing | Landed — 103 primitives, 25 materials, 70 textures, clean validation. Fetched by `slop-cli fetch sponza`, not committed. |
 | Debug UI — the entity inspector over `slop-reflect` | **Outstanding** |
-| Mipmaps | **Outstanding** |
+| Mipmaps | **Outstanding** — and Sponza is where it shows: distant floor and curtains alias badly without them |
+| Tangents, so normal maps can be sampled | **Outstanding** — Sponza cooks 24 normal maps that nothing reads, because `Mesh`'s `Vertex` is position/normal/uv |
 
 Async streaming has **moved to M3**. It was never an M2 exit criterion, and
 nothing yet loads enough at once to say what the API needs — Sponza is what will.
@@ -752,7 +753,7 @@ freely, never seams.
 | Coarse include digest — any include recooks everything | `slop-cli/src/cook.rs` | Per-shader dependency lists via `slangc -depfile` | **Replaced.** Correct but pessimistic; wrong would be a cache that lies. | M2 |
 | `JobSystem` backed by `std::thread::scope` | `slop-core/src/jobs.rs` | Work-stealing pool | **Replaced.** API shape is final; do not build on the cost model. | M1 |
 | `HandleAllocator` liveness in a `Vec<bool>` | `slop-core/src/alloc.rs` | A bitset | **Replaced.** Entirely behind the API. | M1 |
-| Raw `vk::Sampler`, destroyed by hand | `examples/cube/src/scene.rs` | A sampler cache in the material system | **Replaced.** | M2 |
+| Every sampler is created fresh at its use site | `examples/cube/src/scene.rs`, `slop-render/src/{mesh,overlay}.rs` | A sampler cache in the material system | **Replaced.** No longer a raw `vk::Sampler` freed by hand — `slop_rhi::TextureSampler` owns its own `Drop` as of 2026-08-02 — but there is still no sharing. Samplers are a small, highly repeated set of states, and a device permits only a few thousand; one per material is how that limit is reached. | M2 |
 | Whole-frame golden comparison only | `slop-verify` | Region assertions, intermediate captures | **Extended**, not replaced (`DESIGN.md` §8 item 8). | M3 |
 | Hardware-tier golden references | `examples/cube/tests/golden/` | The lavapipe exact-match tier | **Joined by**, not replaced (§4.1-G). | M1 |
 | A deferred spawn's `Target` cannot be stored inside a component | `slop-ecs` | Nothing — this is permanent, and §2.14 is why | **Kept.** Wiring a freshly spawned child into a parent's component takes the direct `&mut World` path or a second frame. | — |
@@ -883,22 +884,30 @@ flowchart TD
     mat --> graph
 ```
 
-The frame loop exists twice, in `examples/cube` and `examples/triangle`, and
-`docs/PLAN.md` §6.1 already records a **third copy as the signal to extract it
-early**. The debug UI would be that third copy. So the loop comes out first — not
-because M3 has started, but because M2's remaining items are what force it.
+The frame loop existed twice, in `examples/cube` and `examples/triangle`, and
+§6.1 recorded a **third copy as the signal to extract it early**. The debug UI was
+that third copy, so the loop came out first — not because M3 had started, but
+because M2's remaining items forced it. **Item A landed** as
+`slop_render::FrameRenderer`, followed by safe draw recording in `slop-rhi`
+(`Pass`) and device bring-up in `slop-app` (`Gpu`), which between them removed
+`unsafe` from `slop-render` and from every example.
 
-**This is a rewrite, not a move.** See the note above §6.1's table. The examples
-say what a frame loop must handle — swapchain recreation on resize and suboptimal
-acquire, a command pool reset per in-flight slot, timeline waits before touching
-one, semaphores per swapchain image rather than per frame. That knowledge
-transfers. The `String` errors, the hard-coded `FRAMES_IN_FLIGHT`, the
-`CARGO_MANIFEST_DIR` asset lookup, the panic-on-failure and the raw sampler freed
-by hand do not; they are example-grade on purpose. Lifting the files would import
-all of it under a better crate name.
+**This was a rewrite, not a move, and the same applies to what is left.** See the
+note above §6.1's table. The examples say what a frame loop must handle —
+swapchain recreation on resize and suboptimal acquire, a command pool reset per
+in-flight slot, timeline waits before touching one, semaphores per swapchain image
+rather than per frame. That knowledge transferred. The `String` errors, the
+hard-coded `FRAMES_IN_FLIGHT`, the `CARGO_MANIFEST_DIR` asset lookup and the
+panic-on-failure did not; they are example-grade on purpose, and lifting the files
+would have imported all of it under a better crate name.
 
-The two golden images are what make the rewrite checkable: both examples must
-render identically afterwards, and neither reference moves.
+**What is still in `examples/cube/src/scene.rs` comes out the same way**, and
+mostly with the material system: the hard-coded pipeline, push constants restated
+from the shader by hand, synchronous submit-and-wait uploads, and per-use-site
+samplers. Each has its own row in §6.1.
+
+The golden images are what make a rewrite checkable: every example must render
+identically afterwards, and no reference moves.
 
 ### 9.2 The order
 

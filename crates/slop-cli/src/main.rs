@@ -16,6 +16,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 mod cook;
+mod fetch;
 mod gltf_import;
 mod reflection;
 mod texture_import;
@@ -54,6 +55,24 @@ enum Command {
         #[arg(long)]
         watch: bool,
     },
+
+    /// Download a third-party test asset into `assets/vendor/`.
+    ///
+    /// That directory is gitignored: Sponza alone is 51 MB, and a binary that
+    /// large is permanent once it is in git history. The repository records how
+    /// to get these rather than the bytes themselves — see `fetch::CATALOGUE`.
+    Fetch {
+        /// Which asset. Omit to list what is available.
+        name: Option<String>,
+
+        /// Project root holding `assets/`. Defaults to the current directory.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+
+        /// Refetch even if the asset is already present.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 /// How often `--watch` looks for changed sources.
@@ -78,6 +97,11 @@ fn main() -> Result<()> {
                 return watch_and_cook(&root);
             }
         }
+
+        Command::Fetch { name, root, force } => match name {
+            Some(name) => fetch::fetch(&root, &name, force)?,
+            None => fetch::list(),
+        },
     }
 
     Ok(())
