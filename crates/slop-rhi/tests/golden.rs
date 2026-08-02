@@ -39,6 +39,7 @@ mod support;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use slop_asset::Vfs;
 use slop_rhi::{
     Allocator, Buffer, BufferConfig, CommandPool, Device, GraphicsPipeline, GraphicsPipelineConfig,
     Image, ImageConfig, ImageState, MemoryLocation, PipelineLayout, ShaderModule, ShaderStage, vk,
@@ -357,22 +358,12 @@ fn readback_buffer(allocator: &Arc<Allocator>) -> Buffer {
 
 /// The cooked triangle module, or `None` with an explanation if absent.
 fn cooked_triangle(device: &Arc<Device>) -> Option<ShaderModule> {
-    let path = workspace_root()
-        .join(".slop")
-        .join("cache")
-        .join("shaders")
-        .join("passes")
-        .join("triangle.spv");
-
-    match std::fs::read(&path) {
+    match Vfs::for_project(&workspace_root()).read("shaders/passes/triangle.spv") {
         Ok(bytes) => {
             Some(ShaderModule::from_bytes(device, &bytes).expect("cooked SPIR-V must load"))
         }
-        Err(_) => {
-            eprintln!(
-                "skipping: {} not found — run `cargo run -p slop-cli -- cook`",
-                path.display()
-            );
+        Err(error) => {
+            eprintln!("skipping: {error} — run `cargo run -p slop-cli -- cook`");
             None
         }
     }

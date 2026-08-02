@@ -529,6 +529,13 @@ slop-cli        build, cook, run, inspect, test
 slop-verify     golden images, comparison, approval — §5; dev-dependency only
 ```
 
+**Where world serialization lives, since two things could be called "scene".**
+`slop-scene` above is the *runtime spatial structure* — hierarchy, transform
+propagation, culling. Turning a world into text and back lives in `slop-ecs`,
+because what it serializes is that crate's own data model and putting it higher
+would make saving a world depend on the culling crate. `slop-asset` owns the file
+that text lands in. Three layers, one job each.
+
 ### 4.1 Frame structure
 
 ```
@@ -693,27 +700,23 @@ demo:
    composite; and non-image assertions for what pixels cannot see, such as a
    culler retaining objects it should have rejected. The first two need the
    render graph to name and expose passes. **Revisit at M3.**
-9. **How the render snapshot is produced.** §2.9 settled *that* the renderer
-   reads an immutable copy rather than live world state, and calls it the most
-   load-bearing invariant in the engine. It did not settle how that copy is made
-   120 times a second without copying the world. The options, roughly in
-   increasing order of both benefit and difficulty:
+9. **How the render snapshot is populated.** §2.9 settled that the renderer reads
+   an immutable copy, and the *ownership* half is now settled too (see Resolved).
+   What remains is how the copy is filled each frame, and it is an implementation
+   behind that seam rather than an architectural question:
 
-   - **Double-buffer the components the renderer reads.** Simple, obviously
-     correct, and pays full copy cost every frame for data that mostly did not
-     move.
-   - **Copy only what changed.** §2.10's change detection now exists and is
-     exactly the input this needs — the renderer keeps last frame's snapshot and
-     patches the rows whose stamps are newer than its own last extract. Cost
-     scales with churn rather than with scene size, which is the right shape.
-   - **Hand the renderer a read lock on last frame's archetypes.** No copy at
-     all, and it constrains what simulation may do to storage while a frame is in
-     flight — which is a constraint on the ECS, not on the renderer.
+   - **Copy everything the renderer reads, every frame.** Simple, obviously
+     correct, and pays full cost for data that mostly did not move.
+   - **Copy only what changed.** §2.10's change detection is exactly the input —
+     keep last frame's snapshot and patch the rows whose stamps are newer than
+     the last extract. Cost scales with churn rather than scene size.
 
-   The second is the current expectation, and the third is the one that would
-   reach back into storage. **This is the decision that most shapes the ECS from
-   outside it, and nothing downstream should assume an answer. Settle before
-   M3.**
+   The second is the expectation and the first is a legitimate starting point,
+   because neither changes the snapshot's type or who owns it. **Decide with a
+   profiler against real content, not now.** The `Snapshot` type itself is
+   deliberately unbuilt until a renderer consumes it — designing its contents
+   without one is the mistake §4.1-C avoided for the job system's access
+   declaration. **Revisit at M3.**
 10. **Change detection's memory cost.** Two `u32` stamps per component per
     entity — eight bytes riding along with, say, twelve bytes of `Position`.
     Defensible and argued in `slop-ecs`'s docs, but it works against the cache
@@ -723,6 +726,21 @@ demo:
     **Revisit at M3**, when there is a real scene to measure.
 
 **Resolved:**
+- **The renderer receives an owned snapshot; it never borrows the world.** §2.9
+  settled that the renderer reads an immutable copy without saying whether that
+  copy is a value it owns or a read lock over last frame's archetypes. It is a
+  value it owns.
+
+  The borrow version saves a copy and costs a permanent constraint on what
+  simulation may do to storage while a frame is in flight — in the hottest part
+  of the engine, forever, to avoid a copy that change detection already makes
+  cheap. It would also reach *back into* the ECS: archetype layout, migration and
+  despawn would all have to answer to a reader on another thread.
+
+  Settling it now is what makes the remaining question (§8 item 9) an
+  implementation rather than an architecture. With ownership fixed, how the
+  snapshot is filled can change without anything downstream moving; without it,
+  every consumer would have to assume an answer.
 - **Text scene format — custom, not RON or TOML.** Serialization goes through a
   `slop_reflect::Value` sitting between component memory and text, so a second
   format writes another arrow rather than a second reflection walk. The text side

@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use slop_asset::Vfs;
 use slop_rhi::{Device, DeviceSelection, Instance, InstanceConfig, RhiError, ShaderModule};
 
 /// `None` when the machine genuinely has no Vulkan loader.
@@ -36,27 +37,18 @@ fn device() -> Option<Arc<Device>> {
 
 /// The cooked triangle, or `None` with an explanation if it has not been cooked.
 ///
-/// Dev-only path resolution: the workspace root is two levels above this crate.
-/// The asset VFS at M2 replaces this; hard-coding it here is honest about being
-/// a placeholder rather than pretending to be a lookup.
+/// The project root is two levels above this crate.
+/// Through the asset VFS, so the test names the shader rather than a path into
+/// the cache.
 fn cooked_triangle() -> Option<Vec<u8>> {
-    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let project = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..");
-    let path = workspace
-        .join(".slop")
-        .join("cache")
-        .join("shaders")
-        .join("passes")
-        .join("triangle.spv");
 
-    match std::fs::read(&path) {
+    match Vfs::for_project(&project).read("shaders/passes/triangle.spv") {
         Ok(bytes) => Some(bytes),
-        Err(_) => {
-            eprintln!(
-                "skipping: {} not found — run `cargo run -p slop-cli -- cook`",
-                path.display()
-            );
+        Err(error) => {
+            eprintln!("skipping: {error} — run `cargo run -p slop-cli -- cook`");
             None
         }
     }

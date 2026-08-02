@@ -13,8 +13,8 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = { workspace = true }
-blake3 = { workspace = true }
 clap = { workspace = true }
+slop-asset = { workspace = true }
 slop-core = { workspace = true, features = ["subscriber"] }
 
 [lints]

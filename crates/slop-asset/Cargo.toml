@@ -1,17 +1,14 @@
 [package]
-name = "example-triangle"
+name = "slop-asset"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false
 
 [dependencies]
-slop-app = { workspace = true }
-slop-asset = { workspace = true }
-slop-core.workspace = true
-slop-rhi = { workspace = true }
+blake3 = { workspace = true }
+thiserror = { workspace = true }
 
 [lints]
 workspace = true

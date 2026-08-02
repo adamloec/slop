@@ -30,6 +30,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use slop_asset::Vfs;
 use slop_core::diagnostics::tracing::{error, info};
 
 use slop_app::window::{self, WindowConfig};
@@ -556,20 +557,16 @@ impl Drop for Renderer {
 
 /// Load the cooked triangle shader.
 ///
-/// Dev-only path resolution — the asset VFS at M2 replaces this. Hard-coding it
-/// is honest about being a placeholder rather than pretending to be a lookup.
+/// Through the asset VFS, so this names the shader rather than a path into the
+/// cache. Where cooked bytes live is `slop-asset`'s business.
 fn load_shader(device: &Arc<Device>) -> Result<ShaderModule, String> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let project = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
-        .join("..")
-        .join(".slop/cache/shaders/passes/triangle.spv");
+        .join("..");
 
-    let bytes = std::fs::read(&path).map_err(|error| {
-        format!(
-            "{} could not be read ({error}). Run `cargo run -p slop-cli -- cook` first",
-            path.display()
-        )
-    })?;
+    let bytes = Vfs::for_project(&project)
+        .read("shaders/passes/triangle.spv")
+        .map_err(|error| format!("{error}. Run `cargo run -p slop-cli -- cook` first"))?;
 
     ShaderModule::from_bytes(device, &bytes).map_err(|error| error.to_string())
 }

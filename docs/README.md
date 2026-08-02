@@ -1,3 +1,6 @@
+| `slop-reflect` | [slop-reflect/](slop-reflect/) | Type model, registry, derive, value and text format landed |
+| `slop-ecs` | [slop-ecs/](slop-ecs/) | Data model, scheduler, resources and world serialization landed |
+| `slop-asset` | [slop-asset/](slop-asset/) | Cook cache and VFS landed; glTF and streaming outstanding |
 # Slop Engine — Documentation
 
 **Last updated:** 2026-08-01
@@ -21,8 +24,9 @@ One directory per crate, named exactly as the crate is.
 |---|---|---|
 | `slop-core` | [slop-core/](slop-core/) | Handles, storage, arena, time, determinism primitives landed |
 | `slop-math` | [slop-math/](slop-math/) | Transforms, projections, portable scalars landed |
-| `slop-reflect` | [slop-reflect/](slop-reflect/) | Type model, registry, derive landed |
-| `slop-ecs` | [slop-ecs/](slop-ecs/) | Storage, world, queries landed; scheduling outstanding |
+| `slop-reflect` | [slop-reflect/](slop-reflect/) | Type model, registry, derive, value and text format landed |
+| `slop-ecs` | [slop-ecs/](slop-ecs/) | Data model, scheduler, resources and world serialization landed |
+| `slop-asset` | [slop-asset/](slop-asset/) | Cook cache and VFS landed; glTF and streaming outstanding |
 | `slop-rhi` | [slop-rhi/](slop-rhi/) | Vulkan backend through the bindless heap landed |
 | `slop-app` | [slop-app/](slop-app/) | Window and surface only — the frame loop is M3 |
 | `slop-verify` | [slop-verify/](slop-verify/) | Golden-image harness landed |

@@ -16,18 +16,32 @@
 //! produce it. `docs/PLAN.md` §4.1-F permits the CLI for M0 specifically, and
 //! replacing it changes only [`compile`], not the cache around it.
 //!
+//! # The cache itself lives in `slop-asset`
+//!
+//! Keying, stamping, staleness and layout are not shader-specific, and every
+//! later asset type inherits them — so they moved to `slop_asset::Cache` and
+//! this file drives it. What stays here is the part that *is* about shaders:
+//! finding sources, the include convention, and invoking the compiler.
+//!
+//! Deliberately not a `Cooker` trait. A shader is one source to one artifact and
+//! a glTF is one source to *many*, so a trait shaped by the first would break on
+//! the second — see `docs/PLAN.md` §6.1. The cache is what is genuinely shared,
+//! and it is what was factored out.
+//!
 //! # Why keying matters more than it looks
 //!
 //! A cook cache that misses a change silently ships a stale artifact, and the
-//! symptom appears somewhere unrelated. Three things therefore feed the key:
-//! the source bytes, [`COOKER_VERSION`], and the compiler's own version string.
-//! A compiler upgrade that changes codegen must invalidate everything, and
-//! forgetting that is the classic way a cook cache becomes untrustworthy.
+//! symptom appears somewhere unrelated. Four things therefore feed the key: the
+//! source bytes, [`COOKER_VERSION`], the compiler's own version string, and a
+//! digest of every shared include. A compiler upgrade that changes codegen must
+//! invalidate everything, and forgetting that is the classic way a cook cache
+//! becomes untrustworthy.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
+use slop_asset::{Cache, CacheKey};
 use slop_core::diagnostics::tracing::{debug, info, warn};
 
 /// Bump to invalidate every cooked artifact.
@@ -69,7 +83,7 @@ pub(crate) struct Summary {
 /// cache cannot be written.
 pub(crate) fn shaders(root: &Path, force: bool) -> Result<Summary> {
     let source_root = root.join("shaders");
-    let cache_root = root.join(".slop").join("cache").join("shaders");
+    let cache = Cache::for_project(root);
 
     if !source_root.is_dir() {
         warn!(path = %source_root.display(), "no shaders directory; nothing to cook");
@@ -95,9 +109,17 @@ pub(crate) fn shaders(root: &Path, force: bool) -> Result<Summary> {
         let relative = source
             .strip_prefix(&source_root)
             .expect("collected paths are under the source root");
-        let output = cache_root.join(relative).with_extension("spv");
+        let output = cache.artifact(&logical_path(relative));
 
-        if cook_one(&compiler, &source_root, source, &output, &includes, force)? {
+        if cook_one(
+            &compiler,
+            &cache,
+            &source_root,
+            source,
+            &output,
+            &includes,
+            force,
+        )? {
             summary.cooked += 1;
         } else {
             summary.skipped += 1;
@@ -107,9 +129,26 @@ pub(crate) fn shaders(root: &Path, force: bool) -> Result<Summary> {
     Ok(summary)
 }
 
+/// The logical path a cooked shader is addressed by.
+///
+/// `passes/triangle.slang` becomes `shaders/passes/triangle.spv`, which is what
+/// both [`Cache::artifact`] and [`Vfs::read`](slop_asset::Vfs::read) take —
+/// writer and reader cannot disagree about layout because they are given the
+/// same string.
+fn logical_path(relative: &Path) -> String {
+    let cooked = relative.with_extension("spv");
+    let segments: Vec<String> = cooked
+        .components()
+        .map(|segment| segment.as_os_str().to_string_lossy().into_owned())
+        .collect();
+
+    format!("shaders/{}", segments.join("/"))
+}
+
 /// Cook one shader. Returns whether it was recompiled.
 fn cook_one(
     compiler: &Compiler,
+    cache: &Cache,
     source_root: &Path,
     source: &Path,
     output: &Path,
@@ -119,25 +158,18 @@ fn cook_one(
     let bytes = std::fs::read(source)
         .with_context(|| format!("reading shader source {}", source.display()))?;
     let key = cache_key(&bytes, &compiler.version, includes);
-    let stamp = stamp_path(output);
 
-    if !force && is_up_to_date(&stamp, &key, output) {
+    if !force && cache.is_current(output, &key) {
         debug!(source = %source.display(), "up to date");
         return Ok(false);
     }
 
-    let parent = output
-        .parent()
-        .ok_or_else(|| anyhow!("cooked path {} has no parent", output.display()))?;
-    std::fs::create_dir_all(parent)
-        .with_context(|| format!("creating cache directory {}", parent.display()))?;
-
+    cache.prepare(output)?;
     compile(compiler, source_root, source, output)?;
 
-    // The stamp is written *after* the artifact, so an interrupted cook leaves a
-    // missing or stale stamp rather than a stamp promising an artifact that was
-    // never finished.
-    std::fs::write(&stamp, &key).with_context(|| format!("writing stamp {}", stamp.display()))?;
+    // Recorded *after* the artifact, so an interrupted cook leaves a missing
+    // stamp rather than one promising a file that was never finished.
+    cache.record(output, &key)?;
 
     info!(source = %source.display(), output = %output.display(), "cooked");
 
@@ -183,18 +215,17 @@ fn compile(compiler: &Compiler, source_root: &Path, source: &Path, output: &Path
 
 /// Hex-encoded key covering the source, its includes, this cooker, and the
 /// compiler.
-fn cache_key(source: &[u8], compiler_version: &str, includes: &str) -> String {
-    let mut hasher = blake3::Hasher::new();
-
-    hasher.update(&COOKER_VERSION.to_le_bytes());
-    hasher.update(compiler_version.as_bytes());
-    hasher.update(includes.as_bytes());
-    // A length prefix keeps the version and the source from being ambiguous
-    // where they meet, so two different pairs cannot hash identically.
-    hasher.update(&(source.len() as u64).to_le_bytes());
-    hasher.update(source);
-
-    hasher.finalize().to_hex().to_string()
+fn cache_key(source: &[u8], compiler_version: &str, includes: &str) -> CacheKey {
+    // Every input is labelled and length-prefixed by the builder, so two
+    // different sets cannot hash alike by running together at the boundary.
+    // Naming each one is also what makes an omission visible: the include digest
+    // is here because leaving it out made the cache *wrong* rather than stale.
+    CacheKey::builder()
+        .input("cooker", &COOKER_VERSION.to_le_bytes())
+        .input("compiler", compiler_version.as_bytes())
+        .input("includes", includes.as_bytes())
+        .input("source", source)
+        .finish()
 }
 
 /// One hash covering every shared include.
@@ -225,39 +256,21 @@ fn include_digest(source_root: &Path) -> Result<String> {
     // artifact reuse across the CI matrix (`docs/DESIGN.md` §2.13).
     includes.sort();
 
-    let mut hasher = blake3::Hasher::new();
+    let mut digest = CacheKey::builder();
 
     for include in &includes {
         let bytes = std::fs::read(include)
             .with_context(|| format!("reading shader include {}", include.display()))?;
 
-        // The path is hashed too, so renaming a file changes the digest even
+        // The path is an input too, so renaming a file changes the digest even
         // when its contents do not — a rename can change which `#include`
         // resolves, and that has to invalidate.
-        let name = include.to_string_lossy();
-        hasher.update(&(name.len() as u64).to_le_bytes());
-        hasher.update(name.as_bytes());
-        hasher.update(&(bytes.len() as u64).to_le_bytes());
-        hasher.update(&bytes);
+        digest = digest
+            .input("path", include.to_string_lossy().as_bytes())
+            .input("contents", &bytes);
     }
 
-    Ok(hasher.finalize().to_hex().to_string())
-}
-
-/// Whether the artifact exists and its stamp matches.
-fn is_up_to_date(stamp: &Path, key: &str, output: &Path) -> bool {
-    if !output.is_file() {
-        return false;
-    }
-
-    std::fs::read_to_string(stamp).is_ok_and(|recorded| recorded == key)
-}
-
-fn stamp_path(output: &Path) -> PathBuf {
-    let mut name = output.as_os_str().to_owned();
-    name.push(".stamp");
-
-    PathBuf::from(name)
+    Ok(digest.finish().as_str().to_owned())
 }
 
 /// Recursively gather shader sources, in no particular order.
@@ -454,24 +467,50 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    #[test]
-    fn the_stamp_sits_beside_its_artifact() {
-        let stamp = stamp_path(Path::new("cache/shaders/passes/triangle.spv"));
+    // Stamping and staleness moved to `slop_asset::Cache` and are tested there.
+    // What stays here is the shader-specific part.
 
+    #[test]
+    fn a_source_becomes_a_logical_path_under_shaders() {
+        // The one string both the cache and the VFS are handed, which is why
+        // they cannot disagree about where an artifact lives.
         assert_eq!(
-            stamp,
-            PathBuf::from("cache/shaders/passes/triangle.spv.stamp")
+            logical_path(Path::new("passes").join("triangle.slang").as_path()),
+            "shaders/passes/triangle.spv"
+        );
+        assert_eq!(logical_path(Path::new("cube.slang")), "shaders/cube.spv");
+    }
+
+    #[test]
+    fn a_logical_path_uses_forward_slashes_on_every_platform() {
+        // It is a name rather than something the OS sees, so a backslash here
+        // would give one shader two names depending on where it was cooked.
+        let logical = logical_path(Path::new("a").join("b").join("c.slang").as_path());
+
+        assert!(!logical.contains('\\'), "{logical}");
+        assert_eq!(logical, "shaders/a/b/c.spv");
+    }
+
+    #[test]
+    fn the_include_digest_is_an_input_to_the_key() {
+        // The bug that made this cache wrong rather than stale: without the
+        // digest, editing a shared include changed what every dependent compiled
+        // to while every source, and so every stamp, still matched.
+        let source = b"float4 main() { return 0; }";
+
+        assert_ne!(
+            cache_key(source, "slangc 1", "digest-one"),
+            cache_key(source, "slangc 1", "digest-two")
         );
     }
 
     #[test]
-    fn a_missing_artifact_is_never_up_to_date() {
-        // Even with a matching stamp: the stamp promises an artifact, and if the
-        // artifact is gone the promise is void.
-        assert!(!is_up_to_date(
-            Path::new("does/not/exist.stamp"),
-            "anything",
-            Path::new("does/not/exist.spv")
-        ));
+    fn the_compiler_version_is_an_input_to_the_key() {
+        let source = b"float4 main() { return 0; }";
+
+        assert_ne!(
+            cache_key(source, "slangc 1", "digest"),
+            cache_key(source, "slangc 2", "digest")
+        );
     }
 }

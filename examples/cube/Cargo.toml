@@ -21,6 +21,7 @@ path = "src/main.rs"
 
 [dependencies]
 slop-app = { workspace = true }
+slop-asset = { workspace = true }
 slop-core = { workspace = true, features = ["subscriber"] }
 slop-math = { workspace = true }
 slop-rhi = { workspace = true }

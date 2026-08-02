@@ -62,17 +62,18 @@ flowchart TD
     reflect -.-> derive
 
     classDef planned stroke-dasharray: 5 5
-    class editor,host,abi,audio,physics,scene,render,asset planned
+    class editor,host,abi,audio,physics,scene,render planned
 ```
 
 `slop-math`, `slop-core`, `slop-reflect`, `slop-reflect-derive`, `slop-ecs`,
-`slop-rhi`, `slop-app`, `slop-cli`, and `slop-verify` exist today. The rest land
-at the milestones in `DESIGN.md` §6.
+`slop-asset`, `slop-rhi`, `slop-app`, `slop-cli`, and `slop-verify` exist today.
+The rest land at the milestones in `DESIGN.md` §6.
 
-`slop-ecs` and `slop-reflect` are drawn solid as of M1. What they still lack —
-system scheduling, change detection, command buffers — is listed in their own
-documents rather than implied by the diagram; a crate existing is not a crate
-being finished.
+`slop-ecs` and `slop-reflect` are drawn solid as of M1 and are finished for that
+milestone. `slop-asset` is solid as of M2 and is not — it has the cook cache and
+the VFS, and still wants glTF import, streaming and hot reload. What each crate
+still lacks is listed in its own document rather than implied by the diagram; a
+crate existing is not a crate being finished.
 
 The dashed arrows into `slop-verify` are **dev-dependencies**, which is why they
 run upward against the layering without breaking it: nothing it contains reaches

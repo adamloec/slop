@@ -21,6 +21,9 @@ workspace = true
 
 [dev-dependencies]
 ash.workspace = true
+# Test-only: the golden and shader tests load cooked SPIR-V. The RHI itself
+# takes bytes and knows nothing about where assets live.
+slop-asset = { workspace = true }
 slop-core = { workspace = true, features = ["subscriber"] }
 # Golden images. A dev-dependency deliberately: verification is a test concern,
 # and nothing it pulls in reaches a shipped game.

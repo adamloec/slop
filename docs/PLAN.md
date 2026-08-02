@@ -1,7 +1,7 @@
 # Slop Engine — Implementation Plan & Session Handoff
 
-**Status:** M0 complete; M1 functionally complete — the ECS, its scheduler, and
-the job pool underneath it are built.
+**Status:** M0 and M1 complete. M2 underway — the content pipeline has its cook
+cache and VFS.
 **Last updated:** 2026-08-01
 
 This document is the working companion to `DESIGN.md`. **`DESIGN.md` is
@@ -122,15 +122,15 @@ Two consequences worth carrying into M0:
 
 ## 3. Current state
 
-**M0 is complete and M1 is functionally complete.** The lit textured cube
+**M0 and M1 are complete; M2 is underway.** The lit textured cube
 renders with a golden image guarding it, and the reflection and ECS foundations
 are built through queries.
 
-588 tests. Clippy and rustdoc clean under `-D warnings` in both feature
+641 tests. Clippy and rustdoc clean under `-D warnings` in both feature
 configurations, Vulkan validation reporting nothing, and every crate containing
 `unsafe` passing under Miri — `slop-ecs` under both Stacked and Tree Borrows.
 
-### 3.0 M1 so far — reflection and the ECS
+### 3.0 M1 — reflection, the ECS, and serialization
 
 | Area | State |
 |---|---|
@@ -144,12 +144,29 @@ configurations, Vulkan validation reporting nothing, and every crate containing
 | Resources — data the world holds exactly one of | Landed |
 | Layout fingerprints for the §2.3 guest boundary | Landed |
 | Serialization — `Value`, the text format, `Value` ↔ component memory | Landed |
-| Scene serialization — the whole world to text and back | Outstanding — the container around what now works per component |
+| World serialization — the whole world to text and back | Landed |
 
-**M1 is functionally complete.** What remains is the scene container: a single
-component now round-trips memory → `Value` → text → `Value` → memory, and what
-is left is the file that holds a whole world of them. Both halves of the round
-trip `DESIGN.md` §5 asks for are built and tested.
+**M1 is complete.** Its exit condition was that a scene round-trips, and one
+does: memory → `Value` → text → `Value` → memory, per component and for a whole
+world at once. Save, load and save again produces byte-identical text.
+
+### 3.0.2 M2 so far — the content pipeline
+
+| Area | State |
+|---|---|
+| `slop-asset` — cook cache, content-hash keying, stamps | Landed |
+| `slop-asset` — the VFS read path | Landed |
+| Shader cooking driven onto the shared cache | Landed |
+| glTF import and cook | Outstanding |
+| Texture compression | Outstanding |
+| Async streaming, hot reload, asset handles | Outstanding |
+| Debug UI (§10.2) | Outstanding — wanted before renderer bring-up |
+
+The cache was lifted out of `slop-cli` rather than invented: keying, stamping and
+staleness were already working for shaders and are not shader-specific. What was
+deliberately *not* lifted is a `Cooker` trait — a shader is one source to one
+artifact and a glTF is one source to many, so a trait shaped by the first would
+break on the second (§6.1).
 
 **Deferred structural change diverges from the conventional answer, on purpose.**
 Bevy and Unity's `EntityCommandBuffer` both return a usable entity id from a
@@ -602,8 +619,10 @@ freely, never seams.
 | Scene setup — uploads, pipeline, draw recording | `examples/cube/src/scene.rs` | `slop-render` + `slop-asset` | **Moved** into `slop-render` and generalized. Nothing is unpicked. | M3 |
 | Cube geometry and texture, generated in code | `examples/cube/src/mesh.rs` | glTF import, texture cooking (§2.8) | **Deleted.** Replaced by an asset file. | M2 |
 | Synchronous upload — submit and wait | `examples/cube/src/scene.rs` | Async transfer queue + staging ring | **Replaced.** Correct for startup, wrong for streaming. | M2 |
-| Hard-coded `.slop/cache/...` shader paths | examples and tests | The asset VFS | **Replaced.** | M2 |
 | `slangc` invoked as a CLI | `slop-cli/src/cook.rs` | The Slang library, for reflection (§2.11) | **Replaced.** The cache layout, keying and read path all survive. | M2/M3 |
+| The asset VFS reads synchronously | `slop-asset` | Async streaming alongside it | **Joined by, not replaced.** A blocking read stays correct for startup, for tools, and for the cooker itself; §2.8's streaming is an additional entry point rather than a different one. Recorded because "the VFS is sync" reads like a shortcut and is not. | M2 |
+| No asset handles — the VFS deals in paths and bytes | `slop-asset` | `Handle<Mesh>` and friends, once a registry holds loaded assets | **Extended.** Nothing yet holds a loaded asset, so a handle would name a slot in a table that does not exist — the mistake §4.1-C avoided for the job system's access declaration. | M2 |
+| No `Cooker` trait — each asset kind drives the cache itself | `slop-asset`, `slop-cli` | An asset-kind abstraction, once two kinds disagree usefully | **Extended.** Deliberately not designed against one real implementor: a shader is one source to one artifact, a glTF is one source to many, and a trait shaped by the first would break on the second. The **cache** is what is shared and is what was factored out. | M2 |
 | Coarse include digest — any include recooks everything | `slop-cli/src/cook.rs` | Per-shader dependency lists via `slangc -depfile` | **Replaced.** Correct but pessimistic; wrong would be a cache that lies. | M2 |
 | `JobSystem` backed by `std::thread::scope` | `slop-core/src/jobs.rs` | Work-stealing pool | **Replaced.** API shape is final; do not build on the cost model. | M1 |
 | `HandleAllocator` liveness in a `Vec<bool>` | `slop-core/src/alloc.rs` | A bitset | **Replaced.** Entirely behind the API. | M1 |

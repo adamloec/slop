@@ -524,6 +524,7 @@ name = "example-cube"
 version = "0.0.0"
 dependencies = [
  "slop-app",
+ "slop-asset",
  "slop-core",
  "slop-math",
  "slop-rhi",
@@ -535,6 +536,7 @@ name = "example-triangle"
 version = "0.0.0"
 dependencies = [
  "slop-app",
+ "slop-asset",
  "slop-core",
  "slop-rhi",
 ]
@@ -1553,12 +1555,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "slop-asset"
+version = "0.0.0"
+dependencies = [
+ "blake3",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "slop-cli"
 version = "0.0.0"
 dependencies = [
  "anyhow",
- "blake3",
  "clap",
+ "slop-asset",
  "slop-core",
 ]
 
@@ -1614,6 +1624,7 @@ dependencies = [
  "ash-window",
  "gpu-allocator",
  "raw-window-handle",
+ "slop-asset",
  "slop-core",
  "slop-verify",
  "thiserror 2.0.19",

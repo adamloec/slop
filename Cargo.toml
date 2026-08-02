@@ -18,6 +18,7 @@ repository = "https://github.com/adamloec/slop"
 # of first use so that recorded versions are real rather than guessed, then
 # hoisted here so every crate resolves to one version.
 slop-app = { path = "crates/slop-app" }
+slop-asset = { path = "crates/slop-asset" }
 slop-core = { path = "crates/slop-core" }
 slop-ecs = { path = "crates/slop-ecs" }
 slop-math = { path = "crates/slop-math" }
