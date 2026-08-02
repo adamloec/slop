@@ -66,12 +66,16 @@ const ATTRIBUTES: [(vk::Format, u32); 3] = [
 ///
 /// Its size is checked against the shader's reflected block in [`Overlay::new`].
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct PushConstants {
     screen_size: [f32; 2],
     texture: u32,
     sampler: u32,
 }
+
+// SAFETY-by-construction: `#[derive(Pod)]` refuses to compile a struct with
+// padding, so `bytes_of` never reads uninitialised bytes. Sixteen bytes of
+// four-byte fields, so there is none.
 
 /// One texture egui asked to be kept.
 struct Managed {
@@ -439,7 +443,7 @@ impl Overlay {
                     self.pipeline.layout().handle(),
                     vk::ShaderStageFlags::ALL,
                     0,
-                    &as_bytes(&push)[..self.push_constant_bytes as usize],
+                    &bytemuck::bytes_of(&push)[..self.push_constant_bytes as usize],
                 );
                 raw.cmd_draw_indexed(
                     handle,
@@ -642,14 +646,6 @@ fn key(id: egui::TextureId) -> u64 {
         egui::TextureId::Managed(index) => index,
         egui::TextureId::User(index) => index | (1 << 63),
     }
-}
-
-/// A `Copy` value's bytes, for a push constant block.
-fn as_bytes<T: Copy>(value: &T) -> &[u8] {
-    // SAFETY: `T` is `Copy`, the slice covers exactly the value, and it borrows
-    // from `value` so it cannot outlive it. Reading padding bytes as `u8` is
-    // defined; reading them as their own type would not be.
-    unsafe { std::slice::from_raw_parts(std::ptr::from_ref(value).cast::<u8>(), size_of::<T>()) }
 }
 
 /// Refuse a shader whose inputs are not the ones this module writes.

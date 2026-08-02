@@ -116,7 +116,7 @@ pub enum MeshError {
 /// The layout the cube's shader declares, and the only one the format has —
 /// `docs/PLAN.md` §6.1 records why flexibility waits and why it is cheap to add.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
     /// Object-space position.
     pub position: [f32; 3],

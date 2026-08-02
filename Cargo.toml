@@ -49,7 +49,24 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 # path and results are already stable across machines of the same architecture.
 # Scalar math would only buy cross-architecture agreement, which §2.14 puts out
 # of scope.
-glam = { version = "0.33.2", features = ["libm"] }
+#
+# `bytemuck` so a `Mat4` can be handed to the GPU as bytes without a
+# hand-written cast — see the `bytemuck` entry below for why that matters.
+glam = { version = "0.33.2", features = ["libm", "bytemuck"] }
+
+# Casting plain data to bytes, for push constants, vertex buffers and anything
+# else the GPU reads.
+#
+# Taken rather than written, and not for convenience. Four hand-rolled copies of
+# `unsafe { from_raw_parts(ptr.cast(), size_of::<T>()) }` had accumulated, each
+# justified by a SAFETY comment claiming `T: Copy` implies no padding. **That is
+# false**, and this project already proved it false: the `Blittable` derive was
+# fixed earlier for exactly this, after Miri reported reading uninitialized
+# padding in a `#[repr(C)] struct { a: u8, b: u32 }`.
+#
+# `#[derive(Pod)]` refuses to compile a struct with padding, so the check is a
+# build error rather than a comment nobody re-derives.
+bytemuck = { version = "1.25.2", features = ["derive"] }
 
 # The same portable maths glam is configured to use, for loose `f32` work.
 # slop-math re-exports it as `scalar`; `clippy.toml` disallows the `std`

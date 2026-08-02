@@ -10,9 +10,9 @@ use slop_math::{Mat4, Quat, Vec3};
 use slop_render::{Overlay, VertexBinding};
 use slop_rhi::{
     Allocator, BindlessHeap, BindlessHeapConfig, Blend, Buffer, BufferConfig, BufferState,
-    CommandBuffer, CommandPool, DEPTH_CLEAR, Device, GraphicsPipeline, GraphicsPipelineConfig,
-    Image, ImageConfig, ImageState, MemoryLocation, PipelineLayout, PipelineLayoutConfig, RhiError,
-    SampledImage, Sampler, ShaderModule, ShaderStage, TimelineSemaphore, vk,
+    DEPTH_CLEAR, Device, GraphicsPipeline, GraphicsPipelineConfig, Image, ImageConfig, ImageState,
+    MemoryLocation, PipelineLayout, PipelineLayoutConfig, SampledImage, Sampler, ShaderModule,
+    ShaderStage, vk,
 };
 
 /// Per-draw data, matching `PushConstants` in `shaders/passes/cube.slang`.
@@ -25,7 +25,7 @@ use slop_rhi::{
 /// is not checked and cannot be from reflection alone — that is what a generic
 /// material parameter writer would fix, and `docs/PLAN.md` §6.1 records it.
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct PushConstants {
     /// Model, view and projection combined.
     pub model_view_projection: Mat4,
@@ -35,6 +35,15 @@ pub struct PushConstants {
     pub texture: u32,
     /// Slot of the sampler.
     pub sampler: u32,
+    /// Makes the struct's size equal the sum of its fields.
+    ///
+    /// Without it `Mat4`'s sixteen-byte alignment rounds `size_of` from 136 up
+    /// to 144, and the last eight bytes are padding no field ever writes.
+    /// Casting the struct to bytes then *reads uninitialised memory*, which is
+    /// undefined behaviour — the same bug the `Blittable` derive was fixed for
+    /// earlier, arriving by a different door. `#[derive(Pod)]` refuses to
+    /// compile without this, which is how it stopped being invisible.
+    pub padding: [u32; 2],
 }
 
 /// Vertical field of view. A moderate value: a wide one distorts the cube's
@@ -212,7 +221,7 @@ impl Scene {
             device,
             allocator,
             "cube vertices",
-            bytes_of(&cooked.vertices),
+            bytemuck::cast_slice(&cooked.vertices),
             vk::BufferUsageFlags::VERTEX_BUFFER,
             BufferState::VERTEX_INPUT,
         )?;
@@ -220,7 +229,7 @@ impl Scene {
             device,
             allocator,
             "cube indices",
-            bytes_of(&cooked.indices),
+            bytemuck::cast_slice(&cooked.indices),
             vk::BufferUsageFlags::INDEX_BUFFER,
             BufferState::INDEX_INPUT,
         )?;
@@ -365,7 +374,7 @@ impl Scene {
                 &self.device,
                 &self.allocator,
                 "cube vertices",
-                bytes_of(&cooked.vertices),
+                bytemuck::cast_slice(&cooked.vertices),
                 vk::BufferUsageFlags::VERTEX_BUFFER,
                 BufferState::VERTEX_INPUT,
             )?;
@@ -373,7 +382,7 @@ impl Scene {
                 &self.device,
                 &self.allocator,
                 "cube indices",
-                bytes_of(&cooked.indices),
+                bytemuck::cast_slice(&cooked.indices),
                 vk::BufferUsageFlags::INDEX_BUFFER,
                 BufferState::INDEX_INPUT,
             )?;
@@ -622,6 +631,7 @@ impl Scene {
                     model,
                     texture: self.texture_slot.index(),
                     sampler: self.sampler_slot.index(),
+                    padding: [0; 2],
                 };
 
                 raw.cmd_push_constants(
@@ -632,7 +642,7 @@ impl Scene {
                     // Exactly the shader's block, not the Rust struct's
                     // `size_of` — see `Scene::new` on the eight bytes of tail
                     // padding that `Mat4` alignment adds.
-                    &as_bytes(&push)[..self.push_constant_bytes as usize],
+                    &bytemuck::bytes_of(&push)[..self.push_constant_bytes as usize],
                 );
                 raw.cmd_draw_indexed(buffer, self.index_count, 1, 0, 0, 0);
             }
@@ -742,7 +752,7 @@ fn upload_buffer(
     )
     .map_err(|error| error.to_string())?;
 
-    submit_once(device, |command| {
+    slop_rhi::submit_and_wait(device, |command| {
         command.barrier_buffer(
             staging.handle(),
             BufferState::HOST_WRITE,
@@ -750,7 +760,8 @@ fn upload_buffer(
         );
         command.copy_buffer(staging.handle(), destination.handle(), size);
         command.barrier_buffer(destination.handle(), BufferState::TRANSFER_DST, final_state);
-    })?;
+    })
+    .map_err(|error| error.to_string())?;
 
     Ok(destination)
 }
@@ -796,7 +807,7 @@ fn upload_texture(
     )
     .map_err(|error| error.to_string())?;
 
-    submit_once(device, |command| {
+    slop_rhi::submit_and_wait(device, |command| {
         command.transition_image(
             texture.handle(),
             texture.aspect(),
@@ -815,7 +826,8 @@ fn upload_texture(
             ImageState::TRANSFER_DST,
             ImageState::SHADER_READ,
         );
-    })?;
+    })
+    .map_err(|error| error.to_string())?;
 
     Ok(texture)
 }
@@ -838,54 +850,6 @@ fn create_sampler(device: &Arc<Device>) -> Result<vk::Sampler, String> {
     // SAFETY: `create_info` is fully initialized and borrows nothing.
     unsafe { device.raw().create_sampler(&create_info, None) }.map_err(|error| error.to_string())
 }
-
-/// Record, submit, and wait. Startup only — see [`upload_buffer`].
-fn submit_once(device: &Arc<Device>, record: impl FnOnce(&CommandBuffer)) -> Result<(), String> {
-    let pool = CommandPool::new(device, device.queue_families().graphics)
-        .map_err(|error| error.to_string())?;
-    let command = pool
-        .allocate(1)
-        .map_err(|error| error.to_string())?
-        .pop()
-        .expect("one buffer was requested");
-
-    command.begin().map_err(|error| error.to_string())?;
-    record(&command);
-    command.end().map_err(|error| error.to_string())?;
-
-    let timeline = TimelineSemaphore::new(device, 0).map_err(|error| error.to_string())?;
-
-    let commands = [vk::CommandBufferSubmitInfo::default().command_buffer(command.handle())];
-    let signals = [vk::SemaphoreSubmitInfo::default()
-        .semaphore(timeline.handle())
-        .value(1)
-        .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)];
-    let submits = [vk::SubmitInfo2::default()
-        .command_buffer_infos(&commands)
-        .signal_semaphore_infos(&signals)];
-
-    // SAFETY: the buffer is recorded and not pending, the timeline belongs to
-    // this device, and every borrowed array outlives the call.
-    unsafe {
-        device
-            .raw()
-            .queue_submit2(device.queues().graphics, &submits, vk::Fence::null())
-    }
-    .map_err(|error: vk::Result| RhiError::Vulkan(error).to_string())?;
-
-    let finished = timeline
-        .wait(1, std::time::Duration::from_secs(10))
-        .map_err(|error| error.to_string())?;
-
-    if !finished {
-        return Err(String::from(
-            "an upload did not complete within ten seconds",
-        ));
-    }
-
-    Ok(())
-}
-
 /// The Vulkan format a cooked texture's bytes are in.
 ///
 /// UNORM rather than the `_SRGB` variants for both, so the shader reads the
@@ -968,19 +932,4 @@ fn load_module(device: &Arc<Device>, logical: &str) -> Result<ShaderModule, Stri
     let bytes = cooked(logical)?;
 
     ShaderModule::from_bytes(device, &bytes).map_err(|error| error.to_string())
-}
-
-/// A `Copy` value's bytes, for a push constant block.
-fn as_bytes<T: Copy>(value: &T) -> &[u8] {
-    // SAFETY: `T` is `Copy` and therefore has no padding requiring
-    // initialization, the slice covers exactly the value, and it borrows from
-    // `value` so it cannot outlive it. Reading padding bytes as `u8` is
-    // defined; only reading them as their own type would not be.
-    unsafe { std::slice::from_raw_parts(std::ptr::from_ref(value).cast::<u8>(), size_of::<T>()) }
-}
-
-/// A slice's bytes, for an upload.
-fn bytes_of<T: Copy>(values: &[T]) -> &[u8] {
-    // SAFETY: same reasoning as `as_bytes`, over a contiguous slice.
-    unsafe { std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), size_of_val(values)) }
 }

@@ -57,7 +57,7 @@ const NO_TEXTURE: u32 = u32::MAX;
 /// `[f32; 4]` needs sixteen-byte alignment and comes first, and the eight
 /// scalars after it fill two more sixteen-byte rows exactly.
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct MaterialGpu {
     base_color: [f32; 4],
     metallic: f32,
@@ -86,13 +86,20 @@ struct Placement {
 }
 
 /// Per-draw constants, matching `PushConstants` in `model.slang`.
+///
+/// The trailing pad is not decoration. `Mat4` forces sixteen-byte alignment, so
+/// without it `size_of` rounds up past the declared fields and the last eight
+/// bytes are uninitialised padding — which `bytemuck::bytes_of` would then read.
+/// `#[derive(Pod)]` refuses to compile a struct in that state, which is how the
+/// gap becomes visible.
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct PushConstants {
     model_view_projection: Mat4,
     normal_rows: [[f32; 4]; 3],
     materials: u32,
     material: u32,
+    _pad: [u32; 2],
 }
 
 /// Loads a cooked model and draws it.
@@ -369,7 +376,7 @@ impl MeshRenderer {
             return Ok(());
         }
 
-        let bytes = as_bytes(rows);
+        let bytes: &[u8] = bytemuck::cast_slice(rows);
         let mut buffer = Buffer::new(
             allocator,
             &BufferConfig {
@@ -532,6 +539,7 @@ impl MeshRenderer {
                     normal_rows: normal_rows(placement.transform),
                     materials: materials.index(),
                     material: mesh.material,
+                    _pad: [0; 2],
                 };
 
                 raw.cmd_push_constants(
@@ -539,7 +547,7 @@ impl MeshRenderer {
                     self.pipeline.layout().handle(),
                     vk::ShaderStageFlags::ALL,
                     0,
-                    &as_bytes(std::slice::from_ref(&push))[..self.push_constant_bytes as usize],
+                    &bytemuck::bytes_of(&push)[..self.push_constant_bytes as usize],
                 );
                 raw.cmd_bind_vertex_buffers(buffer, 0, &[mesh.vertices.handle()], &[0]);
                 raw.cmd_bind_index_buffer(buffer, mesh.indices.handle(), 0, vk::IndexType::UINT32);
@@ -621,7 +629,7 @@ fn upload_mesh(
         device,
         allocator,
         "model vertices",
-        as_bytes(&mesh.vertices),
+        bytemuck::cast_slice(&mesh.vertices),
         vk::BufferUsageFlags::VERTEX_BUFFER,
         BufferState::VERTEX_INPUT,
     )?;
@@ -629,7 +637,7 @@ fn upload_mesh(
         device,
         allocator,
         "model indices",
-        as_bytes(&mesh.indices),
+        bytemuck::cast_slice(&mesh.indices),
         vk::BufferUsageFlags::INDEX_BUFFER,
         BufferState::INDEX_INPUT,
     )?;
@@ -773,14 +781,6 @@ fn create_sampler(device: &Arc<Device>) -> Result<vk::Sampler, RenderError> {
         unsafe { device.raw().create_sampler(&info, None) }.map_err(slop_rhi::RhiError::Vulkan)?;
 
     Ok(sampler)
-}
-
-/// A slice's bytes.
-fn as_bytes<T: Copy>(values: &[T]) -> &[u8] {
-    // SAFETY: `T` is `Copy` and the slice covers exactly the values, borrowing
-    // from them so it cannot outlive them. Reading padding bytes as `u8` is
-    // defined; reading them as their own type would not be.
-    unsafe { std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), size_of_val(values)) }
 }
 
 #[cfg(test)]

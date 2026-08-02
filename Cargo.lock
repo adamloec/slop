@@ -679,6 +679,7 @@ dependencies = [
 name = "example-cube"
 version = "0.0.0"
 dependencies = [
+ "bytemuck",
  "egui",
  "egui-winit",
  "slop-app",
@@ -858,6 +859,7 @@ version = "0.33.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f22fb22f065b308be0d8724e3706c7fa3fc2a6c7d6899df4cad7860e7a75436"
 dependencies = [
+ "bytemuck",
  "libm",
 ]
 
@@ -2101,6 +2103,7 @@ name = "slop-asset"
 version = "0.0.0"
 dependencies = [
  "blake3",
+ "bytemuck",
  "slop-core",
  "thiserror 2.0.19",
 ]
@@ -2167,6 +2170,7 @@ dependencies = [
 name = "slop-render"
 version = "0.0.0"
 dependencies = [
+ "bytemuck",
  "egui",
  "slop-asset",
  "slop-core",
