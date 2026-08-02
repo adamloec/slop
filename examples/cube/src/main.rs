@@ -23,17 +23,31 @@
 //! agrees with it. Doing them the other way round draws one wrong frame after
 //! every resize.
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use example_cube::Scene;
+use slop_app::debug_ui::{DebugUi, Declared};
 use slop_app::gpu::{Gpu, GpuConfig};
+use slop_app::timing::FrameTimes;
 use slop_app::window::WindowConfig;
 use slop_app::winit::application::ApplicationHandler;
 use slop_app::winit::event::WindowEvent;
 use slop_app::winit::event_loop::{ActiveEventLoop, EventLoop};
 use slop_app::winit::window::WindowId;
+use slop_asset::Vfs;
 use slop_core::diagnostics::tracing::{error, info};
 use slop_render::{FrameRenderer, FrameRendererConfig};
+
+/// The repository root, which is where `.slop/cache` lives.
+///
+/// `CARGO_MANIFEST_DIR` is example-grade and does not survive being installed —
+/// `docs/PLAN.md` §6.1 has the row for it.
+fn project_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+}
 
 /// How often to check whether a cooked asset has been rewritten.
 ///
@@ -103,12 +117,7 @@ impl ApplicationHandler for App {
         // has no camera or picking to suppress yet, and pretending otherwise
         // would be writing the branch before there is anything on the other side
         // of it.
-        let response = renderer
-            .egui_winit
-            .on_window_event(renderer.gpu.window(), &event);
-        if response.repaint {
-            renderer.gpu.window().request_redraw();
-        }
+        let _consumed = renderer.ui.on_window_event(renderer.gpu.window(), &event);
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
@@ -152,13 +161,12 @@ struct Renderer {
     last_asset_poll: Instant,
     /// How long recent frames took. See `FrameTimes`.
     frame_times: FrameTimes,
-    /// The debug UI's state, and the winit glue that feeds it input.
+    /// The debug UI — egui's state, the winit glue, and the overlay renderer.
     ///
-    /// Both live here rather than in `slop-render`, which stays
-    /// windowing-agnostic: `Context` is UI state and `egui_winit::State` is
-    /// platform plumbing. The renderer only ever sees tessellated triangles.
-    egui: egui::Context,
-    egui_winit: egui_winit::State,
+    /// In `slop-app` rather than here or in `slop-render`: the renderer stays
+    /// windowing-agnostic and only ever sees tessellated triangles, and the
+    /// wiring between the two is identical in every application.
+    ui: DebugUi,
 }
 
 impl Renderer {
@@ -197,22 +205,23 @@ impl Renderer {
             "cube ready"
         );
 
-        let egui = egui::Context::default();
-        let egui_winit = egui_winit::State::new(
-            egui.clone(),
-            egui.viewport_id(),
+        // Into the scene's heap, so the font atlas sits in the same table as the
+        // cube's texture — which is what a bindless model is for.
+        let mut scene = scene;
+        let ui = DebugUi::new(
             gpu.window(),
-            None,
-            None,
-            None,
-        );
+            gpu.device(),
+            scene.heap_mut(),
+            &Vfs::for_project(&project_root()),
+            renderer.format(),
+        )
+        .map_err(|error| error.to_string())?;
 
         Ok(Self {
             scene,
             renderer,
-            frame_times: FrameTimes::new(),
-            egui,
-            egui_winit,
+            frame_times: FrameTimes::default(),
+            ui,
             gpu,
             last_asset_poll: Instant::now(),
         })
@@ -268,14 +277,28 @@ impl Renderer {
         // The UI is declared, tessellated and its textures uploaded *before* the
         // frame, because uploading waits for the GPU and nothing inside a
         // recorded frame may block on it.
-        let (primitives, pixels_per_point) = self.run_ui()?;
+        let declared = self.run_ui()?;
 
-        // Borrowed out of `self` so the closure does not capture it whole —
-        // `render` needs `&mut self.renderer` at the same time.
-        let scene = &mut self.scene;
+        // Borrowed out of `self` field by field, so the closure does not capture
+        // it whole — `render` needs `&mut self.renderer` at the same time.
+        let scene = &self.scene;
+        let ui = &mut self.ui;
+        let allocator = self.gpu.allocator();
 
         self.renderer
-            .render(|frame| scene.record(frame, &primitives, pixels_per_point))
+            .render(|frame| {
+                scene.record(frame);
+
+                // In a pass of its own, over the scene. Errors are logged rather
+                // than propagated: a debug overlay that fails to allocate must
+                // not take the frame with it.
+                if let Err(failure) = ui.draw(scene.heap(), allocator, frame, &declared) {
+                    error!(error = %failure, "the debug overlay did not draw");
+                }
+
+                // After everything that draws — see `Frame::finish`.
+                frame.finish();
+            })
             .map_err(|error| error.to_string())?;
 
         Ok(())
@@ -287,19 +310,18 @@ impl Renderer {
     /// is what immediate mode means (`docs/DESIGN.md` §10.2): there is no widget
     /// tree to keep synchronised, so it cannot fall out of sync with the engine
     /// it is reporting on.
-    fn run_ui(&mut self) -> Result<(Vec<egui::ClippedPrimitive>, f32), String> {
-        let raw_input = self.egui_winit.take_egui_input(self.gpu.window());
+    fn run_ui(&mut self) -> Result<Declared, String> {
         let frames = self.renderer.frame_number();
         let extent = self.renderer.extent();
         let timing = self.frame_times.summary();
 
-        let output = self.egui.run_ui(raw_input, |ui| {
-            egui::Window::new("slop").show(&ui.ctx().clone(), |ui| {
-                // Milliseconds, not frames per second. See `FrameTimes`.
+        let declared = self.ui.run(self.gpu.window(), |context| {
+            slop_app::egui::Window::new("slop").show(context, |ui| {
+                // Milliseconds, not frames per second. See `slop_app::timing`.
                 ui.label(format!("{:.2} ms  ({:.0} fps)", timing.last, timing.fps()));
                 ui.label(format!(
                     "{:.2} ms  worst of last {}",
-                    timing.worst, FRAME_SAMPLES
+                    timing.worst, timing.window
                 ));
                 ui.separator();
                 ui.label(format!("{}x{}", extent.width, extent.height));
@@ -309,15 +331,11 @@ impl Renderer {
             });
         });
 
-        self.egui_winit
-            .handle_platform_output(self.gpu.window(), output.platform_output);
+        self.ui
+            .upload(self.scene.heap_mut(), self.gpu.allocator(), &declared)
+            .map_err(|error| error.to_string())?;
 
-        let primitives = self.egui.tessellate(output.shapes, output.pixels_per_point);
-
-        self.scene
-            .update_overlay_textures(self.gpu.allocator(), &output.textures_delta)?;
-
-        Ok((primitives, output.pixels_per_point))
+        Ok(declared)
     }
 }
 
@@ -330,101 +348,6 @@ impl Drop for Renderer {
         // samples them is still executing is undefined.
         if let Err(failure) = self.gpu.wait_idle() {
             error!(error = %failure, "device did not go idle; teardown may be unsafe");
-        }
-    }
-}
-
-/// How many frames the timing window covers.
-///
-/// A couple of seconds at a typical refresh rate: long enough that one slow
-/// frame does not dominate, short enough that a stall shows up while it is still
-/// happening rather than being averaged away.
-const FRAME_SAMPLES: usize = 240;
-
-/// A rolling window of how long recent frames took.
-///
-/// # Why milliseconds rather than frames per second
-///
-/// FPS is the number everyone quotes and the wrong one to optimise against,
-/// because it is not linear. Going from 1000 to 500 fps and from 60 to 55 fps
-/// look wildly different as ratios and are 1.0 ms and 1.5 ms respectively — the
-/// second is the bigger regression, and FPS says the opposite.
-///
-/// Milliseconds are linear and additive, which is what makes them a *budget*. A
-/// 60 Hz display gives 16.7 ms per frame and a 144 Hz one gives 6.9 ms; every
-/// system spends part of it, and the parts sum. "Shadows cost 2 ms" is a
-/// sentence you can act on. "Shadows cost 40 fps" is not, because the answer
-/// depends on what the frame rate already was.
-///
-/// FPS is still shown, because it is what a display's refresh rate is quoted in
-/// and the comparison is the point.
-///
-/// # Why the worst frame and not the average
-///
-/// An average hides exactly the thing a player feels. Sixty smooth frames and
-/// one that took 50 ms average out to something respectable and read as a
-/// visible hitch. Tracking the worst of a recent window surfaces the stutter
-/// that the mean smooths away — the same reason profilers report 1% lows rather
-/// than a single headline number.
-///
-/// # What this does *not* measure
-///
-/// **CPU wall-clock between frames, not GPU time.** It includes waiting for the
-/// GPU, so it is an honest measure of how fast frames actually arrive and a poor
-/// one for attributing cost to a pass. Doing that needs GPU timestamp queries
-/// written into the command buffer, which arrive with the render graph
-/// (`docs/PLAN.md` §9.2 item E) — the graph is what will know which pass a
-/// timestamp belongs to.
-struct FrameTimes {
-    samples: Vec<f32>,
-    next: usize,
-    last_tick: Instant,
-}
-
-/// What to show about recent frames, in milliseconds.
-struct Timing {
-    last: f32,
-    worst: f32,
-}
-
-impl Timing {
-    /// The same number the display's refresh rate is quoted in.
-    fn fps(&self) -> f32 {
-        if self.last > 0.0 {
-            1000.0 / self.last
-        } else {
-            0.0
-        }
-    }
-}
-
-impl FrameTimes {
-    fn new() -> Self {
-        Self {
-            samples: Vec::with_capacity(FRAME_SAMPLES),
-            next: 0,
-            last_tick: Instant::now(),
-        }
-    }
-
-    /// Record the time since the previous call.
-    fn tick(&mut self) {
-        let elapsed = self.last_tick.elapsed().as_secs_f32() * 1000.0;
-        self.last_tick = Instant::now();
-
-        if self.samples.len() < FRAME_SAMPLES {
-            self.samples.push(elapsed);
-        } else {
-            self.samples[self.next] = elapsed;
-        }
-
-        self.next = (self.next + 1) % FRAME_SAMPLES;
-    }
-
-    fn summary(&self) -> Timing {
-        Timing {
-            last: self.samples.last().copied().unwrap_or(0.0),
-            worst: self.samples.iter().copied().fold(0.0, f32::max),
         }
     }
 }

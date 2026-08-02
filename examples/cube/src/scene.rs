@@ -7,7 +7,7 @@ use slop_asset::{Assets, Mesh, Texture, Vfs};
 use slop_core::Handle;
 use slop_core::diagnostics::tracing::{info, warn};
 use slop_math::{Mat4, Quat, Vec3};
-use slop_render::{Overlay, VertexBinding};
+use slop_render::VertexBinding;
 use slop_rhi::{
     Allocator, Attachments, BindlessHeap, BindlessHeapConfig, Blend, Buffer, BufferConfig,
     BufferState, ClearValue, ColorAttachment, DEPTH_CLEAR, DepthAttachment, Device,
@@ -90,13 +90,6 @@ pub struct Scene {
     index_count: u32,
     /// Bytes the shader's push constant block occupies, from reflection.
     push_constant_bytes: u32,
-    /// The debug overlay.
-    ///
-    /// Owned here because the bindless heap is: `Overlay` inserts its font atlas
-    /// and sampler into the same table everything else uses, which is the point
-    /// of a bindless model. At M3 the renderer owns the heap and the overlay
-    /// sits beside the scene rather than inside it.
-    overlay: Overlay,
     /// The CPU-side assets, kept so [`Scene::reload_changed`] has something to
     /// compare against and something to re-upload from.
     meshes: Assets<Mesh>,
@@ -277,19 +270,8 @@ impl Scene {
             .insert_sampler(sampler.handle())
             .ok_or_else(|| String::from("the bindless heap had no room for one sampler"))?;
 
-        let overlay_module = load_module(device, "shaders/passes/overlay.spv")?;
-        let overlay = Overlay::new(
-            device,
-            &mut heap,
-            &overlay_module,
-            &load_reflection_at("shaders/passes/overlay.refl")?,
-            color_format,
-        )
-        .map_err(|error| error.to_string())?;
-
         Ok(Self {
             pipeline,
-            overlay,
             heap,
             sampler,
             texture,
@@ -330,22 +312,21 @@ impl Scene {
     /// asset that fails to *decode* is logged and skipped instead — a broken
     /// save mid-edit is expected, and killing the demo over it would defeat the
     /// point of hot reload.
-    /// Apply the debug overlay's texture changes.
+    /// The bindless heap everything this scene draws is indexed through.
     ///
-    /// Separate from `record` because it uploads, and uploading waits — which
-    /// must happen outside a recorded frame.
-    ///
-    /// # Errors
-    ///
-    /// Fails if a texture cannot be created or uploaded.
-    pub fn update_overlay_textures(
-        &mut self,
-        allocator: &Arc<Allocator>,
-        delta: &egui::TexturesDelta,
-    ) -> Result<(), String> {
-        self.overlay
-            .update_textures(&mut self.heap, allocator, delta)
-            .map_err(|error| error.to_string())
+    /// Exposed because the debug overlay's font atlas belongs in the *same*
+    /// table as the scene's textures — that is what a bindless model is for —
+    /// while the overlay itself belongs to the application (`slop_app::debug_ui`)
+    /// rather than in here. At M3 the renderer owns the heap and this accessor
+    /// goes with it; see `docs/PLAN.md` §6.1.
+    #[must_use]
+    pub fn heap(&self) -> &BindlessHeap {
+        &self.heap
+    }
+
+    /// The heap, mutably, for inserting an atlas into.
+    pub fn heap_mut(&mut self) -> &mut BindlessHeap {
+        &mut self.heap
     }
 
     pub fn reload_changed(&mut self) -> Result<bool, String> {
@@ -501,18 +482,14 @@ impl Scene {
 
     /// Record one frame.
     ///
-    /// `primitives` is what the debug overlay tessellated, drawn last and inside
-    /// the same pass so it composites over the scene without a second load and
-    /// store of the whole attachment. An empty slice draws no overlay, which is
-    /// what the golden test passes — see the crate docs on determinism.
+    /// Draws the scene and nothing else. The debug overlay is the application's,
+    /// drawn after this in a pass of its own — see `slop_app::debug_ui`.
     ///
-    /// Takes `&mut self` because the overlay writes this slot's vertex buffer.
-    pub fn record(
-        &mut self,
-        frame: &slop_render::Frame<'_>,
-        primitives: &[egui::ClippedPrimitive],
-        pixels_per_point: f32,
-    ) {
+    /// **Leaves the colour attachment in `COLOR_ATTACHMENT`, not in the frame's
+    /// final state.** Only the last thing to draw may transition, and a scene
+    /// cannot know whether an overlay follows it. Callers end with
+    /// [`slop_render::Frame::finish`].
+    pub fn record(&self, frame: &slop_render::Frame<'_>) {
         let command = frame.command;
         let target = frame.target;
         let extent = target.extent;
@@ -598,32 +575,15 @@ impl Scene {
             pass.draw_indexed(self.index_count, 1, 0, 0);
         }
 
-        // Ends the pass, so the overlay below can open its own.
-        drop(pass);
-
-        // After the scene's pass ends, in one of its own. The overlay wants no
-        // depth, and a pipeline used inside a pass must declare the depth format
-        // that pass carries — sharing would depth-test the interface against the
-        // cube and let geometry occlude the readout describing it.
+        // Ends the pass, so the overlay can open its own.
         //
-        // Errors are logged rather than propagated: a debug overlay that fails
-        // to allocate must not take the frame with it.
-        if let Err(error) = self.overlay.draw(
-            &self.heap,
-            &self.allocator,
-            frame,
-            primitives,
-            pixels_per_point,
-        ) {
-            warn!(%error, "the debug overlay could not be drawn");
-        }
-
-        command.transition_image(
-            target.image,
-            vk::ImageAspectFlags::COLOR,
-            ImageState::COLOR_ATTACHMENT,
-            target.to,
-        );
+        // The overlay wants no depth, and a pipeline used inside a pass must
+        // declare the depth format that pass carries — sharing one pass would
+        // depth-test the interface against the cube and let geometry occlude the
+        // readout describing it.
+        //
+        // No transition to `target.to` here. See this method's docs.
+        drop(pass);
     }
 }
 

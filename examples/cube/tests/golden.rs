@@ -25,10 +25,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use example_cube::Scene;
-use slop_render::Target;
+use slop_render::{Overlay, Target};
 use slop_rhi::{
     Allocator, Buffer, BufferConfig, CommandPool, Device, DeviceSelection, Image, ImageConfig,
-    ImageState, Instance, InstanceConfig, MemoryLocation, RhiError, TimelineSemaphore, vk,
+    ImageState, Instance, InstanceConfig, MemoryLocation, RhiError, ShaderModule,
+    TimelineSemaphore, vk,
 };
 use slop_verify::{Golden, Mode, Rgba8, Tolerance};
 
@@ -278,9 +279,18 @@ fn harness(device: &Arc<Device>, allocator: &Arc<Allocator>) -> Option<Headless>
 /// The scene plus an offscreen target and the readback path.
 struct Headless {
     pool: CommandPool,
+    /// The overlay renderer, built here rather than taken from `slop-app`.
+    ///
+    /// **This is the point of the split.** `slop_app::debug_ui::DebugUi` needs a
+    /// window — it owns the winit glue — and this test has none. `Overlay` is
+    /// windowing-agnostic and takes tessellated triangles, so it can be driven
+    /// with no event loop, no surface and no display at all. If the two halves
+    /// were one type, none of the overlay tests below could exist.
+    overlay: Overlay,
     scene: Scene,
     readback: Buffer,
     target: Image,
+    allocator: Arc<Allocator>,
     device: Arc<Device>,
 }
 
@@ -291,7 +301,30 @@ impl Headless {
             height: SIZE,
         };
 
-        let scene = Scene::new(device, allocator, extent, FORMAT)?;
+        let mut scene = Scene::new(device, allocator, extent, FORMAT)?;
+
+        // Into the scene's heap, exactly as the windowed demo puts it into the
+        // same heap through `DebugUi` — so what this test exercises is the same
+        // descriptor arrangement the application uses.
+        let vfs = slop_asset::Vfs::for_project(
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join(".."),
+        );
+        let module = ShaderModule::from_bytes(
+            device,
+            &vfs.read("shaders/passes/overlay.spv")
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let reflection = slop_asset::Reflection::read(
+            &vfs.read("shaders/passes/overlay.refl")
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let overlay = Overlay::new(device, scene.heap_mut(), &module, &reflection, FORMAT)
+            .map_err(|error| error.to_string())?;
 
         let target = Image::new(
             allocator,
@@ -316,6 +349,8 @@ impl Headless {
         .map_err(|error| error.to_string())?;
 
         Ok(Self {
+            overlay,
+            allocator: Arc::clone(allocator),
             pool: CommandPool::new(device, device.queue_families().graphics)
                 .map_err(|error| error.to_string())?,
             scene,
@@ -328,6 +363,17 @@ impl Headless {
     /// Render one frame and bring it back to the CPU.
     fn render(&mut self, frame: u64) -> Rgba8 {
         self.render_with(frame, &[], 1.0)
+    }
+
+    /// Apply egui's atlas changes, outside any recorded frame.
+    ///
+    /// Into the scene's heap, which is the same one the overlay was built
+    /// against — the arrangement `slop_app::debug_ui` produces in the real
+    /// application.
+    fn upload_overlay(&mut self, delta: &egui::TexturesDelta) {
+        self.overlay
+            .update_textures(self.scene.heap_mut(), &self.allocator, delta)
+            .expect("the overlay's textures must upload");
     }
 
     /// Render one frame with an overlay drawn over it.
@@ -356,23 +402,37 @@ impl Headless {
         // reference depend on something other than the frame number, which is
         // exactly what `docs/DESIGN.md` §2.14 forbids and what makes a golden
         // image of a moving object possible at all.
-        self.scene.record(
-            &slop_render::Frame {
-                command: &command,
-                target: Target {
-                    image: self.target.handle(),
-                    view: self.target.view(),
-                    extent: self.target.extent(),
-                    from: ImageState::UNDEFINED,
-                    to: ImageState::TRANSFER_SRC,
-                },
-                number: frame,
-                slot: 0,
-                slots: 1,
+        let frame = slop_render::Frame {
+            command: &command,
+            target: Target {
+                image: self.target.handle(),
+                view: self.target.view(),
+                extent: self.target.extent(),
+                from: ImageState::UNDEFINED,
+                to: ImageState::TRANSFER_SRC,
             },
-            primitives,
-            pixels_per_point,
-        );
+            number: frame,
+            slot: 0,
+            slots: 1,
+        };
+
+        self.scene.record(&frame);
+
+        if !primitives.is_empty() {
+            self.overlay
+                .draw(
+                    self.scene.heap(),
+                    &self.allocator,
+                    &frame,
+                    primitives,
+                    pixels_per_point,
+                )
+                .expect("the overlay must draw");
+        }
+
+        // Only the last thing to draw transitions the target — here to
+        // TRANSFER_SRC, so the copy below can read it.
+        frame.finish();
 
         command.copy_image_to_buffer(
             self.target.handle(),
@@ -503,10 +563,7 @@ fn the_debug_overlay_actually_draws_something() {
     // running application applies each frame's delta and never notices; keeping
     // only the second here left the atlas unuploaded and every draw skipped.
     let first = context.run_ui(input.clone(), &declare);
-    renderer
-        .scene
-        .update_overlay_textures(&allocator, &first.textures_delta)
-        .expect("the font atlas must upload");
+    renderer.upload_overlay(&first.textures_delta);
 
     let output = context.run_ui(input, &declare);
     let primitives = context.tessellate(output.shapes, output.pixels_per_point);
@@ -516,10 +573,7 @@ fn the_debug_overlay_actually_draws_something() {
         "egui must have tessellated something to draw"
     );
 
-    renderer
-        .scene
-        .update_overlay_textures(&allocator, &output.textures_delta)
-        .expect("a later texture delta must upload");
+    renderer.upload_overlay(&output.textures_delta);
 
     let without = renderer.render(CAPTURED_FRAME);
     let with = renderer.render_with(CAPTURED_FRAME, &primitives, 1.0);
@@ -599,16 +653,10 @@ fn a_scaled_display_draws_the_same_interface() {
         };
 
         let first = context.run_ui(input.clone(), &declare);
-        renderer
-            .scene
-            .update_overlay_textures(&allocator, &first.textures_delta)
-            .expect("the font atlas must upload");
+        renderer.upload_overlay(&first.textures_delta);
 
         let output = context.run_ui(input, &declare);
-        renderer
-            .scene
-            .update_overlay_textures(&allocator, &output.textures_delta)
-            .expect("a later delta must upload");
+        renderer.upload_overlay(&output.textures_delta);
 
         assert_eq!(
             output.pixels_per_point, pixels_per_point,
