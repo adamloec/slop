@@ -72,9 +72,23 @@ pub enum SampledImage {}
 #[derive(Debug)]
 pub enum Sampler {}
 
+/// Binding index for storage buffers — arrays of structured data a shader
+/// indexes, such as per-material parameters or per-instance transforms.
+///
+/// Added here rather than when the first consumer appeared, for the reason the
+/// module docs give: a binding introduced into the global set layout later
+/// invalidates every pipeline built against it, because the layout is a shader
+/// ABI. `shader_storage_buffer_array_dynamic_indexing` has been in the required
+/// feature tier since M0; this is the binding that makes it reachable.
+pub const STORAGE_BUFFER_BINDING: u32 = 3;
+
 /// Type tag for a storage image slot. Never constructed.
 #[derive(Debug)]
 pub enum StorageImage {}
+
+/// Type tag for a storage buffer slot. Never constructed.
+#[derive(Debug)]
+pub enum StorageBuffer {}
 
 /// How many of each kind of descriptor the heap can hold.
 ///
@@ -92,6 +106,9 @@ pub struct BindlessHeapConfig {
     pub samplers: u32,
     /// Images compute shaders write.
     pub storage_images: u32,
+    /// Buffers of structured data a shader indexes — material parameters,
+    /// instance transforms, and the draw lists §4.2 stage B builds on the GPU.
+    pub storage_buffers: u32,
 }
 
 impl Default for BindlessHeapConfig {
@@ -106,6 +123,7 @@ impl Default for BindlessHeapConfig {
             sampled_images: 16_384,
             samplers: 128,
             storage_images: 1_024,
+            storage_buffers: 1_024,
         }
     }
 }
@@ -126,6 +144,7 @@ pub struct BindlessHeap {
     sampled_images: HandleAllocator<SampledImage>,
     samplers: HandleAllocator<Sampler>,
     storage_images: HandleAllocator<StorageImage>,
+    storage_buffers: HandleAllocator<StorageBuffer>,
     device: Arc<Device>,
 }
 
@@ -164,6 +183,11 @@ impl BindlessHeap {
                 vk::DescriptorType::STORAGE_IMAGE,
                 capacity.storage_images,
             ),
+            (
+                STORAGE_BUFFER_BINDING,
+                vk::DescriptorType::STORAGE_BUFFER,
+                capacity.storage_buffers,
+            ),
         ];
 
         let bindings: Vec<vk::DescriptorSetLayoutBinding<'_>> = counts
@@ -196,7 +220,7 @@ impl BindlessHeap {
         let flags = vk::DescriptorBindingFlags::PARTIALLY_BOUND
             | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND
             | vk::DescriptorBindingFlags::UPDATE_UNUSED_WHILE_PENDING;
-        let binding_flags = [flags; 3];
+        let binding_flags = [flags; 4];
 
         let mut flags_info =
             vk::DescriptorSetLayoutBindingFlagsCreateInfo::default().binding_flags(&binding_flags);
@@ -279,6 +303,7 @@ impl BindlessHeap {
             sampled_images: HandleAllocator::new(),
             samplers: HandleAllocator::new(),
             storage_images: HandleAllocator::new(),
+            storage_buffers: HandleAllocator::new(),
             device: Arc::clone(device),
         })
     }
@@ -304,6 +329,7 @@ impl BindlessHeap {
             sampled_images: u32::try_from(self.sampled_images.len()).unwrap_or(u32::MAX),
             samplers: u32::try_from(self.samplers.len()).unwrap_or(u32::MAX),
             storage_images: u32::try_from(self.storage_images.len()).unwrap_or(u32::MAX),
+            storage_buffers: u32::try_from(self.storage_buffers.len()).unwrap_or(u32::MAX),
         }
     }
 
@@ -381,6 +407,41 @@ impl BindlessHeap {
         });
 
         Some(handle)
+    }
+
+    /// Place a buffer of structured data in the heap.
+    ///
+    /// `buffer` must remain alive and unchanged until the handle is removed,
+    /// for the same reason a sampled image must: the descriptor holds the
+    /// handle, not a reference the borrow checker can see.
+    ///
+    /// The whole buffer is bound. A shader reads it as an array of whatever its
+    /// own declaration says, so the element type is the shader's business and
+    /// this only has to know where the bytes are — which is what makes one
+    /// binding serve materials, transforms and draw lists alike.
+    pub fn insert_storage_buffer(&mut self, buffer: vk::Buffer) -> Option<Handle<StorageBuffer>> {
+        if self.storage_buffers.len() >= self.capacity.storage_buffers as usize {
+            return None;
+        }
+
+        let handle = self.storage_buffers.allocate();
+        let buffer_info = [vk::DescriptorBufferInfo::default()
+            .buffer(buffer)
+            .offset(0)
+            .range(vk::WHOLE_SIZE)];
+
+        self.write(STORAGE_BUFFER_BINDING, handle.index(), |write| {
+            write
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&buffer_info)
+        });
+
+        Some(handle)
+    }
+
+    /// Release a storage buffer slot. Returns whether the handle was live.
+    pub fn remove_storage_buffer(&mut self, handle: Handle<StorageBuffer>) -> bool {
+        self.storage_buffers.free(handle)
     }
 
     /// Release a texture slot. Returns whether the handle was live.
@@ -521,6 +582,10 @@ fn clamp_to_limits(device: &Arc<Device>, config: &BindlessHeapConfig) -> Bindles
             .storage_images
             .min(indexing.max_descriptor_set_update_after_bind_storage_images)
             .min(indexing.max_per_stage_descriptor_update_after_bind_storage_images),
+        storage_buffers: config
+            .storage_buffers
+            .min(indexing.max_descriptor_set_update_after_bind_storage_buffers)
+            .min(indexing.max_per_stage_descriptor_update_after_bind_storage_buffers),
     }
 }
 
@@ -537,11 +602,12 @@ mod tests {
             SAMPLED_IMAGE_BINDING,
             SAMPLER_BINDING,
             STORAGE_IMAGE_BINDING,
+            STORAGE_BUFFER_BINDING,
         ];
         let mut sorted = bindings;
         sorted.sort_unstable();
 
-        assert_eq!(sorted, [0, 1, 2], "bindings must be 0..3 with no gaps");
+        assert_eq!(sorted, [0, 1, 2, 3], "bindings must be 0..4 with no gaps");
         assert_eq!(HEAP_SET, 0);
     }
 
@@ -555,5 +621,33 @@ mod tests {
         assert!(config.sampled_images >= 4096);
         assert!(config.storage_images >= 256);
         assert!(config.samplers >= 16);
+        assert!(config.storage_buffers >= 256);
+    }
+
+    #[test]
+    fn the_shader_side_declares_the_same_bindings() {
+        // The ABI's other half is a text file nothing compiles against, and its
+        // own comments say a mismatch is neither a compile error nor a
+        // validation one — it is a shader reading a different array than the
+        // engine wrote to, which looks like a content bug.
+        //
+        // Crude, and better than nothing until reflection carries descriptor
+        // bindings (`docs/PLAN.md` §6.1). It catches the case that actually
+        // happens: a binding added on one side and not the other.
+        let shader = include_str!("../../../shaders/lib/bindless.slang");
+
+        for binding in [
+            SAMPLED_IMAGE_BINDING,
+            SAMPLER_BINDING,
+            STORAGE_IMAGE_BINDING,
+            STORAGE_BUFFER_BINDING,
+        ] {
+            let declaration = format!("[[vk::binding({binding}, {HEAP_SET})]]");
+
+            assert!(
+                shader.contains(&declaration),
+                "shaders/lib/bindless.slang does not declare `{declaration}`"
+            );
+        }
     }
 }

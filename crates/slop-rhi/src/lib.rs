@@ -41,7 +41,8 @@ mod sync;
 pub use command::{BufferState, CommandBuffer, CommandPool, ImageState, submit_and_wait};
 pub use descriptor::{
     BindlessHeap, BindlessHeapConfig, HEAP_SET, SAMPLED_IMAGE_BINDING, SAMPLER_BINDING,
-    STORAGE_IMAGE_BINDING, SampledImage, Sampler, StorageImage,
+    STORAGE_BUFFER_BINDING, STORAGE_IMAGE_BINDING, SampledImage, Sampler, StorageBuffer,
+    StorageImage,
 };
 pub use device::{
     Device, DeviceInfo, DeviceKind, DeviceSelection, QueueFamilies, Queues, Rejection, enumerate,

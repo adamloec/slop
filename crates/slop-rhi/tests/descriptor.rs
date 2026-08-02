@@ -70,6 +70,7 @@ fn an_absurd_request_is_clamped_rather_than_rejected() {
             sampled_images: u32::MAX,
             samplers: u32::MAX,
             storage_images: u32::MAX,
+            storage_buffers: u32::MAX,
         },
     )
     .expect("an oversized request must clamp, not fail");
@@ -156,6 +157,7 @@ fn a_full_heap_returns_none_rather_than_panicking() {
             sampled_images: 4,
             samplers: 1,
             storage_images: 1,
+            storage_buffers: 1,
         },
     )
     .expect("heap creation");

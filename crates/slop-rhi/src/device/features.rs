@@ -86,6 +86,13 @@ pub(crate) fn required() -> Required {
         // every pipeline built against it, and the layout is a shader ABI.
         .descriptor_binding_storage_image_update_after_bind(true)
         .shader_storage_image_array_non_uniform_indexing(true)
+        // Storage buffers, for the per-material and per-instance arrays a draw
+        // indexes. Required for the same reason the two above are: the heap
+        // declares every binding `UPDATE_AFTER_BIND`, and Vulkan rejects the
+        // layout outright if the matching feature is absent. Validation says so
+        // clearly, which is how this was found.
+        .descriptor_binding_storage_buffer_update_after_bind(true)
+        .shader_storage_buffer_array_non_uniform_indexing(true)
         // Lets a descriptor be written while a command buffer using the set is
         // still pending, provided that particular descriptor is not the one
         // being used. This is what makes texture streaming possible at all —
@@ -171,6 +178,11 @@ pub(crate) fn missing(instance: &ash::Instance, device: vk::PhysicalDevice) -> V
         descriptor_binding_storage_image_update_after_bind
     );
     require!(vulkan_12, shader_storage_image_array_non_uniform_indexing);
+    require!(
+        vulkan_12,
+        descriptor_binding_storage_buffer_update_after_bind
+    );
+    require!(vulkan_12, shader_storage_buffer_array_non_uniform_indexing);
     require!(vulkan_12, descriptor_binding_update_unused_while_pending);
     require!(vulkan_12, buffer_device_address);
     require!(vulkan_12, draw_indirect_count);

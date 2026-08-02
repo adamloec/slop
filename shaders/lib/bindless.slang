@@ -8,6 +8,7 @@
 //     SAMPLED_IMAGE_BINDING    = 0
 //     SAMPLER_BINDING          = 1
 //     STORAGE_IMAGE_BINDING    = 2
+//     STORAGE_BUFFER_BINDING   = 3
 //
 // Nothing checks that they agree. A mismatch is not a compile error and not a
 // validation error — it is a shader reading a different array than the one the
@@ -39,6 +40,18 @@
 [[vk::binding(1, 0)]] SamplerState g_samplers[];
 [[vk::binding(2, 0)]] RWTexture2D<float4> g_storage_images[];
 
+// Structured data a shader indexes: per-material parameters, per-instance
+// transforms, and the draw lists a GPU-driven pass builds (DESIGN.md 4.2).
+//
+// Untyped, and that is what lets one binding serve all of them. A
+// `StructuredBuffer<T>` fixes T for every shader sharing the binding, so
+// materials and transforms would need a binding each — and a binding added to
+// this layout later invalidates every pipeline built against it. Reading through
+// `Load<T>` moves the type to the point of use, where it belongs.
+//
+// Offsets are in bytes and must be a multiple of four.
+[[vk::binding(3, 0)]] ByteAddressBuffer g_buffers[];
+
 // A texture slot. Mirrors `Handle<SampledImage>::index()` on the CPU side; the
 // generation stays there and never crosses to the GPU.
 //
@@ -59,6 +72,22 @@ struct StorageImageHandle
 {
     uint index;
 };
+
+struct BufferHandle
+{
+    uint index;
+};
+
+// Read one element out of a heap buffer.
+//
+// `NonUniformResourceIndex` for the same reason sampling needs it: without it
+// the compiler may assume every lane in a wave reads the same buffer, which is
+// correct for one draw and wrong the moment a GPU-driven pass puts several in
+// one wave.
+T loadFromBuffer<T>(BufferHandle buffer, uint index)
+{
+    return g_buffers[NonUniformResourceIndex(buffer.index)].Load<T>(index * sizeof(T));
+}
 
 // Sample a texture from the heap.
 //

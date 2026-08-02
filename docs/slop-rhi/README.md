@@ -35,6 +35,7 @@ Started. This is the bulk of M0 and the largest single body of work in it.
 | `Buffer`, `Image`, and image-to-buffer readback | Landed | M0 |
 | Headless rendering, verified by a golden image | Landed | M0 |
 | Bindless descriptor heap — sampled images, samplers, storage images | Landed | M0 |
+| Heap storage buffers — material and instance arrays a draw indexes | Landed | M2 |
 | Pipeline layouts over the heap, with push constants | Landed | M0 |
 | Depth attachments, mip chains, cube maps | Planned — when the cube needs them | M0 |
 | Dedicated versus suballocated policy for large targets | Planned — needs measurements, not a guessed threshold | M1 |
@@ -125,7 +126,7 @@ flowchart TD
     subgraph fixed ["Fixed at M0 — unfixable later"]
         ts["timeline semaphores, not fences plus binary semaphores"]
         bar["explicit barriers, never implicit sync"]
-        bind["bindless descriptor heap allocated from the start"]
+        bind["bindless descriptor heap — every binding declared up front"]
         queues["graphics, compute and transfer queues acquired up front"]
         dev["device selection scores on type — discrete over integrated"]
     end
@@ -140,6 +141,21 @@ flowchart TD
 
 Get the left side right and the extraction is a refactor. Get it wrong and it
 is a rewrite.
+
+**A binding was still missed, which is what the left-hand list is for.** The heap
+shipped with sampled images, samplers and storage images, and no storage buffers
+— even though `shaderStorageBufferArrayDynamicIndexing` had been in the required
+feature tier since M0, so the intent was recorded and the binding was not.
+Adding it at M2 cost a recompile of three pipelines. Adding it once a renderer
+had dozens would have been the rewrite this section warns about, because **the
+set layout is a shader ABI**: a binding introduced later invalidates every
+pipeline built against the old one.
+
+Two things made it cheap to catch. Validation named the missing feature exactly
+(`descriptorBindingStorageBufferUpdateAfterBind`, absent from the tier while the
+layout demanded it), and a test now asserts that
+`shaders/lib/bindless.slang` declares every binding the Rust side does — the
+file's own comments said nothing checked that, and now something does.
 
 ## 5. Vulkan 1.3 is the required API version
 
