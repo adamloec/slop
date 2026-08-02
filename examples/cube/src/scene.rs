@@ -531,7 +531,11 @@ fn upload_buffer(
 
 /// Upload the checkerboard and leave it ready for sampling.
 fn upload_texture(device: &Arc<Device>, allocator: &Arc<Allocator>) -> Result<Image, String> {
-    let pixels = mesh::checkerboard();
+    // Loaded from the cooked cache rather than generated. `assets/checker.png`
+    // holds the same pixels the generator produced, so the golden image is the
+    // oracle for the whole pipeline: PNG, cook, cache, VFS, decode, upload.
+    let cooked = load_texture()?;
+    let pixels = &cooked.pixels;
 
     let mut staging = Buffer::new(
         allocator,
@@ -547,15 +551,15 @@ fn upload_texture(device: &Arc<Device>, allocator: &Arc<Allocator>) -> Result<Im
     staging
         .mapped_mut()
         .map_err(|error| error.to_string())?
-        .copy_from_slice(&pixels);
+        .copy_from_slice(pixels);
 
     let texture = Image::new(
         allocator,
         &ImageConfig {
             name: "cube albedo",
             extent: vk::Extent2D {
-                width: mesh::TEXTURE_SIZE,
-                height: mesh::TEXTURE_SIZE,
+                width: cooked.width,
+                height: cooked.height,
             },
             // UNORM rather than SRGB, so the shader reads the bytes that were
             // uploaded. The golden image then compares shader output rather
@@ -654,6 +658,23 @@ fn submit_once(device: &Arc<Device>, record: impl FnOnce(&CommandBuffer)) -> Res
     }
 
     Ok(())
+}
+
+/// Load the cooked albedo texture.
+///
+/// Through the asset VFS, as the shader is. What was a `checkerboard()` call is
+/// now a file — `docs/PLAN.md` §6.1 recorded the generated version as waiting
+/// for exactly this.
+fn load_texture() -> Result<slop_asset::Texture, String> {
+    let project = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..");
+
+    let bytes = Vfs::for_project(&project)
+        .read("textures/checker.tex")
+        .map_err(|error| format!("{error}. Run `cargo run -p slop-cli -- cook` first"))?;
+
+    slop_asset::Texture::read(&bytes).map_err(|error| error.to_string())
 }
 
 /// Load the cooked cube shader.

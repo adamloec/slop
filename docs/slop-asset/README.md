@@ -27,7 +27,9 @@ cooked it is the one that understands the format.
 | Shader cooking driven onto the cache | Landed — in `slop-cli` | M2 |
 | `Mesh` — the cooked mesh format | Landed | M2 |
 | glTF import + cook | Landed — importer in `slop-cli` | M2 |
-| Texture compression | Planned | M2 |
+| `Texture` — the cooked texture format | Landed | M2 |
+| PNG import + cook | Landed — importer in `slop-cli` | M2 |
+| Block compression (BC7) | Planned | M2 |
 | Async streaming | Planned — **beside** the sync read, not replacing it | M2 |
 | Asset handles and a registry of loaded assets | Planned — waits for something that holds one | M2 |
 | Hot reload | Planned | M2 |

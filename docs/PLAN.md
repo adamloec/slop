@@ -126,7 +126,7 @@ Two consequences worth carrying into M0:
 renders with a golden image guarding it, and the reflection and ECS foundations
 are built through queries.
 
-664 tests. Clippy and rustdoc clean under `-D warnings` in both feature
+682 tests. Clippy and rustdoc clean under `-D warnings` in both feature
 configurations, Vulkan validation reporting nothing, and every crate containing
 `unsafe` passing under Miri — `slop-ecs` under both Stacked and Tree Borrows.
 
@@ -159,7 +159,8 @@ world at once. Save, load and save again produces byte-identical text.
 | Shader cooking driven onto the shared cache | Landed |
 | The cooked mesh format — binary, versioned, validated on load | Landed |
 | glTF import — positions, normals, UVs, indices | Landed |
-| Texture compression | Outstanding |
+| Texture cooking — PNG to a versioned RGBA8 artifact | Landed |
+| Block compression (BC7) | Outstanding |
 | Async streaming, hot reload, asset handles | Outstanding |
 | Debug UI (§10.2) | Outstanding — wanted before renderer bring-up |
 
@@ -618,7 +619,7 @@ freely, never seams.
 |---|---|---|---|---|
 | Frame loop — acquire, submit, present, frames in flight | `examples/*/src/main.rs` | `slop-render`'s frame renderer | **Deleted.** Replaced by a handful of lines against `slop-app`. | M3 |
 | Scene setup — uploads, pipeline, draw recording | `examples/cube/src/scene.rs` | `slop-render` + `slop-asset` | **Moved** into `slop-render` and generalized. Nothing is unpicked. | M3 |
-| Cube geometry and texture, generated in code | `examples/cube/src/mesh.rs` | glTF import, texture cooking (§2.8) | **Deleted.** Replaced by an asset file. | M2 |
+| Cube geometry generated in code | `examples/cube/src/mesh.rs` | A cube asset through glTF import | **Deleted.** The texture half is done — `assets/checker.png` cooks and the golden image still matches, which is what proves the pipeline. The geometry follows the same path. | M2 |
 | Synchronous upload — submit and wait | `examples/cube/src/scene.rs` | Async transfer queue + staging ring | **Replaced.** Correct for startup, wrong for streaming. | M2 |
 | `slangc` invoked as a CLI | `slop-cli/src/cook.rs` | The Slang library, for reflection (§2.11) | **Replaced.** The cache layout, keying and read path all survive. | M2/M3 |
 | The asset VFS reads synchronously | `slop-asset` | Async streaming alongside it | **Joined by, not replaced.** A blocking read stays correct for startup, for tools, and for the cooker itself; §2.8's streaming is an additional entry point rather than a different one. Recorded because "the VFS is sync" reads like a shortcut and is not. | M2 |

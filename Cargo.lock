@@ -1697,6 +1697,7 @@ dependencies = [
  "anyhow",
  "clap",
  "gltf",
+ "png",
  "slop-asset",
  "slop-core",
 ]

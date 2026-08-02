@@ -46,10 +46,12 @@
 
 mod cache;
 pub mod mesh;
+pub mod texture;
 mod vfs;
 
 pub use cache::{Cache, CacheError, CacheKey, KeyBuilder};
 pub use mesh::{Mesh, MeshError, Vertex};
+pub use texture::{Format, Texture, TextureError};
 pub use vfs::{Vfs, VfsError};
 
 use std::path::{Path, PathBuf};

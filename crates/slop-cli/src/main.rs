@@ -17,6 +17,7 @@ use clap::{Parser, Subcommand};
 
 mod cook;
 mod gltf_import;
+mod texture_import;
 
 /// Slop engine tooling.
 #[derive(Debug, Parser)]
@@ -57,11 +58,12 @@ fn main() -> Result<()> {
 
             let shaders = cook::shaders(&root, force).with_context(context)?;
             let meshes = gltf_import::meshes(&root, force).with_context(context)?;
+            let textures = texture_import::textures(&root, force).with_context(context)?;
 
             println!(
                 "cooked {}, up to date {}",
-                shaders.cooked + meshes.cooked,
-                shaders.skipped + meshes.skipped
+                shaders.cooked + meshes.cooked + textures.cooked,
+                shaders.skipped + meshes.skipped + textures.skipped
             );
         }
     }

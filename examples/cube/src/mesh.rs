@@ -1,9 +1,8 @@
-//! The cube's geometry and its texture, generated rather than loaded.
+//! The cube's geometry, generated rather than loaded.
 //!
-//! Both are procedural because M0 has no asset pipeline — glTF import and
-//! texture cooking are M2 (`docs/DESIGN.md` §2.8). Generating them keeps this
-//! example's only inputs the shader and this file, so a failure has nowhere
-//! else to have come from.
+//! Procedural because glTF import has landed but a cube asset has not — the
+//! texture already comes from `assets/checker.png` through the cooked cache, and
+//! `docs/PLAN.md` §6.1 records the geometry as following it.
 
 use slop_rhi::vk;
 
@@ -135,41 +134,6 @@ pub const INDICES: [u16; 36] = {
 
     indices
 };
-
-/// Side length of the generated texture.
-pub const TEXTURE_SIZE: u32 = 64;
-
-/// A checkerboard, as tightly packed RGBA8.
-///
-/// A checker rather than a gradient or a solid: it makes texture orientation
-/// visible. A texture sampled with V flipped, or with U and V swapped, looks
-/// identical under a solid fill and under a radially symmetric pattern, and
-/// obviously wrong under this.
-///
-/// Deliberately not sRGB-encoded. The render target is `UNORM`, so what the
-/// shader writes is what the golden image compares — see the golden test.
-pub fn checkerboard() -> Vec<u8> {
-    const CHECK: u32 = 8;
-
-    let mut pixels = Vec::with_capacity((TEXTURE_SIZE * TEXTURE_SIZE * 4) as usize);
-
-    for y in 0..TEXTURE_SIZE {
-        for x in 0..TEXTURE_SIZE {
-            let light = ((x / CHECK) + (y / CHECK)).is_multiple_of(2);
-
-            // A warm and a cool square, rather than black and white: a
-            // black square shows nothing about the lighting term multiplying
-            // it, and half the image would carry no information.
-            if light {
-                pixels.extend_from_slice(&[220, 200, 170, 255]);
-            } else {
-                pixels.extend_from_slice(&[60, 80, 110, 255]);
-            }
-        }
-    }
-
-    pixels
-}
 
 #[cfg(test)]
 mod tests {
@@ -305,27 +269,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_texture_is_the_size_it_claims() {
-        let pixels = checkerboard();
-
-        assert_eq!(pixels.len(), (TEXTURE_SIZE * TEXTURE_SIZE * 4) as usize);
-    }
-
-    #[test]
-    fn the_checkerboard_alternates() {
-        // A texture that came out solid would make the golden image pass while
-        // proving nothing about sampling.
-        let pixels = checkerboard();
-        let texel = |x: u32, y: u32| {
-            let start = ((y * TEXTURE_SIZE + x) * 4) as usize;
-            pixels[start]
-        };
-
-        assert_ne!(texel(0, 0), texel(8, 0), "adjacent squares must differ");
-        assert_eq!(texel(0, 0), texel(16, 0), "and repeat every two squares");
-        assert_ne!(texel(0, 0), texel(0, 8), "in both axes");
-    }
+    // The texture's own checks moved to `tests/texture.rs`, which asserts them
+    // against the cooked asset the renderer actually samples rather than against
+    // a generator that no longer runs.
 
     fn subtract(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
         [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
