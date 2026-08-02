@@ -691,6 +691,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "example-model"
+version = "0.0.0"
+dependencies = [
+ "slop-app",
+ "slop-asset",
+ "slop-core",
+ "slop-math",
+ "slop-render",
+ "slop-rhi",
+]
+
+[[package]]
 name = "example-triangle"
 version = "0.0.0"
 dependencies = [
@@ -2158,6 +2170,7 @@ dependencies = [
  "egui",
  "slop-asset",
  "slop-core",
+ "slop-math",
  "slop-rhi",
  "thiserror 2.0.19",
 ]

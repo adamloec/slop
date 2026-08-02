@@ -92,6 +92,22 @@ impl Asset for Texture {
     }
 }
 
+impl Asset for crate::Material {
+    const KIND: &'static str = "material";
+
+    fn decode(bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(Self::read(bytes)?)
+    }
+}
+
+impl Asset for crate::Model {
+    const KIND: &'static str = "model";
+
+    fn decode(bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(Self::read(bytes)?)
+    }
+}
+
 /// Why an asset could not be loaded.
 #[derive(Debug, Error)]
 pub enum AssetError {

@@ -132,7 +132,7 @@ What M2 still owes is the half that needs a renderer to be worth anything:
 materials, a Sponza-scale scene, and the debug UI. §9 has the order and why
 `slop-render` comes out of the examples first.
 
-787 tests. Clippy and rustdoc clean under `-D warnings` in both feature
+792 tests. Clippy and rustdoc clean under `-D warnings` in both feature
 configurations, Vulkan validation reporting nothing, and every crate containing
 `unsafe` passing under Miri — `slop-ecs` under both Stacked and Tree Borrows.
 
@@ -171,20 +171,19 @@ finished.
 | Shader cooking driven onto the shared cache | Landed |
 | The cooked mesh format — binary, versioned, validated on load | Landed |
 | glTF import — positions, normals, UVs, indices | Landed |
-| Materials — the cooked format, glTF import, referenced images | Landed |
-| Node transforms flattened into a cooked model | Landed |
-| Rendering a list of meshes with their materials | **Outstanding** |
 | Texture cooking — PNG to a versioned artifact | Landed |
+| Block compression — BC7, 4:1, with the golden image unchanged | Landed |
 | `examples/cube` drawing entirely from cooked assets | Landed |
 | `Assets<T>` — the registry, handles, load/reload/unload | Landed |
-| `slop-render` — the frame renderer, both examples driven by it | Landed |
 | Hot reload — `Assets::reload_changed` + `slop-cli cook --watch` | Landed |
-| Block compression — BC7, 4:1, with the golden image unchanged | Landed |
+| `slop-render` — the frame renderer, all examples driven by it | Landed |
 | Shader reflection — layouts read from the cooked shader, not restated | Landed |
-| Material system | **Outstanding** — blocked on shader reflection |
-| glTF materials, multiple meshes, scene hierarchy | **Outstanding** |
+| Debug UI (§10.2) — the egui overlay and frame timing | Landed |
+| Materials — the cooked format, glTF import, referenced images | Landed |
+| Node transforms flattened into a cooked model | Landed |
+| Rendering a model's meshes with their materials | Landed — `MeshRenderer`, `examples/model` |
 | A Sponza-scale scene loading and drawing | **Outstanding** — the exit criterion |
-| Debug UI (§10.2) — frame timing, entity inspector | **Outstanding** |
+| Debug UI — the entity inspector over `slop-reflect` | **Outstanding** |
 | Mipmaps | **Outstanding** |
 
 Async streaming has **moved to M3**. It was never an M2 exit criterion, and

@@ -53,6 +53,20 @@ pub enum RenderError {
         found: u32,
     },
 
+    /// An asset a model names could not be read or decoded.
+    ///
+    /// Names the logical path rather than only the underlying failure: a model
+    /// referencing something uncooked is the common case, and "not found" with
+    /// no path is unactionable.
+    #[error("loading '{logical}'")]
+    Asset {
+        /// What was being loaded.
+        logical: String,
+        /// Why it failed.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
     /// Something underneath failed.
     #[error(transparent)]
     Rhi(#[from] slop_rhi::RhiError),

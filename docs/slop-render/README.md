@@ -4,19 +4,23 @@
 
 ## 1. Purpose
 
-The renderer — `DESIGN.md` §4. Today it owns exactly one thing: the loop that
-turns a swapchain into a stream of frames.
+The renderer — `DESIGN.md` §4. Three things today: the loop that turns a
+swapchain into a stream of frames, the pass that draws a cooked model, and the
+one that draws a debug overlay on top.
 
 ```
  window size ──► prepare ──► (resize your attachments)
                    │
                    ▼
               render(|frame| …) ──► acquire, record, submit, present
+                   │
+                   ├──► MeshRenderer::record   — the model, with its materials
+                   └──► Overlay::draw          — the debug UI, over it
 ```
 
-The render graph, materials, and the passes that make up Stage A arrive at M3
-(`PLAN.md` §9). This crate exists now because everything M2 still owes — the
-debug UI, materials, Sponza — needed a frame loop that was not copy-pasted.
+The render graph and the passes that make up Stage A arrive at M3 (`PLAN.md`
+§9). This crate exists now because everything M2 still owed — the debug UI,
+materials, Sponza — needed a frame loop that was not copy-pasted.
 
 ## 2. Status
 
@@ -27,6 +31,7 @@ debug UI, materials, Sponza — needed a frame loop that was not copy-pasted.
 | Both examples driven by it, goldens unchanged | Landed | M2 |
 | `VertexBinding` — vertex layout from cooked reflection | Landed | M2 |
 | `Overlay` — the debug UI's Vulkan backend (§8) | Landed | M2 |
+| `MeshRenderer` — draws a cooked model, one pipeline for every material | Landed — see §10 | M2 |
 | Render graph — passes declaring reads and writes | Planned | M3 |
 | Material system | Planned — its blocker, shader reflection, has landed | M2 |
 | Clustered forward+, shadows, IBL, HDR/tonemap | Planned | M3 |
@@ -43,6 +48,7 @@ debug UI, materials, Sponza — needed a frame loop that was not copy-pasted.
 | `Target` | The image being drawn to, and the states it enters and leaves in |
 | `FrameOutcome` | Whether a frame was presented or skipped |
 | `Overlay` | Draws what an immediate-mode UI tessellated, over a target |
+| `MeshRenderer` | Loads a cooked model and draws every mesh it places |
 
 ## 4. Why two calls and not one
 
@@ -204,3 +210,68 @@ right. Where they do not, the caller states the format and reflection is used to
 *check* the shader still reads what was assumed — which is what `check_layout`
 does. A per-location override on `VertexBinding` is recorded in `PLAN.md` §6.1
 for when a second packed layout appears.
+
+## 10. The mesh renderer
+
+`MeshRenderer` loads whatever a cooked `Model` names — meshes, materials, the
+textures those materials reference — and draws all of it.
+
+```
+ models/sponza.model ──► meshes ──► vertex/index buffers
+                    ├──► materials ──► one storage buffer, indexed per draw
+                    └──► textures ──► bindless heap slots
+```
+
+**One pipeline, however many materials.** A pipeline per material is the shape an
+engine grows into by accident, and it costs a bind and a barrier per surface.
+Here a material is a row in a storage buffer and a texture is a slot in the heap,
+so consecutive draws differ only by two integers in their push constants. That is
+also what makes `DESIGN.md` §4.2 stage B reachable: a draw list built on the GPU
+has nothing per-draw left to bind.
+
+**Why the material buffer exists at all.** Vulkan guarantees only 128 bytes of
+push constants, and a model-view-projection plus a normal matrix is already 112.
+The material's colour, factors and four texture indices do not fit. Putting them
+in an indexed buffer is what the bindless storage-buffer binding was added for.
+
+**The normal matrix is not the model matrix.** They agree for a rigid transform
+and diverge under non-uniform scale, where using the model matrix tilts every
+normal — which reads as a lighting bug rather than a transform one. glTF scenes
+scale non-uniformly often enough that this is not theoretical, and two tests pin
+it: a rotation must come back unchanged, and a 4× stretch along X must *divide*
+the normal's X by four.
+
+**`NO_TEXTURE` is `u32::MAX`, not zero.** Zero is a perfectly good heap slot, so
+a material defaulting to it would sample whichever texture happened to load
+first — a plausible-looking picture rather than an error.
+
+### Why `examples/cube` was not migrated onto it
+
+It would have been the natural demonstration, and it is the wrong one. The cube's
+golden image is guarded by a reference approved *before* the content pipeline
+existed (§5.4), which is what makes it an oracle rather than a record of what the
+code currently does. Rendering it through a different shader changes the pixels
+and forces re-approval, and the property is gone for good.
+
+So `examples/model` is the consumer instead, and it knows nothing about what it
+draws: point it at a model with `SLOP_MODEL` and it frames the thing from the
+bounds of its own geometry.
+
+## 11. What the mesh renderer does not do yet
+
+Recorded here as well as in `PLAN.md` §6.1, because a reader of this crate should
+not have to find out by rendering something:
+
+- **Back-face culling is off entirely.** `double_sided` is a per-material
+  property and culling is per-pipeline, so honouring it needs two pipelines and a
+  sort. Culling everything would erase single-sided foliage; culling nothing
+  costs fill rate and hides inverted winding.
+- **sRGB is not applied.** Textures upload as `UNORM` and the shader reads raw
+  bytes, so an albedo authored in sRGB is displayed too dark.
+  `TextureSlot::is_srgb` already records which textures need the transfer;
+  applying it belongs with real shading at M3.
+- **Alpha blending is not sorted.** `AlphaMode::Mask` works — it is a `discard` —
+  and `Blend` currently renders as opaque, because blending without a back-to-
+  front sort is worse than not blending.
+- **Nothing is culled.** Every instance is drawn every frame. Frustum culling and
+  the BVH are `slop-scene`'s at M3.

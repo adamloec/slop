@@ -1,19 +1,23 @@
 [package]
-name = "slop-render"
+name = "example-model"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish = false
+
+[[bin]]
+name = "example-model"
+path = "src/main.rs"
 
 [dependencies]
-egui = { workspace = true }
+slop-app = { workspace = true }
 slop-asset = { workspace = true }
-slop-core = { workspace = true }
+slop-core = { workspace = true, features = ["subscriber"] }
 slop-math = { workspace = true }
+slop-render = { workspace = true }
 slop-rhi = { workspace = true }
-
-thiserror = { workspace = true }
 
 [lints]
 workspace = true
