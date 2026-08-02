@@ -48,7 +48,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use slop_asset::mesh::{Mesh, Vertex};
 use slop_asset::texture::{Format, Texture};
-use slop_asset::{AlphaMode, Cache, CacheKey, Material, TextureSlot};
+use slop_asset::{AlphaMode, Cache, CacheKey, Instance, Material, Model, TextureSlot};
 use slop_core::diagnostics::tracing::{debug, info, warn};
 
 use crate::cook::Summary;
@@ -58,7 +58,8 @@ use crate::cook::Summary;
 /// Independent of the shader cooker's version: changing how meshes are imported
 /// should not recompile shaders, and a shared constant would make it.
 /// 2 — materials and the images they reference are cooked too.
-const COOKER_VERSION: u32 = 2;
+/// 3 — the node hierarchy is flattened into a cooked model.
+const COOKER_VERSION: u32 = 3;
 
 /// Where source models live, relative to the project root.
 const SOURCE_DIRECTORY: &str = "assets";
@@ -150,6 +151,10 @@ fn cook_file(
     // naming one that was never written would leave a dangling reference in the
     // cache.
     let materials = cook_materials(cache, relative, &document, &images, &key, force, summary)?;
+
+    // Where each mesh sits. Cooked from the same parse, so a model can never
+    // name a mesh this run did not write.
+    cook_model(cache, relative, &document, &key, force, summary)?;
 
     for (index, mesh) in document.meshes().enumerate() {
         let name = mesh_name(&mesh, index);
@@ -665,9 +670,204 @@ fn to_rgba8(image: &gltf::image::Data) -> Result<Vec<u8>> {
 
     Ok(pixels)
 }
+/// Flatten the node hierarchy into placed mesh instances.
+///
+/// A glTF node carries a transform and may reference a mesh; children inherit
+/// their parent's transform. Walking the tree with the accumulated matrix is
+/// what turns "this pillar, relative to this bay, relative to the building" into
+/// a world position. Without it every mesh would sit at the origin, which for a
+/// building means several hundred meshes in one heap.
+///
+/// The default scene is used when the file names one, and every scene otherwise
+/// — a glTF may define several, and silently taking the first would drop the
+/// rest with nothing to say so.
+fn cook_model(
+    cache: &Cache,
+    relative: &Path,
+    document: &gltf::Document,
+    key: &CacheKey,
+    force: bool,
+    summary: &mut Summary,
+) -> Result<()> {
+    let logical = model_path(relative);
+    let artifact = cache.artifact(&logical);
+
+    if !force && cache.is_current(&artifact, key) {
+        debug!(logical, "up to date");
+        summary.skipped += 1;
+        return Ok(());
+    }
+
+    let mut model = Model::default();
+
+    let roots: Vec<gltf::Node<'_>> = match document.default_scene() {
+        Some(scene) => scene.nodes().collect(),
+        None => document.scenes().flat_map(|scene| scene.nodes()).collect(),
+    };
+
+    for node in roots {
+        place(&node, IDENTITY, relative, &mut model);
+    }
+
+    cache.prepare(&artifact)?;
+    std::fs::write(&artifact, model.write())
+        .with_context(|| format!("writing {}", artifact.display()))?;
+    cache.record(&artifact, key)?;
+
+    info!(
+        logical,
+        instances = model.instances.len(),
+        meshes = model.meshes().len(),
+        "cooked model"
+    );
+    summary.cooked += 1;
+
+    Ok(())
+}
+
+/// Column-major identity.
+const IDENTITY: [f32; 16] = [
+    1.0, 0.0, 0.0, 0.0, //
+    0.0, 1.0, 0.0, 0.0, //
+    0.0, 0.0, 1.0, 0.0, //
+    0.0, 0.0, 0.0, 1.0,
+];
+
+/// Where a cooked model lives.
+fn model_path(relative: &Path) -> String {
+    format!("models/{}.model", stem_segments(relative).join("/"))
+}
+
+/// Record one node's primitives, then recurse into its children.
+fn place(node: &gltf::Node<'_>, parent: [f32; 16], relative: &Path, model: &mut Model) {
+    let world = multiply(parent, flatten(node.transform().matrix()));
+
+    if let Some(mesh) = node.mesh() {
+        let name = mesh_name(&mesh, mesh.index());
+
+        // One instance per *primitive*, because each primitive is its own
+        // cooked artifact and its own draw call — a mesh of three materials is
+        // three draws at the same transform.
+        for primitive in 0..mesh.primitives().len() {
+            model.instances.push(Instance {
+                mesh: logical_path(relative, &name, primitive),
+                transform: world,
+            });
+        }
+    }
+
+    for child in node.children() {
+        place(&child, world, relative, model);
+    }
+}
+
+/// `[[f32; 4]; 4]` as sixteen floats, preserving column-major order.
+fn flatten(matrix: [[f32; 4]; 4]) -> [f32; 16] {
+    let mut out = [0.0; 16];
+
+    for (column, values) in matrix.iter().enumerate() {
+        out[column * 4..column * 4 + 4].copy_from_slice(values);
+    }
+
+    out
+}
+
+/// Column-major matrix product: the transform `left` then `right` describes.
+///
+/// Written out rather than taken from `glam`, because `slop-cli` has no reason
+/// to depend on the maths crate for one multiply — and because writing it makes
+/// the column-major convention visible at the point it matters.
+fn multiply(left: [f32; 16], right: [f32; 16]) -> [f32; 16] {
+    let mut out = [0.0; 16];
+
+    for column in 0..4 {
+        for row in 0..4 {
+            let mut sum = 0.0;
+
+            for step in 0..4 {
+                // Column-major: element (row, step) of `left` is at
+                // `step * 4 + row`.
+                sum += left[step * 4 + row] * right[column * 4 + step];
+            }
+
+            out[column * 4 + row] = sum;
+        }
+    }
+
+    out
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Column-major translation.
+    fn translate(x: f32, y: f32, z: f32) -> [f32; 16] {
+        let mut out = IDENTITY;
+        out[12] = x;
+        out[13] = y;
+        out[14] = z;
+        out
+    }
+
+    /// Column-major uniform scale.
+    fn scale(factor: f32) -> [f32; 16] {
+        let mut out = IDENTITY;
+        out[0] = factor;
+        out[5] = factor;
+        out[10] = factor;
+        out
+    }
+
+    #[test]
+    fn flattening_preserves_column_major_order() {
+        // glTF stores matrices column-major and so does the cooked format. A
+        // row-major read transposes every rotation, which places objects at
+        // plausible-but-wrong angles rather than failing.
+        let matrix = [
+            [1.0, 2.0, 3.0, 4.0],
+            [5.0, 6.0, 7.0, 8.0],
+            [9.0, 10.0, 11.0, 12.0],
+            [13.0, 14.0, 15.0, 16.0],
+        ];
+
+        assert_eq!(
+            flatten(matrix),
+            [
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0,
+                16.0
+            ]
+        );
+    }
+
+    #[test]
+    fn multiplying_by_identity_changes_nothing() {
+        let moved = translate(3.0, -1.0, 2.0);
+
+        assert_eq!(multiply(IDENTITY, moved), moved);
+        assert_eq!(multiply(moved, IDENTITY), moved);
+    }
+
+    #[test]
+    fn a_parent_transform_applies_to_its_child() {
+        // The operand order that is easy to invert and impossible to see. A
+        // parent scaled by two, holding a child translated one unit along X,
+        // puts that child at *two* units — the parent scales the child's offset.
+        // Swapping the operands puts it at one, which reads as a plausible
+        // layout rather than as a bug.
+        let world = multiply(scale(2.0), translate(1.0, 0.0, 0.0));
+
+        assert_eq!(world[12..15], [2.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn nested_translations_accumulate() {
+        let world = multiply(
+            multiply(translate(1.0, 0.0, 0.0), translate(0.0, 2.0, 0.0)),
+            translate(0.0, 0.0, 3.0),
+        );
+
+        assert_eq!(world[12..15], [1.0, 2.0, 3.0]);
+    }
 
     #[test]
     fn a_name_becomes_a_logical_path() {

@@ -132,7 +132,7 @@ What M2 still owes is the half that needs a renderer to be worth anything:
 materials, a Sponza-scale scene, and the debug UI. §9 has the order and why
 `slop-render` comes out of the examples first.
 
-770 tests. Clippy and rustdoc clean under `-D warnings` in both feature
+786 tests. Clippy and rustdoc clean under `-D warnings` in both feature
 configurations, Vulkan validation reporting nothing, and every crate containing
 `unsafe` passing under Miri — `slop-ecs` under both Stacked and Tree Borrows.
 
@@ -172,7 +172,7 @@ finished.
 | The cooked mesh format — binary, versioned, validated on load | Landed |
 | glTF import — positions, normals, UVs, indices | Landed |
 | Materials — the cooked format, glTF import, referenced images | Landed |
-| Node transforms and a scene artifact | **Outstanding** |
+| Node transforms flattened into a cooked model | Landed |
 | Rendering a list of meshes with their materials | **Outstanding** |
 | Texture cooking — PNG to a versioned artifact | Landed |
 | `examples/cube` drawing entirely from cooked assets | Landed |
@@ -727,6 +727,7 @@ freely, never seams.
 | Scene setup — uploads, pipeline, draw recording | `examples/cube/src/scene.rs` | `slop-render` + `slop-asset` | **Rebuilt.** It proves the pieces fit together; it is not the shape an engine wants. One hard-coded pipeline, a raw sampler freed by hand, `CARGO_MANIFEST_DIR` in the load path, and push constants restated from the shader — all of it example-grade on purpose, none of it moves. | M3 |
 | `VertexBinding` cannot express a buffer format that differs from the shader's type | `slop-render/src/vertex.rs` | A per-location format override | **Extended.** Reflection is a fact about the shader; the buffer format is a decision about memory. They coincide for every float attribute and diverge for a packed one — egui's four-byte colour read as a `float4`. The overlay states its layout and uses reflection to check the shader, which is correct and is not derivation. | M3 |
 | A glTF-referenced image is cooked separately from the same file under `assets/` | `slop-cli` | One artifact per distinct source image | **Replaced.** `assets/checker.png` cooks to `textures/checker.tex` *and*, because `cube.gltf` references it, to `textures/cube.0.tex`. Correct and wasteful. Deduplicating means keying artifacts by content rather than by name, which is a cache change rather than an importer one. | M2/M3 |
+| A cooked model is a flat list, not a hierarchy | `slop-asset/src/model.rs` | `slop-scene`'s runtime tree, once something articulates | **Joined by.** Right for a static level, which is drawn rather than posed, and wrong the moment a parent joint animates. The tree is a *runtime* structure `slop-scene` owns; this format records where things ended up. | M5 |
 | Materials carry no occlusion or HDR emissive | `slop-asset/src/material.rs` | More slots and a float texture format | **Extended.** Occlusion is a baked term a real-time renderer computes or ignores; float images are refused by name rather than silently narrowed, and arrive with IBL. | M3 |
 | Frame timing is CPU wall-clock, not GPU time | `examples/cube/src/main.rs` | GPU timestamp queries written into the command buffer | **Joined by.** Wall-clock between frames is the honest measure of how fast frames arrive and a poor one for attributing cost to a pass — it includes waiting for the GPU. Attribution needs timestamps, and the render graph is what will know which pass one belongs to. | M3 |
 | The overlay assumes one scale factor for the whole frame | `slop-render/src/overlay.rs` | Per-viewport scale, once a window can span two monitors at different scalings | **Extended.** `pixels_per_point` arrives per frame and applies to every draw in it, which is right until a window straddles a 100% and a 150% display. | M3 |

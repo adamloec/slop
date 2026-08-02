@@ -227,3 +227,41 @@ fn that_material_is_cooked_and_names_its_texture() {
         "the material names '{albedo}', which is not cooked"
     );
 }
+
+#[test]
+fn the_cube_model_places_its_one_mesh() {
+    // The flattened hierarchy. `cube.gltf` has a single node at the origin, so
+    // the interesting assertion is not the value but that the chain exists at
+    // all: the model names a mesh that is cooked, at a transform that is a real
+    // matrix rather than zeroes.
+    let project = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..");
+    let vfs = Vfs::for_project(&project);
+
+    let Ok(bytes) = vfs.read("models/cube.model") else {
+        eprintln!("skipping: run `cargo run -p slop-cli -- cook`");
+        return;
+    };
+
+    let model = slop_asset::Model::read(&bytes).expect("a cooked model must decode");
+
+    assert_eq!(model.instances.len(), 1);
+    assert_eq!(model.instances[0].mesh, "meshes/cube.Cube.0.mesh");
+    assert!(
+        vfs.exists(&model.instances[0].mesh),
+        "the model names a mesh that is not cooked"
+    );
+
+    // Identity, since the node carries no transform. A zeroed matrix would
+    // collapse every vertex to the origin and is what an unwritten transform
+    // looks like.
+    let expected = [
+        1.0, 0.0, 0.0, 0.0, //
+        0.0, 1.0, 0.0, 0.0, //
+        0.0, 0.0, 1.0, 0.0, //
+        0.0, 0.0, 0.0, 1.0_f32,
+    ];
+
+    assert_eq!(model.instances[0].transform, expected);
+}
