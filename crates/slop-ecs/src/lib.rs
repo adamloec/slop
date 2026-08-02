@@ -57,6 +57,7 @@ mod error;
 mod query;
 mod resource;
 mod schedule;
+mod serialize;
 mod signature;
 mod system;
 mod tick;
@@ -71,6 +72,7 @@ pub use query::{
     With, Without,
 };
 pub use schedule::{Schedule, Stage};
+pub use serialize::{ValueError, from_value, to_value, validate, write_value};
 pub use signature::Signature;
 pub use system::{System, WorldCell, conflicts};
 pub use tick::{ElementTicks, MAX_AGE, Tick, Ticks};

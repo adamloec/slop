@@ -71,13 +71,14 @@ gpu-allocator = { version = "0.28.0", default-features = false, features = [
 # Work-stealing thread pool, behind `slop-core`'s `JobSystem` seam and named
 # nowhere else. DESIGN.md §2.5 calls the scheduler foundational, and a persistent
 # pool supporting scoped borrows needs one lifetime erasure that has no safe
-# formulation — which is what this crate exists to have already gotten right.
-# Writing our own would put that `unsafe` in the one crate CONVENTIONS.md §7
-# does not sanction it in.
+# formulation. Its correctness argument — every scoped task finishes before the
+# scope returns, including on panic — is the kind whose failures ordinary tests
+# do not catch, so the well-trodden implementation is worth more than the owned
+# one. A judgement, not a rule; `jobs.rs` gives the full reasoning and the costs.
 #
-# The containment rule is in `jobs.rs` and matters more than the version: no
-# `rayon` type appears in any public signature, so replacing it later — for
-# fibers, or for priority lanes, the two things it forecloses — is one file.
+# The containment rule matters more than the version: no `rayon` type appears in
+# any public signature, so replacing it later — for fibers, or for priority
+# lanes, the two things it forecloses — is one file.
 rayon = "1.12.0"
 
 # Error enums for library crates. `anyhow` is for application boundaries only,

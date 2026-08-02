@@ -13,17 +13,32 @@
 //! is what §2.5 means by foundational: dispatch is now cheap, so callers may
 //! assume tasks are many and small.
 //!
-//! That pool is `rayon`, held privately. The reason is one line of the problem
-//! statement: a persistent pool that supports [`scope`](JobSystem::scope) —
-//! tasks borrowing the caller's stack — must push a `'scope` closure into a
-//! queue shared with `'static` workers, and erasing that lifetime **has no safe
-//! formulation**. Writing our own would put that `unsafe` in the single crate
-//! `docs/CONVENTIONS.md` §7 does not sanction it in, and would mean proving a
-//! concurrent algorithm whose failure modes ordinary tests do not catch.
+//! That pool is `rayon`, held privately. The problem it solves is narrow and
+//! sharp: a persistent pool supporting [`scope`](JobSystem::scope) — tasks
+//! borrowing the caller's stack — must push a `'scope` closure into a queue
+//! shared with `'static` workers, and erasing that lifetime **has no safe
+//! formulation**. The correctness argument is that every such task completes
+//! before the scope returns, including when one panics, and getting it wrong
+//! produces a use-after-free on a thread that has already moved on. That is the
+//! failure class ordinary tests do not catch and Miri only partly reaches.
 //!
-//! What that costs, stated plainly: rayon has no fibers (a job cannot yield
-//! mid-execution while waiting on a dependency) and no priority or deadline
-//! lanes. Both are rewrites of the pool whichever way this went.
+//! So this is a case where the well-trodden implementation is worth more than
+//! the owned one, and it is that judgement rather than a rule. `CONVENTIONS.md`
+//! §7 confines `unsafe` to three crates and says plainly that adding a fourth is
+//! a design discussion — it is a prompt to think, not a prohibition, and citing
+//! it as the reason here would be circular. If a future requirement is worth the
+//! proof, §7 gets amended and the pool comes in-house.
+//!
+//! What that buys and costs, stated plainly. It buys a scoped-spawn
+//! implementation that nests correctly, propagates panic payloads, and is
+//! exercised by most of the Rust ecosystem. It costs fibers (a job cannot yield
+//! mid-execution while waiting on a dependency) and priority or deadline lanes —
+//! both of which are rewrites of the pool whichever way this went — and it costs
+//! Miri coverage: `rayon-core` and `crossbeam-epoch` both trip the experimental
+//! aliasing models, so nothing that touches this pool can be checked under it.
+//! `slop-ecs`'s `tests/cell.rs` is what works around that, and finding it *after*
+//! committing is the argument for weighing a dependency on its merits rather
+//! than on which rule it satisfies.
 //!
 //! **The containment rule, which is what keeps the exit cheap:** no `rayon` type
 //! appears in any public signature here or anywhere else in the engine. [`Scope`]

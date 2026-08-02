@@ -31,10 +31,12 @@
 //! reads as one entity mysteriously acquiring another's components.
 
 use slop_core::{FxHashMap, HandleAllocator};
-use slop_reflect::{Reflect, TypeId, TypeInfo, TypeRegistry};
+use slop_reflect::{Reflect, TypeId, TypeInfo, TypeRegistry, Value};
 
 use crate::query::{Query, QueryData, ReadOnlyQueryData};
-use crate::{Archetype, EcsError, ElementTicks, Entity, EntityTag, Row, Signature, Tick, Ticks};
+use crate::{
+    Archetype, EcsError, ElementTicks, Entity, EntityTag, Row, Signature, Tick, Ticks, serialize,
+};
 
 /// Where an entity's components are.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -546,6 +548,147 @@ impl World {
         self.by_signature.insert(signature.clone(), index);
 
         Ok(index)
+    }
+
+    /// Read a component as a [`Value`].
+    ///
+    /// The reflection path: no `T`, so a component declared by a guest module
+    /// reads back exactly as a host-native one does.
+    ///
+    /// # Errors
+    ///
+    /// [`EcsError::UnregisteredComponent`] if `type_id` is not registered,
+    /// [`EcsError::NoSuchEntity`] if the entity is not alive, and
+    /// [`EcsError::Value`] if the type cannot be described — an opaque component
+    /// has nothing to read out.
+    pub fn component_value(&self, entity: Entity, type_id: TypeId) -> Result<Value, EcsError> {
+        let info = self
+            .registry
+            .get(type_id)
+            .ok_or(EcsError::UnregisteredComponent { type_id })?;
+
+        let location = self
+            .locations
+            .get(&entity)
+            .ok_or(EcsError::NoSuchEntity { entity })?;
+
+        let pointer = self.archetypes[location.archetype]
+            .column(type_id)
+            .and_then(|column| column.get(location.row.0))
+            .ok_or(EcsError::MissingComponent { entity, type_id })?;
+
+        // SAFETY: the column was built from this exact `TypeInfo`, so the
+        // element is an initialized value of it, and the borrow of `self` keeps
+        // it alive for the read. Nothing is moved out — owning fields are
+        // cloned.
+        Ok(unsafe { serialize::to_value(info, pointer, &self.registry) }?)
+    }
+
+    /// Give `entity` a component built from a [`Value`].
+    ///
+    /// The other half of [`component_value`](Self::component_value), and what a
+    /// scene loader inserts through.
+    ///
+    /// # Errors
+    ///
+    /// As [`component_value`](Self::component_value), plus [`EcsError::Value`]
+    /// if the value does not match the type. **Nothing is inserted on an
+    /// error** — the value is checked in full before any memory is written.
+    pub fn insert_value(
+        &mut self,
+        entity: Entity,
+        type_id: TypeId,
+        value: &Value,
+    ) -> Result<(), EcsError> {
+        let info = self
+            .registry
+            .get(type_id)
+            .ok_or(EcsError::UnregisteredComponent { type_id })?;
+        let layout = info.layout();
+
+        // Both failure paths are taken before anything is written, so the write
+        // below cannot leave a value stranded in scratch space.
+        serialize::validate(value, info, &self.registry)?;
+
+        if !self.contains(entity) {
+            return Err(EcsError::NoSuchEntity { entity });
+        }
+
+        // SAFETY: `with_scratch` hands out uninitialized space for exactly this
+        // layout; `write` fills it, having been validated above; and
+        // `insert_raw` moves out of it, so nothing is left for `with_scratch` to
+        // free beyond the allocation itself.
+        unsafe {
+            serialize::with_scratch(layout, |scratch| {
+                let info = self
+                    .registry
+                    .get(type_id)
+                    .expect("resolved immediately above");
+                serialize::write_value(value, info, scratch, &self.registry);
+
+                self.insert_raw(entity, type_id, scratch)
+                    .expect("the entity is alive and the type is registered");
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Read a resource as a [`Value`].
+    ///
+    /// # Errors
+    ///
+    /// [`EcsError::UnregisteredResource`] if `type_id` is not registered, and
+    /// [`EcsError::Value`] if the type cannot be described.
+    pub fn resource_value(&self, type_id: TypeId) -> Result<Option<Value>, EcsError> {
+        let info = self
+            .registry
+            .get(type_id)
+            .ok_or(EcsError::UnregisteredResource { type_id })?;
+
+        let Some(pointer) = self.resources.get(type_id) else {
+            return Ok(None);
+        };
+
+        // SAFETY: as `component_value` — the column was built from this
+        // `TypeInfo` and holds one initialized element.
+        Ok(Some(unsafe {
+            serialize::to_value(info, pointer, &self.registry)
+        }?))
+    }
+
+    /// Install a resource built from a [`Value`].
+    ///
+    /// # Errors
+    ///
+    /// As [`resource_value`](Self::resource_value), plus [`EcsError::Value`] if
+    /// the value does not match the type. Nothing is installed on an error.
+    pub fn insert_resource_value(
+        &mut self,
+        type_id: TypeId,
+        value: &Value,
+    ) -> Result<(), EcsError> {
+        let info = self
+            .registry
+            .get(type_id)
+            .ok_or(EcsError::UnregisteredResource { type_id })?;
+
+        serialize::validate(value, info, &self.registry)?;
+
+        let info = info.clone();
+        let tick = self.tick;
+
+        // SAFETY: `with_scratch` hands out uninitialized space for exactly this
+        // layout, `write` fills it after validation, and `Resources::insert`
+        // moves out of it.
+        unsafe {
+            serialize::with_scratch(info.layout(), |scratch| {
+                serialize::write_value(value, &info, scratch, &self.registry);
+                self.resources.insert(&info, scratch, tick);
+            });
+        }
+
+        Ok(())
     }
 
     /// Install a resource, replacing and dropping any previous value.

@@ -126,7 +126,7 @@ Two consequences worth carrying into M0:
 renders with a golden image guarding it, and the reflection and ECS foundations
 are built through queries.
 
-570 tests. Clippy and rustdoc clean under `-D warnings` in both feature
+588 tests. Clippy and rustdoc clean under `-D warnings` in both feature
 configurations, Vulkan validation reporting nothing, and every crate containing
 `unsafe` passing under Miri — `slop-ecs` under both Stacked and Tree Borrows.
 
@@ -143,13 +143,13 @@ configurations, Vulkan validation reporting nothing, and every crate containing
 | System scheduling from read/write sets — `System`, `WorldCell`, `Schedule` | Landed |
 | Resources — data the world holds exactly one of | Landed |
 | Layout fingerprints for the §2.3 guest boundary | Landed |
-| Serialization — `Value`, the text format, round-trip harness | Landed for values |
-| Scene serialization — the world to text and back | Outstanding — needs `Value` ↔ component memory in `slop-ecs` |
+| Serialization — `Value`, the text format, `Value` ↔ component memory | Landed |
+| Scene serialization — the whole world to text and back | Outstanding — the container around what now works per component |
 
-**M1 is functionally complete.** What remains is the second half of
-serialization: `Value` is built and round-trips through text, and what is left is
-converting between a `Value` and raw component memory — the `unsafe` half, which
-lives in `slop-ecs` rather than `slop-reflect` per `CONVENTIONS.md` §7.
+**M1 is functionally complete.** What remains is the scene container: a single
+component now round-trips memory → `Value` → text → `Value` → memory, and what
+is left is the file that holds a whole world of them. Both halves of the round
+trip `DESIGN.md` §5 asks for are built and tested.
 
 **Deferred structural change diverges from the conventional answer, on purpose.**
 Bevy and Unity's `EntityCommandBuffer` both return a usable entity id from a

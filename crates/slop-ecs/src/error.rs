@@ -30,6 +30,24 @@ pub enum EcsError {
         type_id: TypeId,
     },
 
+    /// A value and the type it was to be written as do not agree.
+    ///
+    /// From `docs/DESIGN.md` §5's round trip and from scene loading: a file
+    /// naming a field the type does not have, or holding a number too large for
+    /// it. Reported rather than coerced, because a save that loads wrong is
+    /// worse than one that refuses to load.
+    #[error(transparent)]
+    Value(#[from] crate::ValueError),
+
+    /// The entity is alive but does not hold the component asked for.
+    #[error("entity {entity:?} has no component {type_id}")]
+    MissingComponent {
+        /// The entity that was asked.
+        entity: crate::Entity,
+        /// The component it does not have.
+        type_id: TypeId,
+    },
+
     /// The entity is not alive.
     ///
     /// Either never spawned, or despawned since the handle was issued —
