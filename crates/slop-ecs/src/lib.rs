@@ -53,11 +53,12 @@
 mod archetype;
 mod column;
 mod command;
+pub mod document;
 mod error;
 mod query;
 mod resource;
 mod schedule;
-mod serialize;
+pub(crate) mod serialize;
 mod signature;
 mod system;
 mod tick;
@@ -66,6 +67,7 @@ mod world;
 pub use archetype::{Archetype, EntityTag, Row};
 pub use column::Column;
 pub use command::{CommandBuffer, Target};
+pub use document::{LoadError, Loaded, Saved};
 pub use error::EcsError;
 pub use query::{
     Access, AccessKind, Added, Changed, Mut, Or, Query, QueryData, QueryFilter, ReadOnlyQueryData,

@@ -89,6 +89,31 @@ pub fn to_text(value: &Value) -> String {
     out
 }
 
+/// Write a value as text, without naming the outer struct's own type.
+///
+/// For a container format that has already named it. A world file writes a
+/// component's type once, in front of the value, so that a primitive component
+/// is identifiable too — and repeating it inside the braces would be noise:
+///
+/// ```text
+/// game::Position { x: 1.0, y: 2.0, z: 0.0 }    ← the container wrote the path
+/// u32 7                                        ← which a primitive also needs
+/// ```
+///
+/// Identical to [`to_text`] for anything that is not a struct, and nested
+/// structs still name themselves — only the outermost one is anonymous, since it
+/// is the only one the container spoke for.
+pub fn to_text_body(value: &Value) -> String {
+    let Value::Struct(structure) = value else {
+        return to_text(value);
+    };
+
+    let mut out = String::new();
+    write_struct_body(&mut out, structure, 0);
+
+    out
+}
+
 /// Write `value` at `depth`, without a trailing newline.
 fn write_value(out: &mut String, value: &Value, depth: usize) {
     match value {
@@ -114,9 +139,15 @@ fn write_value(out: &mut String, value: &Value, depth: usize) {
     }
 }
 
-/// Write a struct across several lines.
+/// Write a struct across several lines, naming its type.
 fn write_struct(out: &mut String, value: &Struct, depth: usize) {
-    write!(out, "{} {{", value.path()).expect("infallible");
+    write!(out, "{} ", value.path()).expect("infallible");
+    write_struct_body(out, value, depth);
+}
+
+/// Write a struct's braces and fields, without naming its type.
+fn write_struct_body(out: &mut String, value: &Struct, depth: usize) {
+    out.push('{');
 
     if value.is_empty() {
         out.push(char::from(b'}'));
@@ -193,7 +224,7 @@ fn escape_or_push(out: &mut String, value: char) {
 /// says wrongly — a missing field, an unknown field, a number that does not fit,
 /// a struct whose written path disagrees with the expected one.
 pub fn from_text(text: &str, info: &TypeInfo, registry: &TypeRegistry) -> Result<Value, TextError> {
-    let mut parser = Parser::new(text);
+    let mut parser = Reader::new(text);
     let value = parser.value(info, registry)?;
 
     parser.skip_trivia();
@@ -205,18 +236,26 @@ pub fn from_text(text: &str, info: &TypeInfo, registry: &TypeRegistry) -> Result
 }
 
 /// A cursor over the text, tracking position for error messages.
-struct Parser<'a> {
+#[derive(Debug)]
+pub struct Reader<'a> {
     text: &'a str,
     offset: usize,
 }
 
-impl<'a> Parser<'a> {
-    fn new(text: &'a str) -> Self {
+impl<'a> Reader<'a> {
+    /// Start reading `text`.
+    ///
+    /// Public so a **container** format can be built on this one. A scene file
+    /// is entity and resource blocks wrapped around values, and it should reuse
+    /// the value grammar rather than reimplement whitespace, comments,
+    /// identifiers and error positions — which is exactly how two syntaxes drift
+    /// apart.
+    pub fn new(text: &'a str) -> Self {
         Self { text, offset: 0 }
     }
 
     /// Build an error at the current position.
-    fn error(&self, message: impl Into<String>) -> TextError {
+    pub fn error(&self, message: impl Into<String>) -> TextError {
         let consumed = &self.text[..self.offset];
         let line = consumed.matches('\n').count() + 1;
         let column = consumed
@@ -231,8 +270,61 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn at_end(&self) -> bool {
+    /// Whether every character has been consumed.
+    ///
+    /// Trailing whitespace and comments count as consumed, so skip trivia first
+    /// if that is what you meant.
+    pub fn at_end(&self) -> bool {
         self.offset >= self.text.len()
+    }
+
+    /// Whether the next character — after trivia — is `expected`.
+    ///
+    /// For deciding whether a block has another entry without consuming the
+    /// delimiter that says it does not.
+    pub fn peek_is(&mut self, expected: char) -> bool {
+        self.skip_trivia();
+
+        self.peek() == Some(expected)
+    }
+
+    /// Consume `expected` if it is next, reporting whether it was.
+    ///
+    /// The optional counterpart of [`expect`](Self::expect), for a trailing
+    /// comma or an absent block.
+    pub fn accept(&mut self, expected: &str) -> bool {
+        self.skip_trivia();
+
+        if self.rest().starts_with(expected) {
+            self.offset += expected.len();
+            return true;
+        }
+
+        false
+    }
+
+    /// Read a non-negative integer, for anything a container counts with.
+    ///
+    /// # Errors
+    ///
+    /// If no digits follow, or they do not fit in a `u64`.
+    pub fn index(&mut self) -> Result<u64, TextError> {
+        self.skip_trivia();
+
+        let start = self.offset;
+        while self.peek().is_some_and(|next| next.is_ascii_digit()) {
+            self.offset += 1;
+        }
+
+        let digits = &self.text[start..self.offset];
+        if digits.is_empty() {
+            return Err(self.error("expected a number"));
+        }
+
+        digits.parse::<u64>().map_err(|_| {
+            self.offset = start;
+            self.error(format!("`{digits}` does not fit in a u64"))
+        })
     }
 
     fn rest(&self) -> &'a str {
@@ -251,7 +343,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Skip whitespace and `//` comments.
-    fn skip_trivia(&mut self) {
+    pub fn skip_trivia(&mut self) {
         loop {
             let before = self.offset;
 
@@ -279,7 +371,11 @@ impl<'a> Parser<'a> {
     }
 
     /// Consume `expected`, or report what was found instead.
-    fn expect(&mut self, expected: &str) -> Result<(), TextError> {
+    ///
+    /// # Errors
+    ///
+    /// If the text does not continue with `expected`.
+    pub fn expect(&mut self, expected: &str) -> Result<(), TextError> {
         self.skip_trivia();
 
         if self.rest().starts_with(expected) {
@@ -290,8 +386,15 @@ impl<'a> Parser<'a> {
         Err(self.error(format!("expected `{expected}`")))
     }
 
-    /// Read a value of the type `info` describes.
-    fn value(&mut self, info: &TypeInfo, registry: &TypeRegistry) -> Result<Value, TextError> {
+    /// Read one value of the type `info` describes.
+    ///
+    /// The whole point of this type being public: a container format identifies
+    /// which type comes next, then hands the reading of it back here.
+    ///
+    /// # Errors
+    ///
+    /// As [`from_text`].
+    pub fn value(&mut self, info: &TypeInfo, registry: &TypeRegistry) -> Result<Value, TextError> {
         self.skip_trivia();
 
         match info.kind() {
@@ -480,8 +583,8 @@ impl<'a> Parser<'a> {
         char::from_u32(code).ok_or_else(|| self.error(format!("`{code:x}` is not a character")))
     }
 
-    /// Read an identifier or a `::`-separated path.
-    fn path(&mut self) -> &'a str {
+    /// Read an identifier or a `::`-separated path, empty if there is none.
+    pub fn path(&mut self) -> &'a str {
         let start = self.offset;
 
         while let Some(next) = self.peek() {

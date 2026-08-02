@@ -71,7 +71,7 @@ mod value;
 pub use info::{FieldInfo, Primitive, Transfer, TypeInfo, TypeKind};
 pub use path::{TypeId, TypePath};
 pub use registry::{RegistryError, TypeRegistry};
-pub use text::{TextError, from_text, to_text};
+pub use text::{Reader, TextError, from_text, to_text, to_text_body};
 pub use value::{Struct, Value};
 
 /// Derive [`Reflect`] for a struct with named fields.
