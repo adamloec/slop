@@ -35,9 +35,9 @@ cooked it is the one that understands the format.
 | Block compression — BC7 in the importer | Landed — see §5.7 | M2 |
 | Mipmaps | Planned — BC7 without them aliases at distance | M2 |
 | Per-asset import settings | Planned — what decides format, sRGB, alpha mode | M2/M3 |
-| Async streaming | Planned — **beside** the sync read, not replacing it | M2 |
+| Async streaming | Planned — **beside** the sync read, not replacing it. Moved to M3: Sponza is what will say what the API needs | M3 |
 | Reference counting to decide when to unload | Planned — waits for something holding handles | M2/M3 |
-| Dependency graph across assets | Planned | M2 |
+| Dependency graph across assets | Planned — waits for materials, the first asset that references another | M2 |
 
 ## 3. Module map
 

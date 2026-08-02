@@ -1,7 +1,7 @@
 # Slop Engine — Implementation Plan & Session Handoff
 
-**Status:** M0 and M1 complete. M2 underway — the content pipeline cooks meshes,
-textures and shaders, and the asset registry holds what it loads.
+**Status:** M0 and M1 complete. M2 about half done — the content pipeline is
+finished; materials, a Sponza-scale scene and the debug UI are not.
 **Last updated:** 2026-08-02
 
 This document is the working companion to `DESIGN.md`. **`DESIGN.md` is
@@ -122,9 +122,14 @@ Two consequences worth carrying into M0:
 
 ## 3. Current state
 
-**M0 and M1 are complete; M2 is underway.** The lit textured cube
-renders with a golden image guarding it, and the reflection and ECS foundations
-are built through queries.
+**M0 and M1 are complete; M2 is about half done.** The lit textured cube renders
+with a golden image guarding it, the reflection and ECS foundations are built
+through scheduling and serialization, and the content pipeline cooks and hot
+reloads meshes, textures and shaders.
+
+What M2 still owes is the half that needs a renderer to be worth anything:
+materials, a Sponza-scale scene, and the debug UI. §9 has the order and why
+`slop-render` comes out of the examples first.
 
 718 tests. Clippy and rustdoc clean under `-D warnings` in both feature
 configurations, Vulkan validation reporting nothing, and every crate containing
@@ -150,7 +155,13 @@ configurations, Vulkan validation reporting nothing, and every crate containing
 does: memory → `Value` → text → `Value` → memory, per component and for a whole
 world at once. Save, load and save again produces byte-identical text.
 
-### 3.0.2 M2 so far — the content pipeline
+### 3.0.2 M2 — content pipeline and debug UI
+
+`DESIGN.md` §6 sets M2 as "asset pipeline, glTF import + cook, texture
+compression, hot reload, **material system**. Load and render a **Sponza-scale
+scene**. Plus the **debug UI layer** (§10.2)." The first four are done; the last
+three are not, and the milestone is **about half complete** rather than nearly
+finished.
 
 | Area | State |
 |---|---|
@@ -164,8 +175,16 @@ world at once. Save, load and save again produces byte-identical text.
 | `Assets<T>` — the registry, handles, load/reload/unload | Landed |
 | Hot reload — `Assets::reload_changed` + `slop-cli cook --watch` | Landed |
 | Block compression — BC7, 4:1, with the golden image unchanged | Landed |
-| Async streaming | Outstanding |
-| Debug UI (§10.2) | Outstanding — wanted before renderer bring-up |
+| Shader reflection — layouts read from cooked SPIR-V, not restated | **Outstanding** |
+| Material system | **Outstanding** — blocked on shader reflection |
+| glTF materials, multiple meshes, scene hierarchy | **Outstanding** |
+| A Sponza-scale scene loading and drawing | **Outstanding** — the exit criterion |
+| Debug UI (§10.2) — frame timing, entity inspector | **Outstanding** |
+| Mipmaps | **Outstanding** |
+
+Async streaming has **moved to M3**. It was never an M2 exit criterion, and
+nothing yet loads enough at once to say what the API needs — Sponza is what will.
+`docs/PLAN.md` §6.1 carries the row.
 
 The cache was lifted out of `slop-cli` rather than invented: keying, stamping and
 staleness were already working for shaders and are not shader-specific. What was
@@ -649,21 +668,32 @@ problem later. Check work against this list.
 Everything currently standing in for something else, in one place, so that
 "temporary" stays a decision rather than becoming an accident.
 
+**"Moved" does not mean copied.** Several rows below say a piece of example code
+moves into an engine crate. Read that as *the requirement moves* — the example is
+evidence that the problem is real and evidence of what shape a solution has to
+be, not a donor implementation to lift. Example code was written to get a picture
+on screen: it returns `String` errors where a library owes typed ones
+(`CONVENTIONS.md` §6), it reaches for `CARGO_MANIFEST_DIR`, it submits uploads
+and waits, and it hard-codes constants an engine has to expose. Lifting it would
+import all of that under a better crate name. **Each of these is a rewrite against
+two working references, and the golden images are what say the rewrite is
+equivalent.**
+
 **The distinction this table enforces:** a *hack* is a shortcut that makes the
-right thing harder later, and there are none here. Everything below is either
-correct code living in the wrong crate (which gets **moved**), or a simple
-implementation behind a final seam (which gets **replaced** with no caller
-changing). `DESIGN.md` §1.2 principle 6 is the rule: defer implementations
+right thing harder later, and there are none here. Everything below is either a
+requirement currently living in the wrong crate (which gets **rebuilt** where it
+belongs), or a simple implementation behind a final seam (which gets **replaced**
+with no caller changing). `DESIGN.md` §1.2 principle 6 is the rule: defer implementations
 freely, never seams.
 
 | What | Where | Standing in for | Fate | When |
 |---|---|---|---|---|
-| Frame loop — acquire, submit, present, frames in flight | `examples/*/src/main.rs` | `slop-render`'s frame renderer | **Deleted.** Replaced by a handful of lines against `slop-app`. | M3 |
-| Scene setup — uploads, pipeline, draw recording | `examples/cube/src/scene.rs` | `slop-render` + `slop-asset` | **Moved** into `slop-render` and generalized. Nothing is unpicked. | M3 |
+| Frame loop — acquire, submit, present, frames in flight | `examples/*/src/main.rs` | `slop-render`'s frame renderer | **Rebuilt**, not lifted. Two working copies say what the loop must do — swapchain recreation, per-slot pool reset, timeline waits — and that is what carries over. The `String` errors, the hard-coded frames-in-flight and the panic-on-failure do not. Both copies are then deleted. | M3 |
+| Scene setup — uploads, pipeline, draw recording | `examples/cube/src/scene.rs` | `slop-render` + `slop-asset` | **Rebuilt.** It proves the pieces fit together; it is not the shape an engine wants. One hard-coded pipeline, a raw sampler freed by hand, `CARGO_MANIFEST_DIR` in the load path, and push constants restated from the shader — all of it example-grade on purpose, none of it moves. | M3 |
 | The vertex layout is restated in Rust beside the shader's | `examples/cube/src/mesh.rs`, `shaders/passes/cube.slang` | Reflection over the cooked SPIR-V (§2.11) | **Deleted.** Two declarations of one layout, and a field added to one and not the other feeds the shader a stride it does not expect — scrambled geometry, no error. Held together by an assertion until the Slang library can hand the layout over. | M2/M3 |
 | Synchronous upload — submit and wait | `examples/cube/src/scene.rs` | Async transfer queue + staging ring | **Replaced.** Correct for startup, wrong for streaming. | M2 |
 | `slangc` invoked as a CLI | `slop-cli/src/cook.rs` | The Slang library, for reflection (§2.11) | **Replaced.** The cache layout, keying and read path all survive. | M2/M3 |
-| The asset VFS reads synchronously | `slop-asset` | Async streaming alongside it | **Joined by, not replaced.** A blocking read stays correct for startup, for tools, and for the cooker itself; §2.8's streaming is an additional entry point rather than a different one. Recorded because "the VFS is sync" reads like a shortcut and is not. | M2 |
+| The asset VFS reads synchronously | `slop-asset` | Async streaming alongside it | **Joined by, not replaced.** A blocking read stays correct for startup, for tools, and for the cooker itself; §2.8's streaming is an additional entry point rather than a different one. Recorded because "the VFS is sync" reads like a shortcut and is not.  Moved to M3: nothing yet loads enough at once to notice, and a Sponza-scale scene is what will say what the streaming API needs. | M3 |
 | An asset is unloaded by hand, never by refcount | `slop-asset` | Reference counting, once something holds handles long enough to outlive its need for them | **Extended.** `unload` is explicit and correct; what is missing is *who decides*, and nothing holds a handle past a frame yet. Counting references now would count them from one place. | M2/M3 |
 | `Assets<T>` is single-threaded — every mutation takes `&mut` | `slop-asset` | Interior mutability or a job-system-owned loader, once streaming decodes off the main thread | **Extended.** `Asset: Send + Sync` is already required so the bound does not have to be added later; only the *ownership* is provisional, and no public signature changes when the loader moves. | M2 |
 | Every texture is cooked to BC7 with one fixed encoder setting | `slop-cli/src/texture_import.rs` | Per-asset import settings — format, sRGB, alpha mode, mip policy | **Extended.** BC7 is right for colour and wrong for a normal map (BC5) or HDR (BC6H), and the alpha modes differ in whether they preserve alpha at all. Nothing yet knows what a texture *is for*; the material system is what will. | M2/M3 |
@@ -737,9 +767,9 @@ Settled here and not repeated there:
 what each milestone takes back** from the provisional implementations standing
 in for it today. Immediate outlook:
 
-**M1 — ECS + reflection.** *Underway; see §3.0 for what has landed.* Expected to
-be slower than M0 despite less code — Vulkan bring-up is high-volume but
-well-trodden, while the ECS and reflection design carries real judgment.
+**M1 — ECS + reflection.** *Complete; see §3.0.* Slower than M0 despite less
+code, as expected — Vulkan bring-up is high-volume but well-trodden, while the
+ECS and reflection design carried real judgment.
 
 The critical constraint was that **§2.10's archetype storage and §2.3's columnar
 WASM boundary be designed together, not sequentially.** That has been honoured:
@@ -747,24 +777,100 @@ WASM boundary be designed together, not sequentially.** That has been honoured:
 to a guest, and `Transfer::Blittable` gates the second use. Nothing about the
 storage would change if the boundary were built tomorrow.
 
-What remains is the scheduling half: systems declaring read/write sets so the job
-system can parallelize them. Everything it rests on has landed — command buffers
-so a system can change structure without `&mut World`, `Access` so a scheduler
-can tell two systems apart, and change detection so a system can decline work it
-does not need to do. That is why `slop-core`'s work-stealing pool is an M1 item
-rather than an M0 one: §4.1-C deferred it precisely so ECS scheduling would
-supply the real requirements, and it now can.
+The scheduling half landed on top of it: systems declaring read/write sets so the
+job system can parallelize them. Everything it rested on was already there —
+command buffers so a system can change structure without `&mut World`, `Access`
+so a scheduler can tell two systems apart, and change detection so a system can
+decline work it does not need to do. That is why `slop-core`'s work-stealing pool
+was an M1 item rather than an M0 one: §4.1-C deferred it precisely so ECS
+scheduling would supply the real requirements, and it did.
 
-The data model is settled. Every remaining M1 item adds capability without
-reshaping storage, which was the point of taking the three storage-shaping
-decisions — archetype tables, deferred structural change, and per-component
-ticks — before anything was built on top of them.
+The data model is settled. Nothing since has reshaped storage, which was the
+point of taking the three storage-shaping decisions — archetype tables, deferred
+structural change, and per-component ticks — before anything was built on top of
+them.
 
-M1 also lands the §5 verification infrastructure properly. Do not defer it: code
+M1 also landed the §5 verification infrastructure properly. Do not defer it: code
 can be produced faster than it can be reviewed line by line, and automated truth
 is the only thing preventing large volumes of subtly wrong architecture. Miri
 joined that suite with the ECS storage layer and belongs to it permanently.
 
-**M2 — Content + debug UI.** The debug UI is pulled forward deliberately;
-renderer bring-up without inspection tooling is the largest avoidable time sink
-in the plan.
+**M2 — Content + debug UI.** *About half done; see §3.0.2 and §9.* The pipeline
+half is finished and the rest is not: shader reflection, materials, a
+Sponza-scale scene, and the debug UI.
+
+The debug UI is pulled forward deliberately, and it stays pulled forward. Renderer
+bring-up without inspection tooling is the largest avoidable time sink in the
+plan (`DESIGN.md` §6), and the argument for deferring it — that an overlay needs a
+renderer to live in — does not survive contact with what is already built. An
+overlay records draw commands into a supplied command buffer against a supplied
+target, which is exactly the shape `Scene` already has on `slop-rhi` alone. The
+one part of §10.2 that genuinely needs M3 is the **render pass visualizer**,
+because there is no graph to visualize; it lands with the graph.
+
+**M3 — Renderer, Stage A.** Clustered forward+, shadows, IBL, HDR/tonemap, post
+stack, render graph. See §9 for the ordering and why the frame loop comes out
+first.
+
+---
+
+## 9. M2 remaining and M3 — task breakdown
+
+In dependency order. Each item says what it unblocks, because the ordering is the
+decision — the list itself is not controversial.
+
+### 9.1 Why `slop-render` starts before the rest of M2
+
+Three outstanding things all need the same missing piece:
+
+```mermaid
+flowchart TD
+    loop["A — frame loop in slop-render"] --> ui["C — debug UI overlay"]
+    loop --> mat["D — materials + Sponza"]
+    refl["B — shader reflection"] --> mat
+    loop --> graph["E — render graph, M3"]
+    ui --> graph
+    mat --> graph
+```
+
+The frame loop exists twice, in `examples/cube` and `examples/triangle`, and
+`docs/PLAN.md` §6.1 already records a **third copy as the signal to extract it
+early**. The debug UI would be that third copy. So the loop comes out first — not
+because M3 has started, but because M2's remaining items are what force it.
+
+**This is a rewrite, not a move.** See the note above §6.1's table. The examples
+say what a frame loop must handle — swapchain recreation on resize and suboptimal
+acquire, a command pool reset per in-flight slot, timeline waits before touching
+one, semaphores per swapchain image rather than per frame. That knowledge
+transfers. The `String` errors, the hard-coded `FRAMES_IN_FLIGHT`, the
+`CARGO_MANIFEST_DIR` asset lookup, the panic-on-failure and the raw sampler freed
+by hand do not; they are example-grade on purpose. Lifting the files would import
+all of it under a better crate name.
+
+The two golden images are what make the rewrite checkable: both examples must
+render identically afterwards, and neither reference moves.
+
+### 9.2 The order
+
+| | Item | Unblocks | Milestone |
+|---|---|---|---|
+| **A** | `slop-render` — frame renderer: acquire, submit, present, frames in flight, swapchain recreation. Typed errors, configurable frame count. Both examples rewritten onto it and both goldens unchanged. | C, D, E | M2 |
+| **B** | Shader reflection — Slang as a library rather than `slangc` as a CLI (§2.11), so vertex layouts, push constants and descriptor bindings are read from the cooked shader instead of restated in Rust. | D | M2 |
+| **C** | Debug UI (§10.2) — immediate mode, `egui` versus Dear ImGui researched at this point rather than guessed now. Frame timing and entity inspector; the pass visualizer waits for E. | E | M2 |
+| **D** | Materials — glTF materials, multiple meshes per file, scene hierarchy, mipmaps, then a Sponza-scale scene that loads and draws. **M2's exit criterion.** | E | M2 |
+| **E** | Render graph — passes declaring reads and writes, barriers derived rather than hand-written. Then Stage A proper: clustered forward+, shadows, IBL, HDR/tonemap. | — | M3 |
+
+Async streaming sits beside D and E rather than before them. Sponza is the first
+thing that loads enough at once to say what the streaming API needs, and building
+it earlier would be designing against an imagined consumer — the mistake §4.1-C
+avoided for the job system.
+
+### 9.3 Definition of done — M2
+
+- A Sponza-scale glTF loads through the cook pipeline and renders
+- Materials come from the file, not from code
+- Vertex layouts and push constants are reflected out of cooked shaders, not
+  restated in Rust
+- A debug overlay shows frame timing and lets an entity be inspected live
+- Both existing goldens still pass, unchanged, through `slop-render`
+- Nothing in `examples/` is doing a job an engine crate should be doing

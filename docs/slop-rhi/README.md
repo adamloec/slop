@@ -1,6 +1,6 @@
 # slop-rhi
 
-**Last updated:** 2026-08-01
+**Last updated:** 2026-08-02
 
 ## 1. Purpose
 
@@ -38,8 +38,8 @@ Started. This is the bulk of M0 and the largest single body of work in it.
 | Pipeline layouts over the heap, with push constants | Landed | M0 |
 | Depth attachments, mip chains, cube maps | Planned — when the cube needs them | M0 |
 | Dedicated versus suballocated policy for large targets | Planned — needs measurements, not a guessed threshold | M1 |
-| Shader reflection, pipeline layout derivation | Planned | M2–M3 |
-| Consumer-facing RHI API extraction | Planned | M3 |
+| Shader reflection, pipeline layout derivation | Planned — M2 item B (`PLAN.md` §9.2) | M2 |
+| Consumer-facing RHI API extraction | Planned — first requirements from `slop-render`, rest from the render graph | M2–M3 |
 
 ## 3. Module map
 
@@ -103,13 +103,19 @@ something, and the heap owns none of the images it references.
 
 ## 4. Scope at M0 — primitives, not abstraction
 
-M0 sits close to `ash` and defers the consumer-facing API to M3.
+M0 sits close to `ash` and defers the consumer-facing API until something
+consumes it.
 
 An abstraction designed with no consumers is designed against imagined
-requirements. The render graph and frame renderer at M3 are what determine what
-the API must be, and a shape guessed now gets rebuilt then anyway. Building it
-twice is fine; building it once, early, and living with it is worse
-(`PLAN.md` §4.1-D).
+requirements. The frame renderer and render graph are what determine what the API
+must be, and a shape guessed now gets rebuilt then anyway. Building it twice is
+fine; building it once, early, and living with it is worse (`PLAN.md` §4.1-D).
+
+**That consumer is now arriving.** `slop-render` takes the frame loop out of the
+examples ahead of the rest of M2 (`PLAN.md` §9), so the first real requirements
+land there — swapchain lifetime, per-frame resource slots, submission ordering.
+The render graph follows at M3 and supplies the rest. Expect this section's
+"deferred" list to be answered in two passes rather than one.
 
 What M0 must get right is the **feature model**, because that is the part which
 cannot be retrofitted:
@@ -124,7 +130,7 @@ flowchart TD
         dev["device selection scores on type — discrete over integrated"]
     end
 
-    subgraph later ["Deferred to M3 — a refactor either way"]
+    subgraph later ["Deferred until a consumer exists — a refactor either way"]
         api["pass and resource abstraction"]
         rg["render graph integration"]
     end
@@ -132,7 +138,7 @@ flowchart TD
     fixed --> later
 ```
 
-Get the left side right and the M3 extraction is a refactor. Get it wrong and it
+Get the left side right and the extraction is a refactor. Get it wrong and it
 is a rewrite.
 
 ## 5. Vulkan 1.3 is the required API version

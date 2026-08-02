@@ -1,6 +1,6 @@
 # Architecture
 
-**Last updated:** 2026-08-01
+**Last updated:** 2026-08-02
 
 Cross-crate structure and data flow. Decisions and their reasoning live in
 [DESIGN.md](DESIGN.md); this document shows how the pieces relate.
@@ -72,10 +72,15 @@ The rest land at the milestones in `DESIGN.md` §6.
 
 `slop-ecs` and `slop-reflect` are drawn solid as of M1 and are finished for that
 milestone. `slop-asset` is solid as of M2 and is not — it has the cook cache, the
-VFS, glTF and PNG import, and the asset registry, and still wants block
-compression, streaming and hot reload. What each crate
-still lacks is listed in its own document rather than implied by the diagram; a
-crate existing is not a crate being finished.
+VFS, glTF and PNG import, BC7 compression, the asset registry and hot reload, and
+still wants mipmaps, materials and streaming. What each crate still lacks is
+listed in its own document rather than implied by the diagram; a crate existing
+is not a crate being finished.
+
+**`slop-render` is next**, and it arrives before the rest of M2 rather than at
+M3. The frame loop it owns currently exists twice, copied between
+`examples/cube` and `examples/triangle`, and everything M2 still owes — the debug
+UI, materials, Sponza — would be the third copy. `PLAN.md` §9 has the ordering.
 
 The dashed arrows into `slop-verify` are **dev-dependencies**, which is why they
 run upward against the layering without breaking it: nothing it contains reaches
