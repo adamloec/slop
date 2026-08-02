@@ -29,16 +29,16 @@ use std::sync::Arc;
 use slop_asset::Vfs;
 use slop_core::diagnostics::tracing::{error, info};
 
-use slop_app::window::{self, WindowConfig};
+use slop_app::gpu::{Gpu, GpuConfig};
+use slop_app::window::WindowConfig;
 use slop_app::winit::application::ApplicationHandler;
 use slop_app::winit::event::WindowEvent;
 use slop_app::winit::event_loop::{ActiveEventLoop, EventLoop};
-use slop_app::winit::window::{Window, WindowId};
+use slop_app::winit::window::WindowId;
 use slop_render::{Frame, FrameRenderer, FrameRendererConfig, Target};
 use slop_rhi::{
-    Attachments, Blend, ClearValue, ColorAttachment, Device, DeviceSelection, GraphicsPipeline,
-    GraphicsPipelineConfig, ImageState, Instance, InstanceConfig, Load, PipelineLayout,
-    ShaderModule, ShaderStage, Surface, vk,
+    Attachments, Blend, ClearValue, ColorAttachment, Device, GraphicsPipeline,
+    GraphicsPipelineConfig, ImageState, Load, PipelineLayout, ShaderModule, ShaderStage, vk,
 };
 
 fn main() {
@@ -135,67 +135,48 @@ impl ApplicationHandler for App {
 
         // Drive continuously rather than only on damage, so the frame loop is
         // exercised the way a game's would be.
-        renderer.window.request_redraw();
+        renderer.gpu.window().request_redraw();
     }
 }
 struct Renderer {
-    // Declared in drop order: everything built from the device, then the
-    // device, then the surface, then the window it came from.
+    // Declared in drop order: everything built from the device, then the `Gpu`
+    // that owns the device, surface and window — whose *internal* drop order is
+    // its own problem rather than this file's.
     //
     // No separate layout field: `GraphicsPipeline` already holds an `Arc` to it,
     // which is what keeps it alive.
     pipeline: GraphicsPipeline,
     renderer: FrameRenderer,
-    device: Arc<Device>,
-    surface: Surface,
-    window: Window,
+    gpu: Gpu,
 }
 
 impl Renderer {
     fn new(event_loop: &ActiveEventLoop) -> Result<Self, String> {
-        let window = window::create(
+        let gpu = Gpu::new(
             event_loop,
-            &WindowConfig {
-                title: String::from("slop — triangle"),
+            &GpuConfig {
+                window: WindowConfig {
+                    title: String::from("slop — triangle"),
+                    ..Default::default()
+                },
+                application_name: String::from("example-triangle"),
                 ..Default::default()
             },
         )
         .map_err(|error| error.to_string())?;
 
-        let extensions =
-            window::required_instance_extensions(&window).map_err(|error| error.to_string())?;
-        let instance = Arc::new(
-            Instance::new(&InstanceConfig {
-                application_name: String::from("example-triangle"),
-                required_extensions: extensions,
-                ..Default::default()
-            })
-            .map_err(|error| error.to_string())?,
-        );
-
-        // SAFETY: `window` is moved into the returned `Renderer` after the
-        // surface and is declared last, so it outlives everything built here.
-        let surface =
-            unsafe { window::create_surface(&instance, &window) }.map_err(|e| e.to_string())?;
-
-        let devices =
-            slop_rhi::enumerate(&instance, Some(&surface)).map_err(|error| error.to_string())?;
-        let chosen = slop_rhi::select(&devices, &DeviceSelection::Automatic)
-            .map_err(|error| error.to_string())?;
-        let device = Arc::new(Device::new(&instance, &devices[chosen]).map_err(|e| e.to_string())?);
-
         let renderer = FrameRenderer::new(
-            &device,
-            &surface,
-            window_extent(&window),
+            gpu.device(),
+            gpu.surface(),
+            gpu.extent(),
             &FrameRendererConfig::default(),
         )
         .map_err(|error| error.to_string())?;
 
-        let module = load_shader(&device)?;
-        let layout = Arc::new(PipelineLayout::empty(&device).map_err(|e| e.to_string())?);
+        let module = load_shader(gpu.device())?;
+        let layout = Arc::new(PipelineLayout::empty(gpu.device()).map_err(|e| e.to_string())?);
         let pipeline = GraphicsPipeline::new(
-            &device,
+            gpu.device(),
             &layout,
             &GraphicsPipelineConfig {
                 vertex: ShaderStage {
@@ -236,9 +217,7 @@ impl Renderer {
         Ok(Self {
             pipeline,
             renderer,
-            device,
-            surface,
-            window,
+            gpu,
         })
     }
 
@@ -255,7 +234,7 @@ impl Renderer {
         // attachment — so the new extent is discarded. The cube, which has one,
         // is where this return value earns its keep.
         self.renderer
-            .prepare(&self.surface, window_extent(&self.window))
+            .prepare(self.gpu.surface(), self.gpu.extent())
             .map_err(|error| error.to_string())?;
 
         // Borrowed out of `self` so the closure does not capture it whole:
@@ -321,16 +300,6 @@ fn record(pipeline: &GraphicsPipeline, frame: &Frame<'_>) {
     );
 }
 
-/// The window's size, in the form Vulkan wants.
-fn window_extent(window: &Window) -> vk::Extent2D {
-    let size = window.inner_size();
-
-    vk::Extent2D {
-        width: size.width,
-        height: size.height,
-    }
-}
-
 impl Drop for Renderer {
     fn drop(&mut self) {
         info!(frames = self.renderer.frame_number(), "shutting down");
@@ -338,7 +307,7 @@ impl Drop for Renderer {
         // Before any field drops. `FrameRenderer::drop` waits too, but it drops
         // after the pipeline, and destroying a pipeline a pending submission
         // still references is undefined.
-        if let Err(failure) = self.device.wait_idle() {
+        if let Err(failure) = self.gpu.wait_idle() {
             error!(error = %failure, "device did not go idle; teardown may be unsafe");
         }
     }

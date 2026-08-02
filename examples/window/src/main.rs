@@ -16,14 +16,12 @@
 //! `docs/DESIGN.md` §1.2 principle 4. The engine supplies pieces; it does not
 //! supply a framework to sit inside.
 
-use std::sync::Arc;
-
+use slop_app::gpu::{Gpu, GpuConfig};
 use slop_app::window::{self, WindowConfig};
 use slop_app::winit::application::ApplicationHandler;
 use slop_app::winit::event::WindowEvent;
 use slop_app::winit::event_loop::{ActiveEventLoop, EventLoop};
 use slop_app::winit::window::WindowId;
-use slop_rhi::{Device, DeviceSelection, Instance, InstanceConfig};
 use slop_rhi::{DeviceInfo, PresentMode, Surface, Swapchain, SwapchainConfig};
 
 fn main() {
@@ -43,20 +41,18 @@ fn main() {
 /// Live Vulkan objects, in drop order.
 ///
 /// Field order matters and is the reason this is a struct rather than loose
-/// locals: the device and surface must be destroyed before the window they came
-/// from, and Rust drops fields top to bottom.
-// These fields are never read, and that is the point: they exist to keep the
-// objects alive and to destroy them in the right order. `expect` rather than
-// `allow` so this becomes an error once something does read them, which is the
+/// locals: the swapchain must be destroyed before the device, surface and window
+/// it came from, and Rust drops fields top to bottom. Those last three are
+/// [`Gpu`]'s problem — it exists so that ordering is stated once rather than
+/// re-derived by every application.
+// The swapchain is never read, and that is the point: it exists to keep the
+// object alive and to destroy it at the right moment. `expect` rather than
+// `allow` so this becomes an error once something does read it, which is the
 // signal to delete the attribute.
 #[expect(dead_code, reason = "held for RAII and drop ordering, not for reading")]
 struct Graphics {
     swapchain: Swapchain,
-    device: Arc<Device>,
-    surface: Surface,
-    // Last, so it outlives everything created from it — the safety condition
-    // `window::create_surface` states and cannot enforce.
-    window: slop_app::winit::window::Window,
+    gpu: Gpu,
 }
 
 impl Drop for Graphics {
@@ -67,7 +63,7 @@ impl Drop for Graphics {
         // for — but the pattern is the point. `Device::drop` waits too, and that
         // is always too late for fields declared before it, so an owner of
         // Vulkan objects waits in its own `Drop`. Examples get copied.
-        if let Err(error) = self.device.wait_idle() {
+        if let Err(error) = self.gpu.wait_idle() {
             slop_core::diagnostics::tracing::error!(%error, "device did not go idle");
         }
     }
@@ -110,64 +106,50 @@ impl ApplicationHandler for App {
 }
 
 fn setup(event_loop: &ActiveEventLoop) -> Result<Graphics, String> {
-    let window = window::create(
+    // Window, instance, surface, adapter selection and device, in the one order
+    // Vulkan permits — see `slop_app::gpu`, which is where that order now lives
+    // so that four examples cannot each drift a different way.
+    let gpu = Gpu::new(
         event_loop,
-        &WindowConfig {
-            title: String::from("slop — window and surface"),
+        &GpuConfig {
+            window: WindowConfig {
+                title: String::from("slop — window and surface"),
+                ..Default::default()
+            },
+            application_name: String::from("example-window"),
             ..Default::default()
         },
     )
     .map_err(|error| error.to_string())?;
 
-    // Ordering is a Vulkan constraint: the instance must be created already
-    // knowing which surface extensions this display needs, so the window comes
-    // first.
-    let extensions =
-        window::required_instance_extensions(&window).map_err(|error| error.to_string())?;
-    for extension in &extensions {
-        println!(
-            "  required instance extension: {}",
-            extension.to_string_lossy()
-        );
+    // Queried again after the fact purely to print it. This is the list the
+    // instance was created with, and asking a window for it is a pure function
+    // of its display handle — so reporting it here says the same thing the old
+    // inline version did, without duplicating bring-up to get at it.
+    match window::required_instance_extensions(gpu.window()) {
+        Ok(extensions) => {
+            for extension in &extensions {
+                println!(
+                    "  required instance extension: {}",
+                    extension.to_string_lossy()
+                );
+            }
+        }
+        Err(error) => println!("  required instance extensions unavailable: {error}"),
     }
 
-    let instance = Instance::new(&InstanceConfig {
-        application_name: String::from("example-window"),
-        required_extensions: extensions,
-        ..Default::default()
-    })
-    .map_err(|error| error.to_string())?;
-    let instance = Arc::new(instance);
+    report(gpu.adapters(), gpu.chosen(), gpu.surface());
 
-    // SAFETY: `window` is moved into the returned `Graphics` alongside the
-    // surface, and is declared after it, so it outlives everything built here.
-    let surface =
-        unsafe { window::create_surface(&instance, &window) }.map_err(|error| error.to_string())?;
-
-    // Enumerating *with* the surface is what makes present support part of
-    // usability, rather than something discovered later at swapchain creation.
-    let devices =
-        slop_rhi::enumerate(&instance, Some(&surface)).map_err(|error| error.to_string())?;
-    let chosen = slop_rhi::select(&devices, &DeviceSelection::Automatic)
-        .map_err(|error| error.to_string())?;
-
-    report(&devices, chosen, &surface);
-
-    let device = Arc::new(Device::new(&instance, &devices[chosen]).map_err(|e| e.to_string())?);
-
-    // `inner_size` is already in physical pixels, which is what a swapchain
-    // needs. The logical size passed to WindowConfig is a different number on
-    // any display that is not at 100% scaling.
-    let size = window.inner_size();
+    // `Gpu::extent` is in physical pixels, which is what a swapchain needs. The
+    // logical size passed to WindowConfig is a different number on any display
+    // that is not at 100% scaling.
+    let size = gpu.extent();
     let swapchain = Swapchain::new(
-        &device,
-        &surface,
+        gpu.device(),
+        gpu.surface(),
         &SwapchainConfig {
             present_mode: PresentMode::Mailbox,
-            extent: slop_rhi::vk::Extent2D {
-                width: size.width,
-                height: size.height,
-            },
+            extent: size,
         },
     )
     .map_err(|error| error.to_string())?;
@@ -190,12 +172,7 @@ fn setup(event_loop: &ActiveEventLoop) -> Result<Graphics, String> {
 
     println!("\nwindow, surface, device and swapchain all created successfully.");
 
-    Ok(Graphics {
-        swapchain,
-        device,
-        surface,
-        window,
-    })
+    Ok(Graphics { swapchain, gpu })
 }
 
 fn report(devices: &[DeviceInfo], chosen: usize, surface: &Surface) {

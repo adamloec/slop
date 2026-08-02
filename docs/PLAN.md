@@ -723,6 +723,8 @@ freely, never seams.
 
 | What | Where | Standing in for | Fate | When |
 |---|---|---|---|---|
+| The debug overlay's winit glue lives in an example | `examples/cube/src/main.rs` | `slop-app` owning `egui::Context` + `egui_winit::State` | **Rebuilt.** `slop_render::Overlay` is engine code and takes tessellated triangles; the ~40 lines that feed it — taking input, handling platform output, uploading texture deltas before the frame opens — are windowing glue and belong beside `Gpu`. Deliberately **one copy**: `example-cube` is the only example with an overlay, and the same judgment that paid off on the frame loop applies — the shape should be decided by a real second user, not guessed from one. `CONVENTIONS.md` §2.3's third-copy rule is the trigger. Decided 2026-08-02. | M3 |
+| `Gpu` ties one window to one device | `slop-app/src/gpu.rs` | A device shared by several surfaces | **Extended.** Right for a game, which has one window; wrong for the editor (`DESIGN.md` §2.12), where a detached viewport is a second surface on the *same* device — re-running bring-up would create a second device and make sharing a texture between panels impossible. The split is `Gpu` keeping instance/device/allocator and handing out surfaces, and it is additive: `Gpu::new` stays the one-window path. Not done now because the editor does not exist and a two-window API designed without one is a guess. | M6 |
 | `FrameRenderer` has no automated test | `slop-render` | A smoke test that drives a real window, or a headless path that fakes a swapchain | **Extended.** Everything it does needs a surface, a surface needs a window, and a test harness has no event loop — the cube's golden renders headlessly and so covers `Scene`, not this. The check today is running both examples under `SLOP_FRAMES` with validation on, which is a command someone has to type. **The resize path has no coverage at all**, automated or otherwise, because `SLOP_FRAMES` never resizes the window. | M3 |
 | Scene setup — uploads, pipeline, draw recording | `examples/cube/src/scene.rs` | `slop-render` + `slop-asset` | **Rebuilt.** It proves the pieces fit together; it is not the shape an engine wants. One hard-coded pipeline, a raw sampler freed by hand, `CARGO_MANIFEST_DIR` in the load path, and push constants restated from the shader — all of it example-grade on purpose, none of it moves. | M3 |
 | `VertexBinding` cannot express a buffer format that differs from the shader's type | `slop-render/src/vertex.rs` | A per-location format override | **Extended.** Reflection is a fact about the shader; the buffer format is a decision about memory. They coincide for every float attribute and diverge for a packed one — egui's four-byte colour read as a `float4`. The overlay states its layout and uses reflection to check the shader, which is correct and is not derivation. | M3 |
@@ -769,21 +771,27 @@ freely, never seams.
 | `Reflect` rejects generic types | `slop-reflect-derive` | A path encoding the type arguments | **Replaced.** Rejected loudly today rather than silently giving every instantiation one id. | M2 |
 | `World::remove` drops the component rather than returning it | `slop-ecs` | A typed take that hands the value back | **Extended.** Needs a path that can name the type's Rust identity, which the erased core deliberately cannot. | M1 |
 
-**The duplication that is not on this table, because it is a genuine smell:**
-`examples/triangle/src/main.rs` and `examples/cube/src/main.rs` carry roughly
-150 lines of near-identical frame-loop plumbing. It was allowed to happen rather
-than being factored when the second copy appeared.
+**The duplication that was on this table, and is now resolved.** Two copies of
+roughly 150 lines of frame-loop plumbing were allowed to accumulate across
+`examples/triangle` and `examples/cube`, and the decision recorded here on
+2026-08-01 was to leave them until M3: `slop-render` is what determines the frame
+loop's real shape, and extracting an abstraction from two toy examples is
+designing against imagined requirements — §4.1-D's position applied one layer up.
+The stated trigger was a third copy, per `CONVENTIONS.md` §2.3.
 
-Decided 2026-08-01 to leave it until M3 rather than lift it into `slop-app` now.
-Reason: `slop-render` is what determines the frame loop's real shape, and
-extracting an abstraction from two toy examples is designing against imagined
-requirements — §4.1-D's position, applied to the same problem one layer up. The
-cost of waiting is bounded (two copies, both deleted at M3); the cost of guessing
-wrong is a frame-loop API the renderer has to work around.
+The third copy arrived (`examples/model`), and the trigger fired. Both halves are
+now extracted:
 
-**A third example before M3 changes that calculus.** Three copies is where the
-promotion rule in `CONVENTIONS.md` §2.3 says a grouping is real, and the same
-judgment applies here: if a third arrives, lift the loop into `slop-app` first.
+- **The frame loop** — acquire, submit, present, frames in flight — is
+  `slop_render::FrameRenderer`.
+- **Device bring-up** — window, instance, surface, adapter selection, device,
+  allocator — is `slop_app::gpu::Gpu`, whose field order discharges the safety
+  condition `window::create_surface` states and cannot enforce. **That removed
+  the last `unsafe` from every example.**
+
+Waiting was the right call and is worth recording as such: the shape both
+abstractions took was decided by `slop-render` and by the third example's needs,
+not by the first two. Neither was guessed.
 
 ---
 

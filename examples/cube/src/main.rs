@@ -23,18 +23,17 @@
 //! agrees with it. Doing them the other way round draws one wrong frame after
 //! every resize.
 
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use example_cube::Scene;
-use slop_app::window::{self, WindowConfig};
+use slop_app::gpu::{Gpu, GpuConfig};
+use slop_app::window::WindowConfig;
 use slop_app::winit::application::ApplicationHandler;
 use slop_app::winit::event::WindowEvent;
 use slop_app::winit::event_loop::{ActiveEventLoop, EventLoop};
-use slop_app::winit::window::{Window, WindowId};
+use slop_app::winit::window::WindowId;
 use slop_core::diagnostics::tracing::{error, info};
 use slop_render::{FrameRenderer, FrameRendererConfig};
-use slop_rhi::{Allocator, Device, DeviceSelection, Instance, InstanceConfig, Surface, vk};
 
 /// How often to check whether a cooked asset has been rewritten.
 ///
@@ -106,9 +105,9 @@ impl ApplicationHandler for App {
         // of it.
         let response = renderer
             .egui_winit
-            .on_window_event(&renderer.window, &event);
+            .on_window_event(renderer.gpu.window(), &event);
         if response.repaint {
-            renderer.window.request_redraw();
+            renderer.gpu.window().request_redraw();
         }
 
         match event {
@@ -138,19 +137,17 @@ impl ApplicationHandler for App {
             return;
         }
 
-        renderer.window.request_redraw();
+        renderer.gpu.window().request_redraw();
     }
 }
 
 struct Renderer {
     // Declared in drop order: the scene and the frame renderer first, then the
-    // allocator that owns their memory, then the device, surface and window.
+    // `Gpu` holding the allocator, device, surface and window their memory and
+    // handles came from.
     scene: Scene,
     renderer: FrameRenderer,
-    allocator: Arc<Allocator>,
-    device: Arc<Device>,
-    surface: Surface,
-    window: Window,
+    gpu: Gpu,
     /// When assets were last checked for changes. See `poll_for_reloaded_assets`.
     last_asset_poll: Instant,
     /// How long recent frames took. See `FrameTimes`.
@@ -166,47 +163,33 @@ struct Renderer {
 
 impl Renderer {
     fn new(event_loop: &ActiveEventLoop) -> Result<Self, String> {
-        let window = window::create(
+        let gpu = Gpu::new(
             event_loop,
-            &WindowConfig {
-                title: String::from("slop — cube"),
+            &GpuConfig {
+                window: WindowConfig {
+                    title: String::from("slop — cube"),
+                    ..Default::default()
+                },
+                application_name: String::from("example-cube"),
                 ..Default::default()
             },
         )
         .map_err(|error| error.to_string())?;
 
-        let extensions =
-            window::required_instance_extensions(&window).map_err(|error| error.to_string())?;
-        let instance = Arc::new(
-            Instance::new(&InstanceConfig {
-                application_name: String::from("example-cube"),
-                required_extensions: extensions,
-                ..Default::default()
-            })
-            .map_err(|error| error.to_string())?,
-        );
-
-        // SAFETY: `window` is moved into the returned `Renderer` and declared
-        // last, so it outlives everything built from it.
-        let surface =
-            unsafe { window::create_surface(&instance, &window) }.map_err(|e| e.to_string())?;
-
-        let devices =
-            slop_rhi::enumerate(&instance, Some(&surface)).map_err(|error| error.to_string())?;
-        let chosen = slop_rhi::select(&devices, &DeviceSelection::Automatic)
-            .map_err(|error| error.to_string())?;
-        let device = Arc::new(Device::new(&instance, &devices[chosen]).map_err(|e| e.to_string())?);
-        let allocator = Allocator::new(&device).map_err(|error| error.to_string())?;
-
         let renderer = FrameRenderer::new(
-            &device,
-            &surface,
-            window_extent(&window),
+            gpu.device(),
+            gpu.surface(),
+            gpu.extent(),
             &FrameRendererConfig::default(),
         )
         .map_err(|error| error.to_string())?;
 
-        let scene = Scene::new(&device, &allocator, renderer.extent(), renderer.format())?;
+        let scene = Scene::new(
+            gpu.device(),
+            gpu.allocator(),
+            renderer.extent(),
+            renderer.format(),
+        )?;
 
         info!(
             width = renderer.extent().width,
@@ -215,8 +198,14 @@ impl Renderer {
         );
 
         let egui = egui::Context::default();
-        let egui_winit =
-            egui_winit::State::new(egui.clone(), egui.viewport_id(), &window, None, None, None);
+        let egui_winit = egui_winit::State::new(
+            egui.clone(),
+            egui.viewport_id(),
+            gpu.window(),
+            None,
+            None,
+            None,
+        );
 
         Ok(Self {
             scene,
@@ -224,10 +213,7 @@ impl Renderer {
             frame_times: FrameTimes::new(),
             egui,
             egui_winit,
-            allocator,
-            device,
-            surface,
-            window,
+            gpu,
             last_asset_poll: Instant::now(),
         })
     }
@@ -271,10 +257,10 @@ impl Renderer {
         // afterwards would draw one wrong frame first.
         if let Some(extent) = self
             .renderer
-            .prepare(&self.surface, window_extent(&self.window))
+            .prepare(self.gpu.surface(), self.gpu.extent())
             .map_err(|error| error.to_string())?
         {
-            self.scene.resize(&self.allocator, extent)?;
+            self.scene.resize(self.gpu.allocator(), extent)?;
         }
 
         self.poll_for_reloaded_assets()?;
@@ -302,7 +288,7 @@ impl Renderer {
     /// tree to keep synchronised, so it cannot fall out of sync with the engine
     /// it is reporting on.
     fn run_ui(&mut self) -> Result<(Vec<egui::ClippedPrimitive>, f32), String> {
-        let raw_input = self.egui_winit.take_egui_input(&self.window);
+        let raw_input = self.egui_winit.take_egui_input(self.gpu.window());
         let frames = self.renderer.frame_number();
         let extent = self.renderer.extent();
         let timing = self.frame_times.summary();
@@ -324,24 +310,14 @@ impl Renderer {
         });
 
         self.egui_winit
-            .handle_platform_output(&self.window, output.platform_output);
+            .handle_platform_output(self.gpu.window(), output.platform_output);
 
         let primitives = self.egui.tessellate(output.shapes, output.pixels_per_point);
 
         self.scene
-            .update_overlay_textures(&self.allocator, &output.textures_delta)?;
+            .update_overlay_textures(self.gpu.allocator(), &output.textures_delta)?;
 
         Ok((primitives, output.pixels_per_point))
-    }
-}
-
-/// The window's size, in the form Vulkan wants.
-fn window_extent(window: &Window) -> vk::Extent2D {
-    let size = window.inner_size();
-
-    vk::Extent2D {
-        width: size.width,
-        height: size.height,
     }
 }
 
@@ -352,7 +328,7 @@ impl Drop for Renderer {
         // Before any field drops. `FrameRenderer::drop` waits too, but it drops
         // after the scene, and destroying the scene's images while a frame that
         // samples them is still executing is undefined.
-        if let Err(failure) = self.device.wait_idle() {
+        if let Err(failure) = self.gpu.wait_idle() {
             error!(error = %failure, "device did not go idle; teardown may be unsafe");
         }
     }

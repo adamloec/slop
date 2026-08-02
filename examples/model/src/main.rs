@@ -24,19 +24,17 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use slop_app::window::{self, WindowConfig};
+use slop_app::gpu::{Gpu, GpuConfig};
+use slop_app::window::WindowConfig;
 use slop_app::winit::application::ApplicationHandler;
 use slop_app::winit::event::WindowEvent;
 use slop_app::winit::event_loop::{ActiveEventLoop, EventLoop};
-use slop_app::winit::window::{Window, WindowId};
+use slop_app::winit::window::WindowId;
 use slop_asset::Vfs;
 use slop_core::diagnostics::tracing::{error, info};
 use slop_math::{Mat4, Quat, Vec3};
 use slop_render::{FrameRenderer, FrameRendererConfig, MeshRenderer};
-use slop_rhi::{
-    Allocator, BindlessHeap, BindlessHeapConfig, Device, DeviceSelection, Instance, InstanceConfig,
-    ShaderModule, Surface, vk,
-};
+use slop_rhi::{BindlessHeap, BindlessHeapConfig, Device, ShaderModule};
 
 /// Which model to draw, when nothing says otherwise.
 const DEFAULT_MODEL: &str = "models/cube.model";
@@ -132,92 +130,70 @@ impl ApplicationHandler for App {
             return;
         }
 
-        renderer.window.request_redraw();
+        renderer.gpu.window().request_redraw();
     }
 }
 
 struct Renderer {
     // Declared in drop order: what draws, then the heap it indexes, then the
-    // frame renderer, then the device everything was built from.
+    // frame renderer, then the `Gpu` everything was built from.
     meshes: MeshRenderer,
     heap: BindlessHeap,
     frames: FrameRenderer,
     /// How far the camera sits from the model's centre, from its bounds.
     distance: f32,
     centre: Vec3,
-    allocator: Arc<Allocator>,
-    device: Arc<Device>,
-    surface: Surface,
-    window: Window,
+    gpu: Gpu,
 }
 
 impl Renderer {
     fn new(event_loop: &ActiveEventLoop) -> Result<Self, String> {
-        let window = window::create(
+        let gpu = Gpu::new(
             event_loop,
-            &WindowConfig {
-                title: String::from("slop — model"),
+            &GpuConfig {
+                window: WindowConfig {
+                    title: String::from("slop — model"),
+                    ..Default::default()
+                },
+                application_name: String::from("example-model"),
                 ..Default::default()
             },
         )
         .map_err(|error| error.to_string())?;
 
-        let extensions =
-            window::required_instance_extensions(&window).map_err(|error| error.to_string())?;
-        let instance = Arc::new(
-            Instance::new(&InstanceConfig {
-                application_name: String::from("example-model"),
-                required_extensions: extensions,
-                ..Default::default()
-            })
-            .map_err(|error| error.to_string())?,
-        );
-
-        // SAFETY: `window` is moved into the returned `Renderer` and declared
-        // last, so it outlives everything built from it.
-        let surface =
-            unsafe { window::create_surface(&instance, &window) }.map_err(|e| e.to_string())?;
-
-        let devices =
-            slop_rhi::enumerate(&instance, Some(&surface)).map_err(|error| error.to_string())?;
-        let chosen = slop_rhi::select(&devices, &DeviceSelection::Automatic)
-            .map_err(|error| error.to_string())?;
-        let device = Arc::new(Device::new(&instance, &devices[chosen]).map_err(|e| e.to_string())?);
-        let allocator = Allocator::new(&device).map_err(|error| error.to_string())?;
-
         let frames = FrameRenderer::new(
-            &device,
-            &surface,
-            window_extent(&window),
+            gpu.device(),
+            gpu.surface(),
+            gpu.extent(),
             &FrameRendererConfig::default(),
         )
         .map_err(|error| error.to_string())?;
 
-        let mut heap = BindlessHeap::new(&device, &BindlessHeapConfig::default())
+        let mut heap = BindlessHeap::new(gpu.device(), &BindlessHeapConfig::default())
             .map_err(|error| error.to_string())?;
 
         let project = project_root();
         let vfs = Vfs::for_project(&project);
-        let module = load_shader(&device, &vfs)?;
+        let module = load_shader(gpu.device(), &vfs)?;
         let reflection = load_reflection(&vfs)?;
 
         let mut meshes = MeshRenderer::new(
-            &device,
+            gpu.device(),
             &mut heap,
             &module,
             &reflection,
             frames.format(),
-            slop_rhi::preferred_depth_format(&device),
+            slop_rhi::preferred_depth_format(gpu.device()),
         )
         .map_err(|error| error.to_string())?;
 
         let logical = std::env::var("SLOP_MODEL").unwrap_or_else(|_| String::from(DEFAULT_MODEL));
 
         meshes
-            .load(&allocator, &mut heap, &vfs, &logical)
+            .load(gpu.allocator(), &mut heap, &vfs, &logical)
             .map_err(|error| format!("{error}. Run `cargo run -p slop-cli -- cook` first"))?;
         meshes
-            .resize(&allocator, frames.extent())
+            .resize(gpu.allocator(), frames.extent())
             .map_err(|error| error.to_string())?;
 
         let (centre, radius) = bounds(&vfs, &logical);
@@ -237,21 +213,18 @@ impl Renderer {
             // with a margin so nothing is clipped by the near plane.
             distance: radius / slop_math::scalar::tan(FIELD_OF_VIEW.to_radians() * 0.5) * 1.4,
             centre,
-            allocator,
-            device,
-            surface,
-            window,
+            gpu,
         })
     }
 
     fn render(&mut self) -> Result<(), String> {
         if let Some(extent) = self
             .frames
-            .prepare(&self.surface, window_extent(&self.window))
+            .prepare(self.gpu.surface(), self.gpu.extent())
             .map_err(|error| error.to_string())?
         {
             self.meshes
-                .resize(&self.allocator, extent)
+                .resize(self.gpu.allocator(), extent)
                 .map_err(|error| error.to_string())?;
         }
 
@@ -360,23 +333,13 @@ fn load_reflection(vfs: &Vfs) -> Result<slop_asset::Reflection, String> {
     slop_asset::Reflection::read(&bytes).map_err(|error| error.to_string())
 }
 
-/// The window's size, in the form Vulkan wants.
-fn window_extent(window: &Window) -> vk::Extent2D {
-    let size = window.inner_size();
-
-    vk::Extent2D {
-        width: size.width,
-        height: size.height,
-    }
-}
-
 impl Drop for Renderer {
     fn drop(&mut self) {
         info!(frames = self.frames.frame_number(), "shutting down");
 
         // Before any field drops: the GPU may still be executing a frame that
         // references the meshes and textures declared above the device.
-        if let Err(failure) = self.device.wait_idle() {
+        if let Err(failure) = self.gpu.wait_idle() {
             error!(error = %failure, "device did not go idle; teardown may be unsafe");
         }
     }

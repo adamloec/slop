@@ -15,6 +15,7 @@
 //! headless CI to each configure the same engine differently without any of them
 //! fighting over ambient state.
 
+pub mod gpu;
 pub mod logging;
 pub mod window;
 
