@@ -586,7 +586,7 @@ fn a_layout_fingerprint_ignores_the_path() {
             path,
             std::alloc::Layout::new::<f32>(),
             Transfer::Blittable,
-            TypeKind::Primitive,
+            TypeKind::Primitive(slop_reflect::Primitive::F32),
         )
     };
 

@@ -663,9 +663,12 @@ demo:
 
 ## 8. Open questions
 
-1. **Scene format.** Text format for diffability during development, binary for
-   shipping — both derived from reflection. Which text format (RON, TOML,
-   custom) is undecided.
+1. **Binary scene format for shipping.** The text format is settled and built
+   (see Resolved). Binary is still open, and is now genuinely a *format* question
+   rather than a design one: it writes another arrow out of the same
+   `slop_reflect::Value`, touching neither the reflection walk nor the ECS.
+   Wanted for load time and file size on a shipped title, not before there is
+   content large enough to measure. **Revisit at M2.**
 2. **Slang Rust bindings.** Which binding crate to use, or whether to vendor and
    maintain our own. Contained behind a narrow interface either way (§2.11).
    **Revisit at M3.**
@@ -720,6 +723,16 @@ demo:
     **Revisit at M3**, when there is a real scene to measure.
 
 **Resolved:**
+- **Text scene format — custom, not RON or TOML.** Serialization goes through a
+  `slop_reflect::Value` sitting between component memory and text, so a second
+  format writes another arrow rather than a second reflection walk. The text side
+  is hand-written for one reason: `serde` is built around `T: Deserialize` known
+  at compile time, and §2.4 gives us a `TypeInfo` known at runtime. Bridging that
+  is the same impedance mismatch that made `Column<T>` impossible. The grammar we
+  need — scalars, text, nested named structs — is closed and small, and a
+  recursive-descent parser over it is safe code whose failure modes a round-trip
+  property test catches exactly. Reading is schema-driven, so a file carries no
+  type suffixes and stays diffable, which was the whole reason for having text.
 - Determinism tier — same build, any machine, either platform, see §2.14.
 - macOS support — dropped, see §2.1.
 - Sim/render coupling — immutable render snapshot, see §2.9.

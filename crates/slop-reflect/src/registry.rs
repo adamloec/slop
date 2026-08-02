@@ -282,7 +282,7 @@ impl TypeRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{FieldInfo, Transfer, TypeKind};
+    use crate::{FieldInfo, Primitive, Transfer, TypeKind};
     use std::alloc::Layout;
 
     fn primitive(path: &str) -> TypeInfo {
@@ -290,7 +290,7 @@ mod tests {
             path,
             Layout::new::<f32>(),
             Transfer::Blittable,
-            TypeKind::Primitive,
+            TypeKind::Primitive(Primitive::F32),
         )
     }
 
@@ -335,7 +335,7 @@ mod tests {
             "game::Health",
             Layout::new::<u64>(),
             Transfer::Blittable,
-            TypeKind::Primitive,
+            TypeKind::Primitive(Primitive::F32),
         );
 
         assert!(matches!(

@@ -42,20 +42,37 @@
 //! The runtime requirement promotes that key from secondary to primary rather
 //! than inventing it — see [`TypePath`].
 //!
-//! # What this crate deliberately does not do
+//! # Serialization stops at the value
 //!
-//! No serializers. Reflection describes types; turning a described value into
-//! JSON, a binary scene chunk, or a network packet is a separate concern that
-//! consumes this one. Building them together is how a reflection system ends up
-//! shaped by whichever format was written first.
+//! `docs/DESIGN.md` §4 gives this crate "serialization primitives", and the line
+//! it draws is between a *value* and the *memory* holding one:
+//!
+//! ```text
+//! raw component bytes  ←──→  Value  ←──→  text
+//!        (slop-ecs)                    (this crate)
+//! ```
+//!
+//! [`Value`] and the [text format](to_text) are here. Reading a struct out of
+//! raw memory by field offset is not — that is pointer arithmetic, and
+//! `docs/CONVENTIONS.md` §7 sanctions it in `slop-ecs`, so `slop-ecs` owns the
+//! left arrow and this crate stays entirely safe.
+//!
+//! What the split buys is that a second format — binary for shipping, per §8
+//! item 1 — writes another right arrow and touches neither the reflection walk
+//! nor any `unsafe`. Building format and reflection together is how a reflection
+//! system ends up shaped by whichever format was written first.
 
 mod info;
 mod path;
 mod registry;
+mod text;
+mod value;
 
-pub use info::{FieldInfo, Transfer, TypeInfo, TypeKind};
+pub use info::{FieldInfo, Primitive, Transfer, TypeInfo, TypeKind};
 pub use path::{TypeId, TypePath};
 pub use registry::{RegistryError, TypeRegistry};
+pub use text::{TextError, from_text, to_text};
+pub use value::{Struct, Value};
 
 /// Derive [`Reflect`] for a struct with named fields.
 ///
@@ -116,7 +133,7 @@ pub unsafe trait Reflect: 'static {
 /// and those paths are an ABI: a guest module naming `f32` must resolve to the
 /// same type the host means.
 macro_rules! primitive {
-    ($($type:ty),* $(,)?) => {
+    ($($type:ty => $kind:ident),* $(,)?) => {
         $(
             // SAFETY: the layout is taken directly from the type, and no drop
             // function is installed — every type here is `Copy`.
@@ -129,7 +146,7 @@ macro_rules! primitive {
                         Self::PATH,
                         std::alloc::Layout::new::<$type>(),
                         Self::TRANSFER,
-                        TypeKind::Primitive,
+                        TypeKind::Primitive(crate::Primitive::$kind),
                     )
                 }
             }
@@ -138,7 +155,20 @@ macro_rules! primitive {
 }
 
 primitive!(
-    bool, char, u8, u16, u32, u64, usize, i8, i16, i32, i64, isize, f32, f64
+    bool => Bool,
+    char => Char,
+    u8 => U8,
+    u16 => U16,
+    u32 => U32,
+    u64 => U64,
+    usize => Usize,
+    i8 => I8,
+    i16 => I16,
+    i32 => I32,
+    i64 => I64,
+    isize => Isize,
+    f32 => F32,
+    f64 => F64,
 );
 
 // SAFETY: the layout is `String`'s own, and the drop function does nothing but
@@ -159,7 +189,7 @@ unsafe impl Reflect for String {
                 Self::PATH,
                 std::alloc::Layout::new::<Self>(),
                 Self::TRANSFER,
-                TypeKind::Opaque,
+                TypeKind::String,
                 |pointer| std::ptr::drop_in_place(pointer.cast::<Self>()),
             )
         }
@@ -213,7 +243,7 @@ mod tests {
         assert_eq!(info.layout(), std::alloc::Layout::new::<f32>());
         assert_eq!(info.transfer(), Transfer::Blittable);
         assert!(info.drop_in_place().is_none());
-        assert!(matches!(info.kind(), TypeKind::Primitive));
+        assert!(matches!(info.kind(), TypeKind::Primitive(_)));
     }
 
     #[test]

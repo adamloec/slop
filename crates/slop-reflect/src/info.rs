@@ -93,6 +93,77 @@ impl FieldInfo {
     }
 }
 
+/// Which scalar a [`TypeKind::Primitive`] is.
+///
+/// A closed set. Unlike a struct, a primitive cannot be declared by a guest
+/// module — a guest's `i32` is *this* `i32`, because agreeing on what an `i32`
+/// is is the precondition for agreeing on anything else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Primitive {
+    /// `bool`, one byte holding `0` or `1`.
+    Bool,
+    /// `char`, a Unicode scalar value.
+    Char,
+    /// `u8`.
+    U8,
+    /// `u16`.
+    U16,
+    /// `u32`.
+    U32,
+    /// `u64`.
+    U64,
+    /// `usize`. **Platform-dependent width** — eight bytes on the x86-64 that
+    /// `docs/DESIGN.md` §2.14 scopes to, and a portability hazard in anything
+    /// written to a file. Prefer a fixed width in a component that will be
+    /// serialized.
+    Usize,
+    /// `i8`.
+    I8,
+    /// `i16`.
+    I16,
+    /// `i32`.
+    I32,
+    /// `i64`.
+    I64,
+    /// `isize`. Platform-dependent, as [`Usize`](Self::Usize).
+    Isize,
+    /// `f32`.
+    F32,
+    /// `f64`.
+    F64,
+}
+
+impl Primitive {
+    /// Whether this is a floating-point type.
+    ///
+    /// Text output distinguishes them: an `f32` holding a whole number is
+    /// written `1.0` rather than `1`, so a human reading the file can tell the
+    /// field is a float without consulting the type.
+    pub const fn is_float(self) -> bool {
+        matches!(self, Self::F32 | Self::F64)
+    }
+
+    /// The Rust name, which is also the registered [`TypePath`].
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Bool => "bool",
+            Self::Char => "char",
+            Self::U8 => "u8",
+            Self::U16 => "u16",
+            Self::U32 => "u32",
+            Self::U64 => "u64",
+            Self::Usize => "usize",
+            Self::I8 => "i8",
+            Self::I16 => "i16",
+            Self::I32 => "i32",
+            Self::I64 => "i64",
+            Self::Isize => "isize",
+            Self::F32 => "f32",
+            Self::F64 => "f64",
+        }
+    }
+}
+
 /// The shape of a type.
 ///
 /// Only what M1 needs. Enums, tuples, lists and maps each add a variant here
@@ -100,8 +171,22 @@ impl FieldInfo {
 /// when a new shape lands instead of silently ignoring it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeKind {
-    /// A scalar with no interior structure: `u32`, `f32`, `bool`.
-    Primitive,
+    /// A scalar with no interior structure, and **which** scalar it is.
+    ///
+    /// The payload is not decoration. A serializer handed a four-byte primitive
+    /// cannot tell `u32` from `f32`, and a property panel cannot choose a widget
+    /// — the layout is identical and only the interpretation differs. Anything
+    /// reading these bytes needs to be told.
+    Primitive(Primitive),
+    /// Owned UTF-8 text.
+    ///
+    /// Its own variant rather than a [`Primitive`]: it owns a heap allocation,
+    /// its length is not in its layout, and it is never
+    /// [`Blittable`](Transfer::Blittable). What makes it a *kind* rather than an
+    /// [`Opaque`](Self::Opaque) is that its contents are fully describable — a
+    /// serializer can write it and read it back, which is exactly what `Opaque`
+    /// means it cannot do.
+    String,
     /// A struct with named fields.
     Struct {
         /// In declaration order, which is also the order a property panel and a
@@ -252,7 +337,7 @@ impl TypeInfo {
     pub fn fields(&self) -> &[FieldInfo] {
         match &self.kind {
             TypeKind::Struct { fields } => fields,
-            TypeKind::Primitive | TypeKind::Opaque => &[],
+            TypeKind::Primitive(_) | TypeKind::String | TypeKind::Opaque => &[],
         }
     }
 
@@ -333,7 +418,11 @@ impl TypeInfo {
         });
 
         match &self.kind {
-            TypeKind::Primitive => eat(1),
+            TypeKind::Primitive(primitive) => {
+                eat(1);
+                eat(*primitive as u64);
+            }
+            TypeKind::String => eat(4),
             TypeKind::Opaque => eat(2),
             TypeKind::Struct { fields } => {
                 eat(3);
@@ -403,7 +492,7 @@ mod tests {
             "f32",
             Layout::new::<f32>(),
             Transfer::Blittable,
-            TypeKind::Primitive,
+            TypeKind::Primitive(Primitive::F32),
         );
 
         assert!(primitive.fields().is_empty());
