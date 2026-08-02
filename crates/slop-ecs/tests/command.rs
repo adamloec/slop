@@ -355,7 +355,11 @@ fn the_staging_area_survives_reallocating_under_a_stricter_alignment() {
     let mut commands = CommandBuffer::new();
 
     let mut expected = Vec::new();
-    for value in 0..200u32 {
+    // Miri interprets rather than executes, so volume is expensive there and the
+    // paths are what it checks — `docs/CONVENTIONS.md` §7.
+    let count = if cfg!(miri) { 16 } else { 200 };
+
+    for value in 0..count {
         let entity = commands.spawn();
         commands.insert(entity, Health { value });
         expected.push(value);

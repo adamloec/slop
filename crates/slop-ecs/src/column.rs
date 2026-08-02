@@ -621,6 +621,15 @@ mod tests {
     use slop_reflect::{Reflect, TypeKind};
     use std::rc::Rc;
 
+    /// How many elements a volume test uses.
+    ///
+    /// Miri interprets rather than executes and tracks provenance per byte, so a
+    /// thousand pushes there takes minutes. It checks the paths a test reaches
+    /// rather than how often — see `docs/CONVENTIONS.md` §7.
+    const fn many(native: usize) -> usize {
+        if cfg!(miri) { 16 } else { native }
+    }
+
     /// Push a typed value, handing the column ownership.
     fn push<T>(column: &mut Column, value: T) {
         push_at(column, value, Tick::new(1));
@@ -662,12 +671,14 @@ mod tests {
     fn pushed_values_come_back_in_order() {
         let mut column = column_of::<u32>();
 
-        for value in 0..64_u32 {
+        let count = many(64) as u32;
+
+        for value in 0..count {
             push(&mut column, value);
         }
 
-        assert_eq!(column.len(), 64);
-        for value in 0..64_u32 {
+        assert_eq!(column.len(), count as usize);
+        for value in 0..count {
             assert_eq!(read::<u32>(&column, value as usize), Some(value));
         }
     }
@@ -678,11 +689,13 @@ mod tests {
         // mistake shows up as garbage in the earliest elements.
         let mut column = column_of::<u64>();
 
-        for value in 0..1000_u64 {
+        let count = many(1000) as u64;
+
+        for value in 0..count {
             push(&mut column, value.wrapping_mul(0x9e37_79b9_7f4a_7c15));
         }
 
-        for value in 0..1000_u64 {
+        for value in 0..count {
             assert_eq!(
                 read::<u64>(&column, value as usize),
                 Some(value.wrapping_mul(0x9e37_79b9_7f4a_7c15)),
@@ -778,11 +791,12 @@ mod tests {
 
         {
             let mut column = column_of::<Witness>();
-            for _ in 0..100 {
+            let count = many(100);
+            for _ in 0..count {
                 push(&mut column, Witness(Rc::clone(&witness)));
             }
 
-            assert_eq!(Rc::strong_count(&witness), 101);
+            assert_eq!(Rc::strong_count(&witness), count + 1);
         }
 
         assert_eq!(
@@ -833,16 +847,17 @@ mod tests {
 
         assert_eq!(column.element_layout().size(), 0);
 
-        for _ in 0..1000 {
+        let count = many(1000);
+        for _ in 0..count {
             push(&mut column, Marker {});
         }
 
-        assert_eq!(column.len(), 1000);
-        assert!(column.get(999).is_some());
-        assert!(column.get(1000).is_none());
+        assert_eq!(column.len(), count);
+        assert!(column.get(count - 1).is_some());
+        assert!(column.get(count).is_none());
 
         assert!(column.swap_remove(0));
-        assert_eq!(column.len(), 999);
+        assert_eq!(column.len(), count - 1);
 
         column.clear();
         assert!(column.is_empty());
@@ -897,11 +912,12 @@ mod tests {
         // to write through, and the failure is silent on x86.
         let mut column = Column::new(&Aligned::type_info());
 
-        for value in 0..64_u64 {
+        let count = many(64);
+        for value in 0..count as u64 {
             push(&mut column, Aligned { value });
         }
 
-        for index in 0..64_usize {
+        for index in 0..count {
             let pointer = column.get(index).expect("in bounds");
 
             assert_eq!(

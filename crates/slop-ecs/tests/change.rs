@@ -529,7 +529,10 @@ fn many_entities_churn_without_a_stamp_landing_on_the_wrong_row() {
     // columns. This drives every operation that can break that — insert, remove,
     // despawn, and the swap-remove each of them performs.
     let mut world = world();
-    let mut entities: Vec<Entity> = (0..64).map(|x| placed(&mut world, x as f32)).collect();
+    // Miri interprets rather than executes, so volume costs minutes there while
+    // checking the same paths — `docs/CONVENTIONS.md` §7.
+    let count = if cfg!(miri) { 12 } else { 64 };
+    let mut entities: Vec<Entity> = (0..count).map(|x| placed(&mut world, x as f32)).collect();
 
     for (index, &entity) in entities.iter().enumerate() {
         if index % 3 == 0 {

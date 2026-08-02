@@ -563,7 +563,9 @@ fn a_resource_the_world_refuses_surfaces_as_an_ecs_error() {
 fn a_large_world_round_trips_intact() {
     let mut original = world();
 
-    for index in 0..200_u32 {
+    let count = if cfg!(miri) { 12 } else { 200 };
+
+    for index in 0..count {
         let entity = original.spawn();
         original
             .insert(

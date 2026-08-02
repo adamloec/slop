@@ -618,6 +618,24 @@ until it doesn't. Miri reports them exactly, with a line number. It only sees
 paths a test executes, so it is worth precisely as much as the coverage of the
 unsafe code.
 
+**Scale loop counts down under `cfg!(miri)`.** Miri interprets MIR rather than
+running compiled code, and tracks initialization, provenance and a borrow stack
+for every byte — so one pointer write becomes several bookkeeping operations and
+the whole suite runs 50–400× slower. A test that churns two hundred entities is
+free natively and minutes there.
+
+What Miri checks is the **paths** a test reaches, not how many times it reaches
+them. Eight entities exercise the same `unsafe` as two hundred, so:
+
+```rust
+let count = if cfg!(miri) { 8 } else { 200 };
+```
+
+Keep the native count meaningful — churn tests exist to shake out ordering bugs
+that only appear at volume, and that is a job for the ordinary run. A Miri run
+that nobody waits for is a Miri run that stops happening, which costs more than
+the coverage the volume would have bought.
+
 ## 8. Allocation and performance
 
 No heap allocation in per-frame paths — use the frame arena and reset once per

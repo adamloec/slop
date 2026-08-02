@@ -88,6 +88,15 @@ fn world(count: u32) -> World {
     world
 }
 
+/// How many entities a volume test uses.
+///
+/// Miri interprets rather than executes and tracks provenance for every byte, so
+/// volume costs minutes there while checking exactly the same paths — see
+/// `docs/CONVENTIONS.md` §7.
+fn entities() -> u32 {
+    if cfg!(miri) { 12 } else { 64 }
+}
+
 fn ticks(world: &World) -> Ticks {
     Ticks::everything(world.tick())
 }
@@ -97,7 +106,8 @@ fn two_disjoint_cells_mutate_one_world_concurrently() {
     // The scheduler's core claim, checked directly: two systems whose declared
     // access is disjoint may hold mutating queries over the same world at the
     // same time.
-    let world = world(64);
+    let count = entities();
+    let world = world(count);
     let ticks = ticks(&world);
 
     let writes_position = [Access::write::<Position>(), Access::read::<Velocity>()];
@@ -134,7 +144,7 @@ fn two_disjoint_cells_mutate_one_world_concurrently() {
         .collect();
     positions.sort_unstable();
 
-    assert_eq!(positions, (1..65).collect::<Vec<u32>>());
+    assert_eq!(positions, (1..=count).collect::<Vec<u32>>());
     assert!(world.query::<&Health>().all(|health| health.value == 99));
     world.assert_consistent();
 }
@@ -144,7 +154,8 @@ fn many_cells_reading_one_component_at_once() {
     // Shared access is the other half: any number of readers of the same
     // component may run together, which is what puts a whole render-extract
     // stage in one batch.
-    let world = world(32);
+    let count = entities();
+    let world = world(count);
     let ticks = ticks(&world);
     let reads = [Access::read::<Position>()];
     let total = AtomicUsize::new(0);
@@ -166,7 +177,7 @@ fn many_cells_reading_one_component_at_once() {
         }
     });
 
-    let one_pass: usize = (0..32).sum();
+    let one_pass: usize = (0..count as usize).sum();
     assert_eq!(total.load(Ordering::Relaxed), one_pass * 4);
 }
 
@@ -176,7 +187,7 @@ fn concurrent_change_stamps_do_not_tear() {
     // systems writing different components write into different columns' stamp
     // arrays; if those arrays were shared or aliased, this is where it would
     // show.
-    let world = world(64);
+    let world = world(entities());
     let ticks = Ticks {
         last_run: Tick::ZERO,
         this_run: world.tick(),

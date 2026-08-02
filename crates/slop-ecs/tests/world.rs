@@ -449,7 +449,13 @@ fn many_entities_churn_without_losing_track_of_any() {
     let mut world = world();
     let mut entities: Vec<(Entity, u32)> = Vec::new();
 
-    for value in 0..200_u32 {
+    // A multiple of 45, so the thirds, fifths and ninths below divide evenly and
+    // the arithmetic at the end holds whatever the count is. Miri interprets
+    // rather than executes, so volume costs minutes there while checking the
+    // same paths — `docs/CONVENTIONS.md` §7.
+    let count: u32 = if cfg!(miri) { 45 } else { 225 };
+
+    for value in 0..count {
         let entity = world.spawn();
         world.insert(entity, Health { value }).expect("ok");
         entities.push((entity, value));
@@ -501,7 +507,9 @@ fn many_entities_churn_without_losing_track_of_any() {
         }
     }
 
-    assert_eq!(world.len(), 200 - 40);
+    // Every fifth was despawned, so a fifth of the population is gone.
+    let despawned = count.div_ceil(5) as usize;
+    assert_eq!(world.len(), count as usize - despawned);
 }
 
 #[test]
