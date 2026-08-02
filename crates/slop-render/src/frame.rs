@@ -139,6 +139,10 @@ pub struct FrameRenderer {
     timeline: TimelineSemaphore,
     swapchain: Swapchain,
     present_queue: vk::Queue,
+    /// Resolved once at construction rather than per submit — see
+    /// `RenderError::NoPresentQueue` on why the fallback that used to be here
+    /// was wrong. Now unused directly: `Device::submit_graphics` picks it.
+    #[expect(dead_code, reason = "kept so the resolution stays explicit")]
     graphics_queue: vk::Queue,
     acquire_timeout: Duration,
     slot_index: usize,
@@ -371,39 +375,18 @@ impl FrameRenderer {
     /// Submit the recorded buffer, signalling both the per-image semaphore that
     /// present waits on and the timeline value this slot is reused after.
     fn submit(&self, slot: usize, image: usize, signalled: u64) -> Result<(), RenderError> {
-        let wait = [vk::SemaphoreSubmitInfo::default()
-            .semaphore(self.slots[slot].acquire.handle())
-            // At the colour-attachment stage rather than the top of the pipe:
-            // vertex work has no reason to wait for an image it never touches.
-            .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)];
-
-        let signal = [
-            vk::SemaphoreSubmitInfo::default()
-                .semaphore(self.render_finished[image].handle())
-                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
-            vk::SemaphoreSubmitInfo::default()
-                .semaphore(self.timeline.handle())
-                .value(signalled)
-                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
-        ];
-
-        let commands = [vk::CommandBufferSubmitInfo::default()
-            .command_buffer(self.slots[slot].command.handle())];
-
-        let submits = [vk::SubmitInfo2::default()
-            .wait_semaphore_infos(&wait)
-            .command_buffer_infos(&commands)
-            .signal_semaphore_infos(&signal)];
-
-        // SAFETY: the buffer is recorded and not pending — the timeline wait
-        // above guarantees it — every semaphore belongs to this device, and each
-        // borrowed array outlives the call.
-        unsafe {
-            self.device
-                .raw()
-                .queue_submit2(self.graphics_queue, &submits, vk::Fence::null())
-        }
-        .map_err(slop_rhi::RhiError::from)?;
+        self.device.submit_graphics(&slop_rhi::Submission {
+            wait: &[(
+                self.slots[slot].acquire.handle(),
+                // At the colour-attachment stage rather than the top of the
+                // pipe: vertex work has no reason to wait for an image it never
+                // touches.
+                vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+            )],
+            signal: &[self.render_finished[image].handle()],
+            signal_timeline: &[(self.timeline.handle(), signalled)],
+            command: &self.slots[slot].command,
+        })?;
 
         Ok(())
     }

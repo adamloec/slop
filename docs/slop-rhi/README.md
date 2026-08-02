@@ -36,11 +36,12 @@ Started. This is the bulk of M0 and the largest single body of work in it.
 | Headless rendering, verified by a golden image | Landed | M0 |
 | Bindless descriptor heap — sampled images, samplers, storage images | Landed | M0 |
 | Heap storage buffers — material and instance arrays a draw indexes | Landed | M2 |
+| Safe draw recording — `Pass`, so consumers write no `unsafe` | Landed — see §12 | M2 |
 | Pipeline layouts over the heap, with push constants | Landed | M0 |
 | Depth attachments, mip chains, cube maps | Planned — when the cube needs them | M0 |
 | Dedicated versus suballocated policy for large targets | Planned — needs measurements, not a guessed threshold | M1 |
 | Shader reflection, pipeline layout derivation | Planned — M2 item B (`PLAN.md` §9.2) | M2 |
-| Consumer-facing RHI API extraction | Planned — first requirements from `slop-render`, rest from the render graph | M2–M3 |
+| Consumer-facing RHI API extraction — `Pass`, `TextureSampler`, `Submission` | Landed for recording; resource API waits for the render graph | M2–M3 |
 
 ## 3. Module map
 
@@ -56,6 +57,8 @@ flowchart TD
     surface["surface.rs"]
     swapchain["swapchain.rs"]
     descriptor["descriptor.rs"]
+    pass["pass.rs"]
+    sampler["sampler.rs"]
     resource["resource.rs"]
     allocator["resource/allocator.rs"]
     buffer["resource/buffer.rs"]
@@ -67,6 +70,8 @@ flowchart TD
     lib --> surface
     lib --> swapchain
     lib --> descriptor
+    lib --> pass
+    lib --> sampler
     lib --> resource
 
     device --> physical
@@ -479,3 +484,53 @@ overwritten.
 36. **Capacity cannot grow after creation.** The set is allocated once and every
     pipeline is built against its layout, so the defaults are sized for a scene
     rather than for what M0 happens to need.
+
+## 12. Safe draw recording
+
+`CommandBuffer` had the transfer half — transitions, barriers, copies — and
+nothing for drawing, so every consumer reached through `device.raw()`. That put
+`unsafe` in `slop-render` and in three examples, while `CONVENTIONS.md` §7
+confines it to three named places and says *"adding a fourth is a design
+discussion rather than a review comment."* The discussion never happened; the
+code just accumulated.
+
+`Pass` closes it. `slop-render` now contains **zero** `unsafe`, and the examples
+contain one apiece — surface creation, which is genuinely unsafe because the
+window must outlive the surface.
+
+```rust
+let mut pass = command.begin_rendering(&Attachments { color, depth, extent });
+
+pass.bind_pipeline(&pipeline);
+pass.bind_heap(&heap);
+pass.draw_indexed(index_count, 1, 0, 0);
+// cmd_end_rendering on drop
+```
+
+**A pass is a scope, not a pair of calls.** Rendering must be begun and ended in
+balance, and every draw must fall between them. Two free functions leave both to
+discipline; a guard that ends on `Drop` and *owns* the draw methods makes them
+the compiler's problem — there is no way to draw outside a pass and no way to
+leave one open.
+
+`bind_pipeline` takes `&mut self` and remembers the layout, because Vulkan takes
+the *layout* rather than the pipeline for both push constants and descriptor
+binding. Passing a mismatched one is a compatibility error the driver reports in
+terms of neither, and it is the specific mistake that cost a debugging pass when
+the overlay first drew.
+
+Two things came out of the same work, for the same reason:
+
+- **`TextureSampler`** — three call sites created a `vk::Sampler` and destroyed
+  it in a `Drop` they each wrote. It is an owned value now. Not the sampler cache
+  `PLAN.md` §6.1 records; that deduplicates identical descriptions and arrives
+  with the material system, built out of these.
+- **`Device::submit_graphics`** — the frame renderer assembled `SubmitInfo2` by
+  hand. `Submission` names what a frame actually says: wait on these, run this,
+  signal those.
+
+**What is deliberately still missing:** anything with no caller. Multiple render
+targets, instanced draws with a non-zero first instance, indirect draws, 16-bit
+indices. `PLAN.md` §4.1-D is explicit that a guessed shape gets rebuilt anyway,
+and the resource-side API is still waiting on the render graph to say what it
+should be.

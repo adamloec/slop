@@ -9,10 +9,11 @@ use slop_core::diagnostics::tracing::{info, warn};
 use slop_math::{Mat4, Quat, Vec3};
 use slop_render::{Overlay, VertexBinding};
 use slop_rhi::{
-    Allocator, BindlessHeap, BindlessHeapConfig, Blend, Buffer, BufferConfig, BufferState,
-    DEPTH_CLEAR, Device, GraphicsPipeline, GraphicsPipelineConfig, Image, ImageConfig, ImageState,
-    MemoryLocation, PipelineLayout, PipelineLayoutConfig, SampledImage, Sampler, ShaderModule,
-    ShaderStage, vk,
+    Allocator, Attachments, BindlessHeap, BindlessHeapConfig, Blend, Buffer, BufferConfig,
+    BufferState, ClearValue, ColorAttachment, DEPTH_CLEAR, DepthAttachment, Device,
+    GraphicsPipeline, GraphicsPipelineConfig, Image, ImageConfig, ImageState, Load, MemoryLocation,
+    PipelineLayout, PipelineLayoutConfig, SampledImage, Sampler, SamplerConfig, ShaderModule,
+    ShaderStage, TextureSampler, vk,
 };
 
 /// Per-draw data, matching `PushConstants` in `shaders/passes/cube.slang`.
@@ -74,7 +75,10 @@ pub struct Scene {
     // handles.
     pipeline: GraphicsPipeline,
     heap: BindlessHeap,
-    sampler: vk::Sampler,
+    /// Held so the heap's descriptor stays valid; destroyed on drop by
+    /// `TextureSampler` rather than by hand.
+    #[expect(dead_code, reason = "the heap references this sampler")]
+    sampler: TextureSampler,
     /// Held so the heap's descriptor stays valid, and replaced on hot reload.
     texture: Image,
     depth: Image,
@@ -241,7 +245,19 @@ impl Scene {
             allocator,
             textures.get(albedo).expect("just loaded"),
         )?;
-        let sampler = create_sampler(device)?;
+        // Nearest filtering, deliberately. A linear filter would blur the
+        // checkerboard differently depending on sub-pixel coverage, making the
+        // golden image far more sensitive to a driver's rounding than to
+        // anything worth catching. Nearest also makes a texture-orientation
+        // mistake sharper to look at.
+        let sampler = TextureSampler::new(
+            device,
+            &SamplerConfig {
+                filter: slop_rhi::Filter::Nearest,
+                ..SamplerConfig::default()
+            },
+        )
+        .map_err(|error| error.to_string())?;
 
         let depth = Image::new(
             allocator,
@@ -258,7 +274,7 @@ impl Scene {
             .insert_sampled_image(texture.view(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
             .ok_or_else(|| String::from("the bindless heap had no room for one texture"))?;
         let sampler_slot = heap
-            .insert_sampler(sampler)
+            .insert_sampler(sampler.handle())
             .ok_or_else(|| String::from("the bindless heap had no room for one sampler"))?;
 
         let overlay_module = load_module(device, "shaders/passes/overlay.spv")?;
@@ -516,56 +532,19 @@ impl Scene {
             ImageState::DEPTH_ATTACHMENT,
         );
 
-        let color_attachment = [vk::RenderingAttachmentInfo::default()
-            .image_view(target.view)
-            .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-            .load_op(vk::AttachmentLoadOp::CLEAR)
-            .store_op(vk::AttachmentStoreOp::STORE)
-            .clear_value(vk::ClearValue {
-                color: vk::ClearColorValue {
-                    float32: [0.02, 0.02, 0.03, 1.0],
-                },
-            })];
-
-        let depth_attachment = vk::RenderingAttachmentInfo::default()
-            .image_view(self.depth.view())
-            .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
-            .load_op(vk::AttachmentLoadOp::CLEAR)
-            // DONT_CARE: nothing reads depth after the pass. A depth prepass or
-            // screen-space effect would need STORE, and this is where that
-            // changes.
-            .store_op(vk::AttachmentStoreOp::DONT_CARE)
-            .clear_value(vk::ClearValue {
-                depth_stencil: vk::ClearDepthStencilValue {
-                    // Zero, the far plane under reverse-Z. Clearing to 1.0
-                    // would put the far plane at *near* and reject every
-                    // fragment.
-                    depth: DEPTH_CLEAR,
-                    stencil: 0,
-                },
-            });
-
-        let rendering = vk::RenderingInfo::default()
-            .render_area(vk::Rect2D {
-                offset: vk::Offset2D { x: 0, y: 0 },
-                extent,
-            })
-            .layer_count(1)
-            .color_attachments(&color_attachment)
-            .depth_attachment(&depth_attachment);
-
-        let viewports = [vk::Viewport {
-            x: 0.0,
-            y: 0.0,
-            width: extent.width as f32,
-            height: extent.height as f32,
-            min_depth: 0.0,
-            max_depth: 1.0,
-        }];
-        let scissors = [vk::Rect2D {
-            offset: vk::Offset2D { x: 0, y: 0 },
+        let mut pass = command.begin_rendering(&Attachments {
+            color: ColorAttachment {
+                view: target.view,
+                load: Load::Clear(ClearValue::Color([0.02, 0.02, 0.03, 1.0])),
+            },
+            depth: Some(DepthAttachment {
+                view: self.depth.view(),
+                load: Load::Clear(ClearValue::Depth(DEPTH_CLEAR)),
+                // Scratch for this pass only.
+                store: false,
+            }),
             extent,
-        }];
+        });
 
         let view = slop_math::look_at(
             Vec3::new(0.0, 0.0, CAMERA_DISTANCE),
@@ -594,64 +573,33 @@ impl Scene {
             Self::second_model_matrix(frame.number),
         ];
 
-        let raw = self.device.raw();
-        let buffer = command.handle();
-        let vertex_buffers = [self.vertices.handle()];
-        let offsets = [0_u64];
+        pass.bind_pipeline(&self.pipeline);
+        pass.bind_heap(&self.heap);
 
-        // SAFETY: the command buffer is recording, every borrowed structure
-        // outlives these calls, `dynamic_rendering` is in the required feature
-        // tier, and the push constant block matches the layout the pipeline was
-        // built with.
-        unsafe {
-            raw.cmd_begin_rendering(buffer, &rendering);
-            raw.cmd_set_viewport(buffer, 0, &viewports);
-            raw.cmd_set_scissor(buffer, 0, &scissors);
-            raw.cmd_bind_pipeline(
-                buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline.handle(),
-            );
+        // Bound once, outside the loop. Both cubes are the same mesh — the
+        // bindless heap and push constants are what make them different, which
+        // is the model §4.2 stage B generalizes.
+        pass.bind_vertex_buffer(&self.vertices);
+        pass.bind_index_buffer(&self.indices);
 
-            self.heap.bind(
-                buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline.layout().handle(),
-            );
+        for model in draws {
+            let push = PushConstants {
+                model_view_projection: view_projection * model,
+                model,
+                texture: self.texture_slot.index(),
+                sampler: self.sampler_slot.index(),
+                padding: [0; 2],
+            };
 
-            // Bound once, outside the loop. Both cubes are the same mesh — the
-            // bindless heap and push constants are what make them different,
-            // which is the model §4.2 stage B generalizes.
-            raw.cmd_bind_vertex_buffers(buffer, 0, &vertex_buffers, &offsets);
-            raw.cmd_bind_index_buffer(buffer, self.indices.handle(), 0, vk::IndexType::UINT32);
-
-            for model in draws {
-                let push = PushConstants {
-                    model_view_projection: view_projection * model,
-                    model,
-                    texture: self.texture_slot.index(),
-                    sampler: self.sampler_slot.index(),
-                    padding: [0; 2],
-                };
-
-                raw.cmd_push_constants(
-                    buffer,
-                    self.pipeline.layout().handle(),
-                    vk::ShaderStageFlags::ALL,
-                    0,
-                    // Exactly the shader's block, not the Rust struct's
-                    // `size_of` — see `Scene::new` on the eight bytes of tail
-                    // padding that `Mat4` alignment adds.
-                    &bytemuck::bytes_of(&push)[..self.push_constant_bytes as usize],
-                );
-                raw.cmd_draw_indexed(buffer, self.index_count, 1, 0, 0, 0);
-            }
+            // Exactly the shader's block, not the Rust struct's `size_of` — see
+            // `Scene::new` on the eight bytes of tail padding `Mat4` alignment
+            // adds.
+            pass.push_constants(&bytemuck::bytes_of(&push)[..self.push_constant_bytes as usize]);
+            pass.draw_indexed(self.index_count, 1, 0, 0);
         }
 
-        // SAFETY: the buffer is recording and the pass was begun above.
-        unsafe {
-            self.device.raw().cmd_end_rendering(command.handle());
-        }
+        // Ends the pass, so the overlay below can open its own.
+        drop(pass);
 
         // After the scene's pass ends, in one of its own. The overlay wants no
         // depth, and a pipeline used inside a pass must declare the depth format
@@ -689,15 +637,9 @@ impl Drop for Scene {
             slop_core::diagnostics::tracing::error!(%error, "device did not go idle");
         }
 
-        // The sampler is a raw handle rather than an owning type, so it is
-        // destroyed by hand. It has no `slop-rhi` wrapper because a sampler is
-        // a small immutable descriptor an engine has a handful of, and the
-        // sampler cache that owns them properly belongs with the material
-        // system at M2.
-        //
-        // SAFETY: created from this device, destroyed exactly once, and the
-        // wait above means no submitted work still references it.
-        unsafe { self.device.raw().destroy_sampler(self.sampler, None) };
+        // The sampler used to be destroyed here by hand. It is a
+        // `TextureSampler` now, so its own `Drop` does it — which is what took
+        // the last `unsafe` out of this file.
     }
 }
 
@@ -832,24 +774,6 @@ fn upload_texture(
     Ok(texture)
 }
 
-/// A sampler for the cube's albedo.
-///
-/// Nearest filtering, deliberately. A linear filter would blur the checkerboard
-/// differently depending on sub-pixel coverage, which makes the golden image
-/// far more sensitive to a driver's rounding than to anything worth catching.
-/// Nearest also makes a texture-orientation mistake sharper to look at.
-fn create_sampler(device: &Arc<Device>) -> Result<vk::Sampler, String> {
-    let create_info = vk::SamplerCreateInfo::default()
-        .mag_filter(vk::Filter::NEAREST)
-        .min_filter(vk::Filter::NEAREST)
-        .mipmap_mode(vk::SamplerMipmapMode::NEAREST)
-        .address_mode_u(vk::SamplerAddressMode::REPEAT)
-        .address_mode_v(vk::SamplerAddressMode::REPEAT)
-        .address_mode_w(vk::SamplerAddressMode::REPEAT);
-
-    // SAFETY: `create_info` is fully initialized and borrows nothing.
-    unsafe { device.raw().create_sampler(&create_info, None) }.map_err(|error| error.to_string())
-}
 /// The Vulkan format a cooked texture's bytes are in.
 ///
 /// UNORM rather than the `_SRGB` variants for both, so the shader reads the

@@ -304,6 +304,11 @@ pub struct CommandBuffer {
 }
 
 impl CommandBuffer {
+    /// The device this was allocated from.
+    pub(crate) fn device(&self) -> &Arc<Device> {
+        &self.device
+    }
+
     /// The underlying handle, for recording commands `ash` exposes directly.
     ///
     /// M0 records through `ash` rather than behind an abstraction, per
@@ -625,4 +630,83 @@ pub fn submit_and_wait(
     }
 
     Ok(())
+}
+
+/// One frame's submission: what to wait for, what to run, what to signal.
+///
+/// Every field is optional in the sense that an empty slice is legal, which is
+/// what makes this cover both a frame (wait on acquire, signal present and the
+/// timeline) and a one-off upload (wait on nothing).
+#[derive(Debug, Clone, Copy)]
+pub struct Submission<'a> {
+    /// Semaphores the GPU waits on before the commands run, with the stage each
+    /// wait applies to.
+    ///
+    /// The stage matters: waiting at the top of the pipe stalls vertex work that
+    /// has no reason to wait, and the difference is visible in a frame's
+    /// occupancy rather than in correctness.
+    pub wait: &'a [(vk::Semaphore, vk::PipelineStageFlags2)],
+    /// Binary semaphores signalled when the commands finish.
+    pub signal: &'a [vk::Semaphore],
+    /// Timeline semaphores and the values to signal them to.
+    pub signal_timeline: &'a [(vk::Semaphore, u64)],
+    /// The command buffer to run.
+    pub command: &'a CommandBuffer,
+}
+
+impl Device {
+    /// Submit to the graphics queue.
+    ///
+    /// Exists so that recording a frame needs no `unsafe` in the crate doing the
+    /// recording — `docs/CONVENTIONS.md` §7 keeps it in this one.
+    ///
+    /// # Errors
+    ///
+    /// [`RhiError`] if the driver rejects the submission, which for a
+    /// well-formed one means the device was lost.
+    pub fn submit_graphics(&self, submission: &Submission<'_>) -> Result<(), RhiError> {
+        let wait: Vec<vk::SemaphoreSubmitInfo<'_>> = submission
+            .wait
+            .iter()
+            .map(|(semaphore, stage)| {
+                vk::SemaphoreSubmitInfo::default()
+                    .semaphore(*semaphore)
+                    .stage_mask(*stage)
+            })
+            .collect();
+
+        let signal: Vec<vk::SemaphoreSubmitInfo<'_>> = submission
+            .signal
+            .iter()
+            .map(|semaphore| {
+                vk::SemaphoreSubmitInfo::default()
+                    .semaphore(*semaphore)
+                    .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+            })
+            .chain(submission.signal_timeline.iter().map(|(semaphore, value)| {
+                vk::SemaphoreSubmitInfo::default()
+                    .semaphore(*semaphore)
+                    .value(*value)
+                    .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+            }))
+            .collect();
+
+        let commands =
+            [vk::CommandBufferSubmitInfo::default().command_buffer(submission.command.handle())];
+
+        let submits = [vk::SubmitInfo2::default()
+            .wait_semaphore_infos(&wait)
+            .command_buffer_infos(&commands)
+            .signal_semaphore_infos(&signal)];
+
+        // SAFETY: the caller guarantees the command buffer is recorded and not
+        // pending; every semaphore belongs to this device, and each borrowed
+        // array outlives the call.
+        unsafe {
+            self.raw()
+                .queue_submit2(self.queues().graphics, &submits, vk::Fence::null())
+        }?;
+
+        Ok(())
+    }
 }

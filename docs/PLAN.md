@@ -132,7 +132,7 @@ What M2 still owes is the half that needs a renderer to be worth anything:
 materials, a Sponza-scale scene, and the debug UI. §9 has the order and why
 `slop-render` comes out of the examples first.
 
-792 tests. Clippy and rustdoc clean under `-D warnings` in both feature
+797 tests. Clippy and rustdoc clean under `-D warnings` in both feature
 configurations, Vulkan validation reporting nothing, and every crate containing
 `unsafe` passing under Miri — `slop-ecs` under both Stacked and Tree Borrows.
 
@@ -177,6 +177,7 @@ finished.
 | `Assets<T>` — the registry, handles, load/reload/unload | Landed |
 | Hot reload — `Assets::reload_changed` + `slop-cli cook --watch` | Landed |
 | `slop-render` — the frame renderer, all examples driven by it | Landed |
+| Safe draw recording in `slop-rhi`, so `slop-render` has no `unsafe` | Landed |
 | Shader reflection — layouts read from the cooked shader, not restated | Landed |
 | Debug UI (§10.2) — the egui overlay and frame timing | Landed |
 | Materials — the cooked format, glTF import, referenced images | Landed |

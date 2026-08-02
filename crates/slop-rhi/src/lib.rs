@@ -31,14 +31,18 @@ mod descriptor;
 mod device;
 mod error;
 mod instance;
+mod pass;
 mod pipeline;
 mod resource;
+mod sampler;
 mod shader;
 mod surface;
 mod swapchain;
 mod sync;
 
-pub use command::{BufferState, CommandBuffer, CommandPool, ImageState, submit_and_wait};
+pub use command::{
+    BufferState, CommandBuffer, CommandPool, ImageState, Submission, submit_and_wait,
+};
 pub use descriptor::{
     BindlessHeap, BindlessHeapConfig, HEAP_SET, SAMPLED_IMAGE_BINDING, SAMPLER_BINDING,
     STORAGE_BUFFER_BINDING, STORAGE_IMAGE_BINDING, SampledImage, Sampler, StorageBuffer,
@@ -50,6 +54,7 @@ pub use device::{
 };
 pub use error::RhiError;
 pub use instance::{Instance, InstanceConfig, Validation};
+pub use pass::{Attachments, ClearValue, ColorAttachment, DepthAttachment, Load, Pass};
 pub use pipeline::{
     Blend, DEPTH_CLEAR, DEPTH_COMPARE, GraphicsPipeline, GraphicsPipelineConfig, PipelineLayout,
     PipelineLayoutConfig, ShaderStage, VertexLayout,
@@ -58,6 +63,7 @@ pub use resource::{
     Allocator, AllocatorStats, Buffer, BufferConfig, Image, ImageConfig, MemoryLocation, aspect_of,
     preferred_depth_format,
 };
+pub use sampler::{Filter, SamplerConfig, TextureSampler, Wrap};
 pub use shader::ShaderModule;
 pub use surface::{Surface, required_surface_extensions};
 pub use swapchain::{AcquireOutcome, PresentMode, PresentOutcome, Swapchain, SwapchainConfig};

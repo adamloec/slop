@@ -36,8 +36,9 @@ use slop_app::winit::event_loop::{ActiveEventLoop, EventLoop};
 use slop_app::winit::window::{Window, WindowId};
 use slop_render::{Frame, FrameRenderer, FrameRendererConfig, Target};
 use slop_rhi::{
-    Blend, Device, DeviceSelection, GraphicsPipeline, GraphicsPipelineConfig, ImageState, Instance,
-    InstanceConfig, PipelineLayout, ShaderModule, ShaderStage, Surface, vk,
+    Attachments, Blend, ClearValue, ColorAttachment, Device, DeviceSelection, GraphicsPipeline,
+    GraphicsPipelineConfig, ImageState, Instance, InstanceConfig, Load, PipelineLayout,
+    ShaderModule, ShaderStage, Surface, vk,
 };
 
 fn main() {
@@ -259,11 +260,10 @@ impl Renderer {
 
         // Borrowed out of `self` so the closure does not capture it whole:
         // `render` needs `&mut self.renderer` at the same time.
-        let device = &self.device;
         let pipeline = &self.pipeline;
 
         self.renderer
-            .render(|frame| record(device, pipeline, frame))
+            .render(|frame| record(pipeline, frame))
             .map_err(|error| error.to_string())?;
 
         Ok(())
@@ -275,7 +275,7 @@ impl Renderer {
 /// A free function rather than a method, because everything it needs arrives in
 /// the [`Frame`] or is borrowed explicitly — which is also what lets it be
 /// called while the frame renderer is mutably borrowed.
-fn record(device: &Arc<Device>, pipeline: &GraphicsPipeline, frame: &Frame<'_>) {
+fn record(pipeline: &GraphicsPipeline, frame: &Frame<'_>) {
     let Target {
         image,
         view,
@@ -294,54 +294,24 @@ fn record(device: &Arc<Device>, pipeline: &GraphicsPipeline, frame: &Frame<'_>) 
         ImageState::COLOR_ATTACHMENT,
     );
 
-    let clear = vk::ClearValue {
-        color: vk::ClearColorValue {
-            float32: [0.02, 0.02, 0.03, 1.0],
+    let mut pass = frame.command.begin_rendering(&Attachments {
+        color: ColorAttachment {
+            view,
+            load: Load::Clear(ClearValue::Color([0.02, 0.02, 0.03, 1.0])),
         },
-    };
-    let attachments = [vk::RenderingAttachmentInfo::default()
-        .image_view(view)
-        .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-        .load_op(vk::AttachmentLoadOp::CLEAR)
-        .store_op(vk::AttachmentStoreOp::STORE)
-        .clear_value(clear)];
-
-    let rendering = vk::RenderingInfo::default()
-        .render_area(vk::Rect2D {
-            offset: vk::Offset2D { x: 0, y: 0 },
-            extent,
-        })
-        .layer_count(1)
-        .color_attachments(&attachments);
-
-    let viewports = [vk::Viewport {
-        x: 0.0,
-        y: 0.0,
-        width: extent.width as f32,
-        height: extent.height as f32,
-        min_depth: 0.0,
-        max_depth: 1.0,
-    }];
-    let scissors = [vk::Rect2D {
-        offset: vk::Offset2D { x: 0, y: 0 },
+        // No depth: the triangle is one flat primitive with nothing to occlude
+        // it, and the pipeline was built the same way.
+        depth: None,
         extent,
-    }];
+    });
 
-    let raw = device.raw();
-    let buffer = frame.command.handle();
+    pass.bind_pipeline(pipeline);
+    // Three vertices, one instance. Positions come from SV_VertexID, so there is
+    // nothing to bind.
+    pass.draw(3, 1);
 
-    // SAFETY: the buffer is recording, every borrowed structure outlives these
-    // calls, and `dynamic_rendering` is in the required feature tier.
-    unsafe {
-        raw.cmd_begin_rendering(buffer, &rendering);
-        raw.cmd_set_viewport(buffer, 0, &viewports);
-        raw.cmd_set_scissor(buffer, 0, &scissors);
-        raw.cmd_bind_pipeline(buffer, vk::PipelineBindPoint::GRAPHICS, pipeline.handle());
-        // Three vertices, one instance. Positions come from SV_VertexID, so
-        // there is nothing to bind.
-        raw.cmd_draw(buffer, 3, 1, 0, 0);
-        raw.cmd_end_rendering(buffer);
-    }
+    // Ends the pass, so the transition below is outside it.
+    drop(pass);
 
     frame.command.transition_image(
         image,

@@ -35,9 +35,11 @@ use slop_core::FxHashMap;
 use slop_core::diagnostics::tracing::warn;
 use slop_math::Mat4;
 use slop_rhi::{
-    Allocator, BindlessHeap, Blend, Buffer, BufferConfig, BufferState, Device, GraphicsPipeline,
-    GraphicsPipelineConfig, Image, ImageConfig, ImageState, MemoryLocation, PipelineLayout,
-    PipelineLayoutConfig, SampledImage, Sampler, ShaderModule, ShaderStage, StorageBuffer, vk,
+    Allocator, Attachments, BindlessHeap, Blend, Buffer, BufferConfig, BufferState, ClearValue,
+    ColorAttachment, DepthAttachment, Device, GraphicsPipeline, GraphicsPipelineConfig, Image,
+    ImageConfig, ImageState, Load, MemoryLocation, PipelineLayout, PipelineLayoutConfig,
+    SampledImage, Sampler, SamplerConfig, ShaderModule, ShaderStage, StorageBuffer, TextureSampler,
+    vk,
 };
 
 use crate::{RenderError, VertexBinding};
@@ -113,7 +115,11 @@ pub struct MeshRenderer {
     materials: Option<Buffer>,
     materials_slot: Option<slop_core::Handle<StorageBuffer>>,
     texture_slots: Vec<slop_core::Handle<SampledImage>>,
-    sampler: vk::Sampler,
+    /// Destroyed when this drops, which is `TextureSampler`'s job rather than a
+    /// hand-written `Drop` here.
+    /// Held so the heap's descriptor stays valid; destroyed on drop.
+    #[expect(dead_code, reason = "the heap references this sampler")]
+    sampler: TextureSampler,
     sampler_slot: slop_core::Handle<Sampler>,
     /// Owned rather than borrowed: its format is what the pipeline was built
     /// against, so nothing else can supply one that agrees by accident.
@@ -182,12 +188,21 @@ impl MeshRenderer {
             },
         )?;
 
-        let sampler = create_sampler(device)?;
-        let sampler_slot = heap
-            .insert_sampler(sampler)
-            .ok_or(RenderError::OverlayLayout {
-                what: "the bindless heap had no room for the model sampler",
-            })?;
+        // Anisotropic and repeating — what a surface texture wants, and the
+        // difference between a floor that reads sharp at a grazing angle and one
+        // that smears.
+        let sampler = TextureSampler::new(
+            device,
+            &SamplerConfig {
+                anisotropy: Some(16.0),
+                ..SamplerConfig::default()
+            },
+        )?;
+        let sampler_slot =
+            heap.insert_sampler(sampler.handle())
+                .ok_or(RenderError::OverlayLayout {
+                    what: "the bindless heap had no room for the model sampler",
+                })?;
 
         Ok(Self {
             pipeline,
@@ -446,10 +461,6 @@ impl MeshRenderer {
             return;
         };
 
-        let raw = self.device.raw();
-        let buffer = frame.command.handle();
-        let extent = frame.target.extent;
-
         frame.command.transition_image(
             frame.target.image,
             vk::ImageAspectFlags::COLOR,
@@ -465,97 +476,43 @@ impl MeshRenderer {
             ImageState::DEPTH_ATTACHMENT,
         );
 
-        let color = [vk::RenderingAttachmentInfo::default()
-            .image_view(frame.target.view)
-            .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-            .load_op(vk::AttachmentLoadOp::CLEAR)
-            .store_op(vk::AttachmentStoreOp::STORE)
-            .clear_value(vk::ClearValue {
-                color: vk::ClearColorValue {
-                    float32: [0.02, 0.02, 0.03, 1.0],
-                },
-            })];
+        let mut pass = frame.command.begin_rendering(&Attachments {
+            color: ColorAttachment {
+                view: frame.target.view,
+                load: Load::Clear(ClearValue::Color([0.02, 0.02, 0.03, 1.0])),
+            },
+            depth: Some(DepthAttachment {
+                view: depth.view(),
+                load: Load::Clear(ClearValue::Depth(slop_rhi::DEPTH_CLEAR)),
+                // Scratch for this pass only, so storing it would cost
+                // bandwidth for something nothing reads.
+                store: false,
+            }),
+            extent: frame.target.extent,
+        });
 
-        let depth_attachment = vk::RenderingAttachmentInfo::default()
-            .image_view(depth.view())
-            .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
-            .load_op(vk::AttachmentLoadOp::CLEAR)
-            .store_op(vk::AttachmentStoreOp::DONT_CARE)
-            .clear_value(vk::ClearValue {
-                depth_stencil: vk::ClearDepthStencilValue {
-                    depth: slop_rhi::DEPTH_CLEAR,
-                    stencil: 0,
-                },
-            });
+        pass.bind_pipeline(&self.pipeline);
+        pass.bind_heap(heap);
 
-        let rendering = vk::RenderingInfo::default()
-            .render_area(vk::Rect2D {
-                offset: vk::Offset2D { x: 0, y: 0 },
-                extent,
-            })
-            .layer_count(1)
-            .color_attachments(&color)
-            .depth_attachment(&depth_attachment);
+        for placement in &self.placements {
+            let mesh = &self.meshes[placement.mesh];
 
-        let viewports = [vk::Viewport {
-            x: 0.0,
-            y: 0.0,
-            width: extent.width as f32,
-            height: extent.height as f32,
-            min_depth: 0.0,
-            max_depth: 1.0,
-        }];
-        let scissors = [vk::Rect2D {
-            offset: vk::Offset2D { x: 0, y: 0 },
-            extent,
-        }];
+            let push = PushConstants {
+                model_view_projection: view_projection * placement.transform,
+                normal_rows: normal_rows(placement.transform),
+                materials: materials.index(),
+                material: mesh.material,
+                _pad: [0; 2],
+            };
 
-        // SAFETY: the buffer is recording and outside a pass, every handle
-        // belongs to this device, and each borrowed array outlives the call.
-        unsafe {
-            raw.cmd_begin_rendering(buffer, &rendering);
-            raw.cmd_set_viewport(buffer, 0, &viewports);
-            raw.cmd_set_scissor(buffer, 0, &scissors);
-
-            // With *this* pipeline's layout. Two layouts are compatible only if
-            // their push constant ranges match as well as their set layouts, so
-            // another pass's binding does not carry over.
-            heap.bind(
-                buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline.layout().handle(),
-            );
-            raw.cmd_bind_pipeline(
-                buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline.handle(),
-            );
-
-            for placement in &self.placements {
-                let mesh = &self.meshes[placement.mesh];
-
-                let push = PushConstants {
-                    model_view_projection: view_projection * placement.transform,
-                    normal_rows: normal_rows(placement.transform),
-                    materials: materials.index(),
-                    material: mesh.material,
-                    _pad: [0; 2],
-                };
-
-                raw.cmd_push_constants(
-                    buffer,
-                    self.pipeline.layout().handle(),
-                    vk::ShaderStageFlags::ALL,
-                    0,
-                    &bytemuck::bytes_of(&push)[..self.push_constant_bytes as usize],
-                );
-                raw.cmd_bind_vertex_buffers(buffer, 0, &[mesh.vertices.handle()], &[0]);
-                raw.cmd_bind_index_buffer(buffer, mesh.indices.handle(), 0, vk::IndexType::UINT32);
-                raw.cmd_draw_indexed(buffer, mesh.index_count, 1, 0, 0, 0);
-            }
-
-            raw.cmd_end_rendering(buffer);
+            pass.push_constants(&bytemuck::bytes_of(&push)[..self.push_constant_bytes as usize]);
+            pass.bind_vertex_buffer(&mesh.vertices);
+            pass.bind_index_buffer(&mesh.indices);
+            pass.draw_indexed(mesh.index_count, 1, 0, 0);
         }
+
+        // Ends the pass, so the transition below is outside it.
+        drop(pass);
 
         // Left in the state the frame asked for. The overlay draws after this
         // and reopens its own pass, which is why the colour attachment does not
@@ -566,15 +523,6 @@ impl MeshRenderer {
             ImageState::COLOR_ATTACHMENT,
             frame.target.to,
         );
-    }
-}
-
-impl Drop for MeshRenderer {
-    fn drop(&mut self) {
-        // SAFETY: the caller waits for the device before dropping the renderer —
-        // `FrameRenderer::drop` and the application's teardown both do — and the
-        // sampler was created from this device.
-        unsafe { self.device.raw().destroy_sampler(self.sampler, None) };
     }
 }
 
@@ -758,29 +706,6 @@ fn vulkan_format(format: slop_asset::Format) -> vk::Format {
         slop_asset::Format::Rgba8 => vk::Format::R8G8B8A8_UNORM,
         slop_asset::Format::Bc7 => vk::Format::BC7_UNORM_BLOCK,
     }
-}
-
-/// Anisotropic, repeating — what a surface texture wants.
-fn create_sampler(device: &Arc<Device>) -> Result<vk::Sampler, RenderError> {
-    let info = vk::SamplerCreateInfo::default()
-        .mag_filter(vk::Filter::LINEAR)
-        .min_filter(vk::Filter::LINEAR)
-        .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
-        .address_mode_u(vk::SamplerAddressMode::REPEAT)
-        .address_mode_v(vk::SamplerAddressMode::REPEAT)
-        .address_mode_w(vk::SamplerAddressMode::REPEAT)
-        // On, and in the required feature tier. Without it a floor viewed at a
-        // grazing angle blurs to a smear, which is the single most visible
-        // difference between a bring-up renderer and one that looks right.
-        .anisotropy_enable(true)
-        .max_anisotropy(16.0)
-        .max_lod(vk::LOD_CLAMP_NONE);
-
-    // SAFETY: `info` is fully initialized and borrows nothing that outlives it.
-    let sampler =
-        unsafe { device.raw().create_sampler(&info, None) }.map_err(slop_rhi::RhiError::Vulkan)?;
-
-    Ok(sampler)
 }
 
 #[cfg(test)]

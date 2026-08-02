@@ -40,9 +40,10 @@ use std::sync::Arc;
 
 use slop_asset::Reflection;
 use slop_rhi::{
-    Blend, Buffer, BufferConfig, Device, GraphicsPipeline, GraphicsPipelineConfig, Image,
-    ImageConfig, ImageState, MemoryLocation, PipelineLayout, PipelineLayoutConfig, SampledImage,
-    Sampler, ShaderModule, ShaderStage, VertexLayout, vk,
+    Attachments, Blend, Buffer, BufferConfig, ColorAttachment, Device, GraphicsPipeline,
+    GraphicsPipelineConfig, Image, ImageConfig, ImageState, Load, MemoryLocation, PipelineLayout,
+    PipelineLayoutConfig, SampledImage, Sampler, SamplerConfig, ShaderModule, ShaderStage,
+    TextureSampler, VertexLayout, vk,
 };
 
 use crate::RenderError;
@@ -96,7 +97,9 @@ pub struct Overlay {
     // Declared in drop order: things built from the device, then the device.
     pipeline: GraphicsPipeline,
     textures: slop_core::FxHashMap<u64, Managed>,
-    sampler: vk::Sampler,
+    /// Held so the heap's descriptor stays valid; destroyed on drop.
+    #[expect(dead_code, reason = "the heap references this sampler")]
+    sampler: TextureSampler,
     sampler_slot: slop_core::Handle<Sampler>,
     /// One set of dynamic buffers per in-flight slot. See `Frame::slot`.
     meshes: Vec<MeshBuffers>,
@@ -167,12 +170,21 @@ impl Overlay {
             },
         )?;
 
-        let sampler = create_sampler(device)?;
-        let sampler_slot = heap
-            .insert_sampler(sampler)
-            .ok_or(RenderError::OverlayLayout {
-                what: "the bindless heap had no room for the overlay's sampler",
-            })?;
+        // Linear and clamped. Nearest would make text shimmer as a window moves,
+        // because the atlas is sampled at fractional positions; repeating would
+        // bleed the opposite edge of the atlas into a glyph.
+        let sampler = TextureSampler::new(
+            device,
+            &SamplerConfig {
+                wrap: slop_rhi::Wrap::ClampToEdge,
+                ..SamplerConfig::default()
+            },
+        )?;
+        let sampler_slot =
+            heap.insert_sampler(sampler.handle())
+                .ok_or(RenderError::OverlayLayout {
+                    what: "the bindless heap had no room for the overlay's sampler",
+                })?;
 
         Ok(Self {
             pipeline,
@@ -364,98 +376,56 @@ impl Overlay {
         let buffers = &mut self.meshes[frame.slot];
         buffers.write(allocator, &vertices, &indices)?;
 
-        let raw = self.device.raw();
-        let handle = command.handle();
         let (Some(vertex_buffer), Some(index_buffer)) = (&buffers.vertices, &buffers.indices)
         else {
             return Ok(());
         };
 
-        let attachments = [vk::RenderingAttachmentInfo::default()
-            .image_view(frame.target.view)
-            .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-            // LOAD, never CLEAR: the scene is already in this attachment and the
-            // overlay composites over it.
-            .load_op(vk::AttachmentLoadOp::LOAD)
-            .store_op(vk::AttachmentStoreOp::STORE)];
+        let mut pass = command.begin_rendering(&Attachments {
+            color: ColorAttachment {
+                view: frame.target.view,
+                // Preserve, never clear: the scene is already in this attachment
+                // and the overlay composites over it.
+                load: Load::Preserve,
+            },
+            depth: None,
+            extent: frame.target.extent,
+        });
 
-        let rendering = vk::RenderingInfo::default()
-            .render_area(vk::Rect2D {
-                offset: vk::Offset2D { x: 0, y: 0 },
-                extent: frame.target.extent,
-            })
-            .layer_count(1)
-            .color_attachments(&attachments);
+        pass.bind_pipeline(&self.pipeline);
+        // Re-bound with *this* pipeline's layout. Two layouts are compatible
+        // only if their push constant ranges match as well as their set
+        // layouts, and the overlay's block is a different size from the
+        // scene's — so the scene's binding does not carry over.
+        pass.bind_heap(heap);
+        pass.bind_vertex_buffer(vertex_buffer);
+        pass.bind_index_buffer(index_buffer);
 
-        let viewports = [vk::Viewport {
-            x: 0.0,
-            y: 0.0,
-            width: frame.target.extent.width as f32,
-            height: frame.target.extent.height as f32,
-            min_depth: 0.0,
-            max_depth: 1.0,
-        }];
+        for draw in &draws {
+            let push = PushConstants {
+                // In *points*, not physical pixels. egui's vertex positions
+                // are logical, so mapping them to clip space has to divide
+                // by the logical size — while the scissor below is physical,
+                // because Vulkan's is. Dividing geometry by the physical size
+                // draws the interface at 1/scale while its clip rectangles
+                // stay full size, which shaves the left edge off every
+                // label and is invisible at 100% display scaling.
+                screen_size: [
+                    frame.target.extent.width as f32 / pixels_per_point,
+                    frame.target.extent.height as f32 / pixels_per_point,
+                ],
+                texture: draw.texture,
+                sampler: self.sampler_slot.index(),
+            };
 
-        // SAFETY: the buffer is recording and outside a pass, every handle
-        // belongs to this device, and each borrowed array outlives the call.
-        unsafe {
-            raw.cmd_begin_rendering(handle, &rendering);
-            raw.cmd_set_viewport(handle, 0, &viewports);
-
-            // Re-bound with *this* pipeline's layout. Two layouts are compatible
-            // only if their push constant ranges match as well as their set
-            // layouts, and the overlay's block is a different size from the
-            // scene's — so the scene's binding does not carry over.
-            heap.bind(
-                handle,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline.layout().handle(),
+            pass.set_scissor(draw.scissor);
+            pass.push_constants(&bytemuck::bytes_of(&push)[..self.push_constant_bytes as usize]);
+            pass.draw_indexed(
+                draw.index_count,
+                1,
+                draw.first_index,
+                draw.base_vertex as i32,
             );
-
-            raw.cmd_bind_pipeline(
-                handle,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline.handle(),
-            );
-            raw.cmd_bind_vertex_buffers(handle, 0, &[vertex_buffer.handle()], &[0]);
-            raw.cmd_bind_index_buffer(handle, index_buffer.handle(), 0, vk::IndexType::UINT32);
-
-            for draw in &draws {
-                let push = PushConstants {
-                    // In *points*, not physical pixels. egui's vertex positions
-                    // are logical, so mapping them to clip space has to divide
-                    // by the logical size — while the scissor below is physical,
-                    // because Vulkan's is. Dividing geometry by the physical size
-                    // draws the interface at 1/scale while its clip rectangles
-                    // stay full size, which shaves the left edge off every
-                    // label and is invisible at 100% display scaling.
-                    screen_size: [
-                        frame.target.extent.width as f32 / pixels_per_point,
-                        frame.target.extent.height as f32 / pixels_per_point,
-                    ],
-                    texture: draw.texture,
-                    sampler: self.sampler_slot.index(),
-                };
-
-                raw.cmd_set_scissor(handle, 0, &[draw.scissor]);
-                raw.cmd_push_constants(
-                    handle,
-                    self.pipeline.layout().handle(),
-                    vk::ShaderStageFlags::ALL,
-                    0,
-                    &bytemuck::bytes_of(&push)[..self.push_constant_bytes as usize],
-                );
-                raw.cmd_draw_indexed(
-                    handle,
-                    draw.index_count,
-                    1,
-                    draw.first_index,
-                    draw.base_vertex as i32,
-                    0,
-                );
-            }
-
-            raw.cmd_end_rendering(handle);
         }
 
         Ok(())
@@ -678,32 +648,6 @@ fn check_layout(reflection: &Reflection) -> Result<(), RenderError> {
     }
 
     Ok(())
-}
-
-/// Nearest-neighbour is wrong here: egui's atlas is sampled at fractional
-/// positions and a nearest filter makes text shimmer as a window moves.
-fn create_sampler(device: &Arc<Device>) -> Result<vk::Sampler, RenderError> {
-    let info = vk::SamplerCreateInfo::default()
-        .mag_filter(vk::Filter::LINEAR)
-        .min_filter(vk::Filter::LINEAR)
-        .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-        .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-        .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
-
-    // SAFETY: `info` is fully initialized and borrows nothing that outlives it.
-    let sampler =
-        unsafe { device.raw().create_sampler(&info, None) }.map_err(slop_rhi::RhiError::Vulkan)?;
-
-    Ok(sampler)
-}
-
-impl Drop for Overlay {
-    fn drop(&mut self) {
-        // SAFETY: the device is idle — `FrameRenderer::drop` and the
-        // application's own teardown both wait — and the sampler was created
-        // from this device.
-        unsafe { self.device.raw().destroy_sampler(self.sampler, None) };
-    }
 }
 
 impl std::fmt::Debug for Overlay {
