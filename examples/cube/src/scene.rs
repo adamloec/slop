@@ -97,6 +97,8 @@ pub struct Scene {
     vertices: Buffer,
     texture_slot: Handle<SampledImage>,
     sampler_slot: Handle<Sampler>,
+    /// How many indices the cooked mesh has, for the draw call.
+    index_count: u32,
     device: Arc<Device>,
 }
 
@@ -159,11 +161,17 @@ impl Scene {
         )
         .map_err(|error| error.to_string())?;
 
+        // Geometry from the cooked cache rather than from a `const` in this
+        // crate. `assets/cube.gltf` was generated from that `const`, so the
+        // golden image is the oracle for the whole import path — parse, cook,
+        // cache, VFS, decode, upload.
+        let cooked = load_mesh()?;
+
         let vertices = upload_buffer(
             device,
             allocator,
             "cube vertices",
-            bytes_of(&mesh::VERTICES),
+            bytes_of(&cooked.vertices),
             vk::BufferUsageFlags::VERTEX_BUFFER,
             BufferState::VERTEX_INPUT,
         )?;
@@ -171,10 +179,12 @@ impl Scene {
             device,
             allocator,
             "cube indices",
-            bytes_of(&mesh::INDICES),
+            bytes_of(&cooked.indices),
             vk::BufferUsageFlags::INDEX_BUFFER,
             BufferState::INDEX_INPUT,
         )?;
+        let index_count = u32::try_from(cooked.indices.len())
+            .map_err(|_| String::from("the cube has more indices than a draw call can take"))?;
 
         let texture = upload_texture(device, allocator)?;
         let sampler = create_sampler(device)?;
@@ -207,6 +217,7 @@ impl Scene {
             vertices,
             texture_slot,
             sampler_slot,
+            index_count,
             device: Arc::clone(device),
         })
     }
@@ -404,7 +415,7 @@ impl Scene {
             // bindless heap and push constants are what make them different,
             // which is the model §4.2 stage B generalizes.
             raw.cmd_bind_vertex_buffers(buffer, 0, &vertex_buffers, &offsets);
-            raw.cmd_bind_index_buffer(buffer, self.indices.handle(), 0, vk::IndexType::UINT16);
+            raw.cmd_bind_index_buffer(buffer, self.indices.handle(), 0, vk::IndexType::UINT32);
 
             for model in draws {
                 let push = PushConstants {
@@ -421,14 +432,7 @@ impl Scene {
                     0,
                     as_bytes(&push),
                 );
-                raw.cmd_draw_indexed(
-                    buffer,
-                    u32::try_from(mesh::INDICES.len()).expect("36 fits in a u32"),
-                    1,
-                    0,
-                    0,
-                    0,
-                );
+                raw.cmd_draw_indexed(buffer, self.index_count, 1, 0, 0, 0);
             }
 
             raw.cmd_end_rendering(buffer);
@@ -675,6 +679,23 @@ fn load_texture() -> Result<slop_asset::Texture, String> {
         .map_err(|error| format!("{error}. Run `cargo run -p slop-cli -- cook` first"))?;
 
     slop_asset::Texture::read(&bytes).map_err(|error| error.to_string())
+}
+
+/// Load the cooked cube geometry.
+///
+/// The logical name carries the source and the glTF mesh it came from —
+/// `assets/cube.gltf`, mesh index 0, named `Cube` — because one source can cook
+/// to many meshes and they need distinct names.
+fn load_mesh() -> Result<slop_asset::Mesh, String> {
+    let project = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..");
+
+    let bytes = Vfs::for_project(&project)
+        .read("meshes/cube.Cube.0.mesh")
+        .map_err(|error| format!("{error}. Run `cargo run -p slop-cli -- cook` first"))?;
+
+    slop_asset::Mesh::read(&bytes).map_err(|error| error.to_string())
 }
 
 /// Load the cooked cube shader.

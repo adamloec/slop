@@ -106,17 +106,35 @@ fn cook_file(
     let bytes =
         std::fs::read(source).with_context(|| format!("reading model {}", source.display()))?;
 
-    // The whole file keys every primitive out of it. A change anywhere — an
-    // accessor, a buffer, another mesh entirely — can move the bytes any given
-    // primitive reads, so a per-primitive key would be a cache that lies.
-    let key = CacheKey::builder()
-        .input("cooker", &COOKER_VERSION.to_le_bytes())
-        .input("format", &slop_asset::mesh::VERSION.to_le_bytes())
-        .input("source", &bytes)
-        .finish();
-
+    // Parsed *before* the key is computed, because the key needs the buffers.
     let (document, buffers, _images) =
         gltf::import(source).with_context(|| format!("parsing {}", source.display()))?;
+
+    // Every buffer is an input, not just the `.gltf` itself.
+    //
+    // A glTF commonly stores its vertex data in a sibling `.bin`, and keying on
+    // the JSON alone would mean editing that `.bin` changed every mesh while
+    // every stamp still matched — a cache that is *wrong* rather than stale.
+    // That is exactly the bug the shader cooker already had once, arriving by a
+    // different door.
+    //
+    // Hashing the **resolved** buffers rather than the file names covers all
+    // three storage forms uniformly: base64 embedded in the JSON, an external
+    // `.bin`, and a GLB's binary chunk.
+    //
+    // The cost is parsing even when the artifact turns out to be up to date.
+    // That is the right trade — parsing a glTF is fast, and a cache that lies is
+    // a debugging session.
+    let mut key = CacheKey::builder()
+        .input("cooker", &COOKER_VERSION.to_le_bytes())
+        .input("format", &slop_asset::mesh::VERSION.to_le_bytes())
+        .input("source", &bytes);
+
+    for buffer in &buffers {
+        key = key.input("buffer", &buffer.0);
+    }
+
+    let key = key.finish();
 
     for (index, mesh) in document.meshes().enumerate() {
         let name = mesh_name(&mesh, index);

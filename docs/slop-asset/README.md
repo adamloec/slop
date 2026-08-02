@@ -29,6 +29,7 @@ cooked it is the one that understands the format.
 | glTF import + cook | Landed — importer in `slop-cli` | M2 |
 | `Texture` — the cooked texture format | Landed | M2 |
 | PNG import + cook | Landed — importer in `slop-cli` | M2 |
+| Proven end to end — `examples/cube` draws only cooked assets | Landed — see §5.4 | M2 |
 | Block compression (BC7) | Planned | M2 |
 | Async streaming | Planned — **beside** the sync read, not replacing it | M2 |
 | Asset handles and a registry of loaded assets | Planned — waits for something that holds one | M2 |
@@ -140,6 +141,34 @@ sees, so letting it vary by platform would give one asset two names.
 Absolute paths and `..` are **refused rather than normalised**. An asset name
 reaching arbitrary files is the shape of a real vulnerability once names come
 from content rather than from source code.
+
+### 5.4 What proves the pipeline works
+
+`examples/cube` holds no geometry, no texture and no shader in code. All three
+are cooked artifacts read through the `Vfs`, and the example's golden image is
+what says the pipeline delivered them intact.
+
+That only means something because of how the source assets were made. Each was
+**generated from the code it replaced** — `assets/checker.png` from the
+procedural `checkerboard()`, `assets/cube.gltf` plus `cube.bin` from the
+`VERTICES`/`INDICES` consts — so the reference image predates the pipeline being
+in the path at all:
+
+```
+ before:  const VERTICES  ──────────────────────────► render ──► reference.png
+ after:   assets/cube.gltf ──► cook ──► cache ──► Vfs ──► render ──► must match
+```
+
+A reference regenerated *by* the pipeline would accept whatever the pipeline
+produced, including a dropped channel or a mangled accessor, as long as it was
+stable. One that predates it cannot. Every stage is covered: parsing, keying,
+cache lookup, the logical path, decoding, and the upload.
+
+The narrower assertions live beside it — `examples/cube/tests/mesh.rs` and
+`tests/texture.rs` — and say what the image cannot: that the winding is
+counter-clockwise, that no index is out of range, that the checkerboard actually
+alternates. These are the mistakes that still *draw something*, which is why they
+are checked against the cooked artifact rather than left to the pixels.
 
 ## 6. Decisions
 

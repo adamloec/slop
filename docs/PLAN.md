@@ -160,6 +160,7 @@ world at once. Save, load and save again produces byte-identical text.
 | The cooked mesh format — binary, versioned, validated on load | Landed |
 | glTF import — positions, normals, UVs, indices | Landed |
 | Texture cooking — PNG to a versioned RGBA8 artifact | Landed |
+| `examples/cube` drawing entirely from cooked assets | Landed |
 | Block compression (BC7) | Outstanding |
 | Async streaming, hot reload, asset handles | Outstanding |
 | Debug UI (§10.2) | Outstanding — wanted before renderer bring-up |
@@ -169,6 +170,20 @@ staleness were already working for shaders and are not shader-specific. What was
 deliberately *not* lifted is a `Cooker` trait — a shader is one source to one
 artifact and a glTF is one source to many, so a trait shaped by the first would
 break on the second (§6.1).
+
+**The golden image is the pipeline's oracle, and that was engineered rather than
+noticed.** `examples/cube` now draws nothing it holds in code: its shader, its
+albedo and its geometry all arrive as cooked bytes through the VFS. Both source
+assets were *generated from the code they replaced* — `assets/checker.png` from
+the old `checkerboard()`, `assets/cube.gltf` and its buffer from the old
+`VERTICES`/`INDICES` — so the reference image from before the change is still the
+correct answer after it. An identical render therefore proves the entire path:
+parse, cook, key, cache, VFS, decode, upload. A pipeline bug that produced
+plausible output would have gone unnoticed against a reference generated *by* the
+pipeline; against one that predates it, it cannot. The assertions that used to
+sit beside those consts moved to `examples/cube/tests/mesh.rs` and
+`tests/texture.rs`, where they now check the artifact rather than a generator
+that no longer runs.
 
 **Deferred structural change diverges from the conventional answer, on purpose.**
 Bevy and Unity's `EntityCommandBuffer` both return a usable entity id from a
@@ -619,14 +634,14 @@ freely, never seams.
 |---|---|---|---|---|
 | Frame loop — acquire, submit, present, frames in flight | `examples/*/src/main.rs` | `slop-render`'s frame renderer | **Deleted.** Replaced by a handful of lines against `slop-app`. | M3 |
 | Scene setup — uploads, pipeline, draw recording | `examples/cube/src/scene.rs` | `slop-render` + `slop-asset` | **Moved** into `slop-render` and generalized. Nothing is unpicked. | M3 |
-| Cube geometry generated in code | `examples/cube/src/mesh.rs` | A cube asset through glTF import | **Deleted.** The texture half is done — `assets/checker.png` cooks and the golden image still matches, which is what proves the pipeline. The geometry follows the same path. | M2 |
+| The vertex layout is restated in Rust beside the shader's | `examples/cube/src/mesh.rs`, `shaders/passes/cube.slang` | Reflection over the cooked SPIR-V (§2.11) | **Deleted.** Two declarations of one layout, and a field added to one and not the other feeds the shader a stride it does not expect — scrambled geometry, no error. Held together by an assertion until the Slang library can hand the layout over. | M2/M3 |
 | Synchronous upload — submit and wait | `examples/cube/src/scene.rs` | Async transfer queue + staging ring | **Replaced.** Correct for startup, wrong for streaming. | M2 |
 | `slangc` invoked as a CLI | `slop-cli/src/cook.rs` | The Slang library, for reflection (§2.11) | **Replaced.** The cache layout, keying and read path all survive. | M2/M3 |
 | The asset VFS reads synchronously | `slop-asset` | Async streaming alongside it | **Joined by, not replaced.** A blocking read stays correct for startup, for tools, and for the cooker itself; §2.8's streaming is an additional entry point rather than a different one. Recorded because "the VFS is sync" reads like a shortcut and is not. | M2 |
 | No asset handles — the VFS deals in paths and bytes | `slop-asset` | `Handle<Mesh>` and friends, once a registry holds loaded assets | **Extended.** Nothing yet holds a loaded asset, so a handle would name a slot in a table that does not exist — the mistake §4.1-C avoided for the job system's access declaration. | M2 |
 | A cooked mesh has one fixed vertex layout — position, normal, UV | `slop-asset` | Flexible attributes, once a material needs tangents or a second UV set | **Replaced.** Cheap to change *because* it is cooked: bump `COOKER_VERSION` and every artifact regenerates from source, which is exactly what that constant is for. A format that guessed at flexibility now would be guessing. | M2 |
 | A cooked mesh is decoded field by field rather than cast | `slop-asset` | A zero-copy read over an aligned or memory-mapped buffer | **Replaced.** `fs::read` returns a `Vec<u8>` aligned to 1, so casting it to `[Vertex]` is undefined; decoding explicitly is also what makes the format little-endian by construction rather than by accident. Zero-copy arrives with the streaming loader, which is what will own an aligned buffer. | M2 |
-| glTF import covers positions, normals, UVs and indices | `slop-cli` | Materials, tangents, skinning, animation, scene hierarchy | **Extended.** Enough to replace the cube's hardcoded geometry, which is the consumer that exists. Each addition is another attribute in the same pipeline, not a different one. | M2/M3 |
+| glTF import covers positions, normals, UVs and indices | `slop-cli` | Materials, tangents, skinning, animation, scene hierarchy | **Extended.** Enough that `examples/cube` draws from a file and its golden image still matches, which is the consumer that exists. Each addition is another attribute in the same pipeline, not a different one. | M2/M3 |
 | No `Cooker` trait — each asset kind drives the cache itself | `slop-asset`, `slop-cli` | An asset-kind abstraction, once two kinds disagree usefully | **Extended.** Deliberately not designed against one real implementor: a shader is one source to one artifact, a glTF is one source to many, and a trait shaped by the first would break on the second. The **cache** is what is shared and is what was factored out. | M2 |
 | Coarse include digest — any include recooks everything | `slop-cli/src/cook.rs` | Per-shader dependency lists via `slangc -depfile` | **Replaced.** Correct but pessimistic; wrong would be a cache that lies. | M2 |
 | `JobSystem` backed by `std::thread::scope` | `slop-core/src/jobs.rs` | Work-stealing pool | **Replaced.** API shape is final; do not build on the cost model. | M1 |
