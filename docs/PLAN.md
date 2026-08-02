@@ -1,8 +1,8 @@
 # Slop Engine — Implementation Plan & Session Handoff
 
-**Status:** M0 and M1 complete. M2 underway — the content pipeline has its cook
-cache and VFS.
-**Last updated:** 2026-08-01
+**Status:** M0 and M1 complete. M2 underway — the content pipeline cooks meshes,
+textures and shaders, and the asset registry holds what it loads.
+**Last updated:** 2026-08-02
 
 This document is the working companion to `DESIGN.md`. **`DESIGN.md` is
 authoritative for all architectural decisions** — read it first, in full, before
@@ -126,7 +126,7 @@ Two consequences worth carrying into M0:
 renders with a golden image guarding it, and the reflection and ECS foundations
 are built through queries.
 
-682 tests. Clippy and rustdoc clean under `-D warnings` in both feature
+697 tests. Clippy and rustdoc clean under `-D warnings` in both feature
 configurations, Vulkan validation reporting nothing, and every crate containing
 `unsafe` passing under Miri — `slop-ecs` under both Stacked and Tree Borrows.
 
@@ -161,8 +161,9 @@ world at once. Save, load and save again produces byte-identical text.
 | glTF import — positions, normals, UVs, indices | Landed |
 | Texture cooking — PNG to a versioned RGBA8 artifact | Landed |
 | `examples/cube` drawing entirely from cooked assets | Landed |
+| `Assets<T>` — the registry, handles, load/reload/unload | Landed |
 | Block compression (BC7) | Outstanding |
-| Async streaming, hot reload, asset handles | Outstanding |
+| Async streaming, hot reload | Outstanding |
 | Debug UI (§10.2) | Outstanding — wanted before renderer bring-up |
 
 The cache was lifted out of `slop-cli` rather than invented: keying, stamping and
@@ -170,6 +171,18 @@ staleness were already working for shaders and are not shader-specific. What was
 deliberately *not* lifted is a `Cooker` trait — a shader is one source to one
 artifact and a glTF is one source to many, so a trait shaped by the first would
 break on the second (§6.1).
+
+**The registry landed before the things that need it, and the ordering is the
+point.** A `Handle<Mesh>` is a **seam**, not an implementation, and §1.2
+principle 6 says to defer implementations freely and never seams. `slop-render`
+arrives at M3 and will be written against whatever the asset API is at that
+moment; if that is `Mesh` by value, then streaming and hot reload each become a
+refactor of every call site rather than code behind an API nobody has to notice.
+So `Assets<T>` went in first and its features follow — the reverse of the order
+the feature list suggests. The three properties that are easy to get wrong
+(unloading frees the *name* as well as the slot, a reload decodes before it
+replaces, a failed load caches nothing) each have a test that was confirmed to
+fail when the property was broken on purpose.
 
 **The golden image is the pipeline's oracle, and that was engineered rather than
 noticed.** `examples/cube` now draws nothing it holds in code: its shader, its
@@ -638,7 +651,9 @@ freely, never seams.
 | Synchronous upload — submit and wait | `examples/cube/src/scene.rs` | Async transfer queue + staging ring | **Replaced.** Correct for startup, wrong for streaming. | M2 |
 | `slangc` invoked as a CLI | `slop-cli/src/cook.rs` | The Slang library, for reflection (§2.11) | **Replaced.** The cache layout, keying and read path all survive. | M2/M3 |
 | The asset VFS reads synchronously | `slop-asset` | Async streaming alongside it | **Joined by, not replaced.** A blocking read stays correct for startup, for tools, and for the cooker itself; §2.8's streaming is an additional entry point rather than a different one. Recorded because "the VFS is sync" reads like a shortcut and is not. | M2 |
-| No asset handles — the VFS deals in paths and bytes | `slop-asset` | `Handle<Mesh>` and friends, once a registry holds loaded assets | **Extended.** Nothing yet holds a loaded asset, so a handle would name a slot in a table that does not exist — the mistake §4.1-C avoided for the job system's access declaration. | M2 |
+| An asset is unloaded by hand, never by refcount | `slop-asset` | Reference counting, once something holds handles long enough to outlive its need for them | **Extended.** `unload` is explicit and correct; what is missing is *who decides*, and nothing holds a handle past a frame yet. Counting references now would count them from one place. | M2/M3 |
+| `Assets<T>` is single-threaded — every mutation takes `&mut` | `slop-asset` | Interior mutability or a job-system-owned loader, once streaming decodes off the main thread | **Extended.** `Asset: Send + Sync` is already required so the bound does not have to be added later; only the *ownership* is provisional, and no public signature changes when the loader moves. | M2 |
+| `examples/cube` drops its registries after uploading | `examples/cube/src/scene.rs` | A scene that keeps them, once something can act on an asset changing | **Replaced.** Retaining them today would hold state no code reads — the compiler said so. Hot reload is what gives them a reader. | M2 |
 | A cooked mesh has one fixed vertex layout — position, normal, UV | `slop-asset` | Flexible attributes, once a material needs tangents or a second UV set | **Replaced.** Cheap to change *because* it is cooked: bump `COOKER_VERSION` and every artifact regenerates from source, which is exactly what that constant is for. A format that guessed at flexibility now would be guessing. | M2 |
 | A cooked mesh is decoded field by field rather than cast | `slop-asset` | A zero-copy read over an aligned or memory-mapped buffer | **Replaced.** `fs::read` returns a `Vec<u8>` aligned to 1, so casting it to `[Vertex]` is undefined; decoding explicitly is also what makes the format little-endian by construction rather than by accident. Zero-copy arrives with the streaming loader, which is what will own an aligned buffer. | M2 |
 | glTF import covers positions, normals, UVs and indices | `slop-cli` | Materials, tangents, skinning, animation, scene hierarchy | **Extended.** Enough that `examples/cube` draws from a file and its golden image still matches, which is the consumer that exists. Each addition is another attribute in the same pipeline, not a different one. | M2/M3 |

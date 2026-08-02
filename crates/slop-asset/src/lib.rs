@@ -18,13 +18,22 @@
 //! - [`Cache`] — where a cooked artifact lives, and what decides whether it is
 //!   still current. The write side, used by `slop-cli`.
 //! - [`Vfs`] — reading cooked bytes at runtime. The read side, which ships.
+//! - [`Assets`] — what is loaded, named by [`Handle`](slop_core::Handle). The
+//!   first thing here that *holds* an asset rather than passing its bytes on.
 //!
 //! What is deliberately absent, with reasoning in `docs/PLAN.md` §6.1: async
-//! streaming, asset handles, a registry of loaded assets, hot reload, and any
-//! notion of an asset *kind*. Each waits for a consumer rather than being
-//! designed against an imagined one — the mistake §4.1-C avoided for the job
-//! system's access declaration, which shipped its API only once the ECS existed
-//! to say what it needed.
+//! streaming, hot reload, a dependency graph between assets, and reference
+//! counting to decide when something can be unloaded. Each waits for a consumer
+//! rather than being designed against an imagined one — the mistake §4.1-C
+//! avoided for the job system's access declaration, which shipped its API only
+//! once the ECS existed to say what it needed.
+//!
+//! The registry did not wait, and the reason is worth stating: a handle is a
+//! **seam**, not an implementation. `docs/DESIGN.md` §1.2 principle 6 says defer
+//! implementations freely and never seams, and everything the renderer is about
+//! to be written against would otherwise take assets by value — so streaming and
+//! hot reload would arrive as a refactor of every call site instead of as code
+//! behind an unchanged API.
 //!
 //! The sync read in particular is **not** a placeholder. A blocking load stays
 //! correct for startup, for tools, and for the cooker itself; §2.8's streaming
@@ -46,11 +55,13 @@
 
 mod cache;
 pub mod mesh;
+mod registry;
 pub mod texture;
 mod vfs;
 
 pub use cache::{Cache, CacheError, CacheKey, KeyBuilder};
 pub use mesh::{Mesh, MeshError, Vertex};
+pub use registry::{Asset, AssetError, Assets};
 pub use texture::{Format, Texture, TextureError};
 pub use vfs::{Vfs, VfsError};
 

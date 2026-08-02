@@ -30,10 +30,11 @@ cooked it is the one that understands the format.
 | `Texture` — the cooked texture format | Landed | M2 |
 | PNG import + cook | Landed — importer in `slop-cli` | M2 |
 | Proven end to end — `examples/cube` draws only cooked assets | Landed — see §5.4 | M2 |
+| `Assets<T>` — the registry, `Handle<T>`, load, reload, unload | Landed — see §5.5 | M2 |
 | Block compression (BC7) | Planned | M2 |
 | Async streaming | Planned — **beside** the sync read, not replacing it | M2 |
-| Asset handles and a registry of loaded assets | Planned — waits for something that holds one | M2 |
-| Hot reload | Planned | M2 |
+| Hot reload | Planned — the registry is the half it needs | M2 |
+| Reference counting to decide when to unload | Planned — waits for something holding handles | M2/M3 |
 | Dependency graph across assets | Planned | M2 |
 
 ## 3. Module map
@@ -170,6 +171,58 @@ counter-clockwise, that no index is out of range, that the checkerboard actually
 alternates. These are the mistakes that still *draw something*, which is why they
 are checked against the cooked artifact rather than left to the pixels.
 
+### 5.5 The registry, and why it came before its consumers
+
+`Assets<T>` maps a logical path to a `Handle<T>` and owns what is behind it.
+
+```mermaid
+flowchart LR
+    path["'meshes/cube.mesh'"] -->|load| handle["Handle&lt;Mesh&gt;"]
+    handle -->|get| mesh["&amp;Mesh"]
+    file[("cooked bytes")] -->|reload| mesh
+```
+
+Loading is **idempotent by name** — two hundred references to one mesh decode
+once and share a handle. That alone justifies it, but it is not the reason it was
+built now.
+
+**A handle is a seam.** `DESIGN.md` §1.2 principle 6 — defer implementations
+freely, never seams — decides the ordering. `slop-render` lands at M3 and will be
+written against whatever the asset API is at that moment. If that is `Mesh` by
+value, then streaming and hot reload each become a refactor of every call site;
+if it is `Handle<Mesh>`, they are code behind an API nobody has to notice. So the
+seam goes in first and the implementations follow, which is the opposite of the
+order the feature list suggests.
+
+Three properties are load-bearing, and each has a test that fails without it:
+
+1. **Unloading frees the name as well as the slot.** Leaving the path mapped
+   would make the next `load` hand back a handle to an emptied slot — the
+   registry vouching for something it just dropped.
+2. **A reload decodes before it replaces.** Saving a broken mesh mid-session logs
+   an error and keeps the old one, rather than leaving a hole where the model
+   was. The same check-then-commit shape `slop-ecs`'s serializer uses.
+3. **A failed load caches nothing.** Fixing the asset and asking again works;
+   poisoning the name would mean restarting the game to recover.
+
+`revision()` is the part that is easy to leave out and impossible to add
+retroactively without a second pass over every consumer. Something that uploaded
+a mesh to the GPU holds a handle whose *contents* changed underneath it — with no
+counter to compare, hot reload updates the CPU-side asset and nothing on screen
+moves.
+
+**Why `Handle<T>` and not `Arc<Mesh>`.** Refcounts are the conventional answer
+and are simpler right up until an untrusted WASM guest holds one, at which point
+they are a pointer the guest can forge. §2.3 makes a handle an opaque integer
+across that boundary, and a generational handle is checkable: a stale one fails a
+lookup instead of reading freed memory.
+
+**Why `Asset` is a trait when `Cooker` is not.** Cooking is one source to *many*
+artifacts for glTF and one-to-one for a shader, so a trait shaped by either
+breaks on the other (§6 below). Loading is one artifact to one asset, always —
+that is what cooking *is*. `Mesh::read` and `Texture::read` already had identical
+signatures; the trait names an agreement rather than imposing one.
+
 ## 6. Decisions
 
 | Decision | Where |
@@ -178,7 +231,7 @@ are checked against the cooked artifact rather than left to the pixels.
 | Content-hash keying, not timestamps | `DESIGN.md` §2.8 |
 | Sync read now, async streaming beside it later | `PLAN.md` §6.1 |
 | No `Cooker` trait yet | `PLAN.md` §6.1, and §7 below |
-| No asset handles yet | `PLAN.md` §6.1 |
+| Handles are a seam, so the registry precedes its consumers | §5.5 above |
 
 **Why there is no `Cooker` trait.** A shader is one source to one artifact; a
 glTF is one source to *many* — meshes, textures, materials. A trait shaped by the

@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use slop_asset::Vfs;
+use slop_asset::{Assets, Mesh, Texture, Vfs};
 use slop_core::Handle;
 use slop_math::{Mat4, Quat, Vec3};
 use slop_rhi::{
@@ -161,11 +161,25 @@ impl Scene {
         )
         .map_err(|error| error.to_string())?;
 
-        // Geometry from the cooked cache rather than from a `const` in this
-        // crate. `assets/cube.gltf` was generated from that `const`, so the
-        // golden image is the oracle for the whole import path — parse, cook,
+        // Content comes from the registries, not from `const`s in this crate.
+        // Both source assets were generated from the code they replaced, so the
+        // golden image is the oracle for the whole path — parse, cook, key,
         // cache, VFS, decode, upload.
-        let cooked = load_mesh()?;
+        //
+        // The registries are local to this function, so everything they hold is
+        // dropped once it is on the GPU. That makes them a loader here rather
+        // than the thing they are for: nothing in the cube can act on an asset
+        // changing, so retaining them would be holding state no code reads.
+        // Hot reload is the consumer that changes this, and `docs/PLAN.md` §6.1
+        // records it.
+        let project = project_root();
+        let mut meshes = Assets::<Mesh>::for_project(&project);
+        let mut textures = Assets::<Texture>::for_project(&project);
+
+        let mesh = meshes.load("meshes/cube.Cube.0.mesh").map_err(cook_first)?;
+        let albedo = textures.load("textures/checker.tex").map_err(cook_first)?;
+
+        let cooked = meshes.get(mesh).expect("just loaded");
 
         let vertices = upload_buffer(
             device,
@@ -186,7 +200,11 @@ impl Scene {
         let index_count = u32::try_from(cooked.indices.len())
             .map_err(|_| String::from("the cube has more indices than a draw call can take"))?;
 
-        let texture = upload_texture(device, allocator)?;
+        let texture = upload_texture(
+            device,
+            allocator,
+            textures.get(albedo).expect("just loaded"),
+        )?;
         let sampler = create_sampler(device)?;
 
         let depth = Image::new(
@@ -534,11 +552,11 @@ fn upload_buffer(
 }
 
 /// Upload the checkerboard and leave it ready for sampling.
-fn upload_texture(device: &Arc<Device>, allocator: &Arc<Allocator>) -> Result<Image, String> {
-    // Loaded from the cooked cache rather than generated. `assets/checker.png`
-    // holds the same pixels the generator produced, so the golden image is the
-    // oracle for the whole pipeline: PNG, cook, cache, VFS, decode, upload.
-    let cooked = load_texture()?;
+fn upload_texture(
+    device: &Arc<Device>,
+    allocator: &Arc<Allocator>,
+    cooked: &Texture,
+) -> Result<Image, String> {
     let pixels = &cooked.pixels;
 
     let mut staging = Buffer::new(
@@ -664,38 +682,33 @@ fn submit_once(device: &Arc<Device>, record: impl FnOnce(&CommandBuffer)) -> Res
     Ok(())
 }
 
-/// Load the cooked albedo texture.
-///
-/// Through the asset VFS, as the shader is. What was a `checkerboard()` call is
-/// now a file — `docs/PLAN.md` §6.1 recorded the generated version as waiting
-/// for exactly this.
-fn load_texture() -> Result<slop_asset::Texture, String> {
-    let project = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+/// The project this example's assets were cooked into.
+fn project_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
-        .join("..");
-
-    let bytes = Vfs::for_project(&project)
-        .read("textures/checker.tex")
-        .map_err(|error| format!("{error}. Run `cargo run -p slop-cli -- cook` first"))?;
-
-    slop_asset::Texture::read(&bytes).map_err(|error| error.to_string())
+        .join("..")
 }
 
-/// Load the cooked cube geometry.
+/// Turn a load failure into a message that says what to do about it.
 ///
-/// The logical name carries the source and the glTF mesh it came from —
-/// `assets/cube.gltf`, mesh index 0, named `Cube` — because one source can cook
-/// to many meshes and they need distinct names.
-fn load_mesh() -> Result<slop_asset::Mesh, String> {
-    let project = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..");
+/// The useful half of an asset error is in its source chain — `Display` on an
+/// error shows only its own message by convention, so `AssetError` alone says
+/// "reading mesh 'meshes/cube.Cube.0.mesh'" and never says where it looked or
+/// why that failed. Walking the chain is what turns that into something
+/// actionable.
+fn cook_first(error: slop_asset::AssetError) -> String {
+    use std::error::Error;
 
-    let bytes = Vfs::for_project(&project)
-        .read("meshes/cube.Cube.0.mesh")
-        .map_err(|error| format!("{error}. Run `cargo run -p slop-cli -- cook` first"))?;
+    let mut message = error.to_string();
+    let mut cause = error.source();
 
-    slop_asset::Mesh::read(&bytes).map_err(|error| error.to_string())
+    while let Some(error) = cause {
+        message.push_str(": ");
+        message.push_str(&error.to_string());
+        cause = error.source();
+    }
+
+    format!("{message}. Run `cargo run -p slop-cli -- cook` first")
 }
 
 /// Load the cooked cube shader.

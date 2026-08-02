@@ -53,6 +53,7 @@ flowchart TD
     render --> asset
     rhi --> core
     asset --> reflect
+    asset --> core
     ecs --> reflect
     reflect --> core
     core --> math
@@ -70,8 +71,9 @@ flowchart TD
 The rest land at the milestones in `DESIGN.md` §6.
 
 `slop-ecs` and `slop-reflect` are drawn solid as of M1 and are finished for that
-milestone. `slop-asset` is solid as of M2 and is not — it has the cook cache and
-the VFS, and still wants glTF import, streaming and hot reload. What each crate
+milestone. `slop-asset` is solid as of M2 and is not — it has the cook cache, the
+VFS, glTF and PNG import, and the asset registry, and still wants block
+compression, streaming and hot reload. What each crate
 still lacks is listed in its own document rather than implied by the diagram; a
 crate existing is not a crate being finished.
 

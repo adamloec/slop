@@ -1687,6 +1687,7 @@ name = "slop-asset"
 version = "0.0.0"
 dependencies = [
  "blake3",
+ "slop-core",
  "thiserror 2.0.19",
 ]
 
