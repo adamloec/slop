@@ -7,10 +7,18 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# The debug UI's two halves. `egui` is the immediate-mode library, `egui-winit`
+# turns raw window events into its input. Both live here rather than in
+# slop-render, which stays windowing-agnostic and only ever sees tessellated
+# triangles -- see `debug_ui`.
+egui = { workspace = true }
+egui-winit = { workspace = true }
 # `subscriber` is enabled here rather than in slop-core: this is the application
 # layer, and installing a process-wide subscriber is an application's decision.
+slop-asset = { workspace = true }
 slop-core = { workspace = true, features = ["subscriber"] }
 slop-math = { workspace = true }
+slop-render = { workspace = true }
 slop-rhi = { workspace = true }
 thiserror.workspace = true
 winit = { workspace = true }

@@ -29,7 +29,9 @@ use std::sync::Arc;
 use slop_asset::Vfs;
 use slop_core::diagnostics::tracing::{error, info};
 
+use slop_app::debug_ui::DebugUi;
 use slop_app::gpu::{Gpu, GpuConfig};
+use slop_app::timing::FrameTimes;
 use slop_app::window::WindowConfig;
 use slop_app::winit::application::ApplicationHandler;
 use slop_app::winit::event::WindowEvent;
@@ -37,8 +39,9 @@ use slop_app::winit::event_loop::{ActiveEventLoop, EventLoop};
 use slop_app::winit::window::WindowId;
 use slop_render::{Frame, FrameRenderer, FrameRendererConfig, Target};
 use slop_rhi::{
-    Attachments, Blend, ClearValue, ColorAttachment, Device, GraphicsPipeline,
-    GraphicsPipelineConfig, ImageState, Load, PipelineLayout, ShaderModule, ShaderStage, vk,
+    Attachments, BindlessHeap, BindlessHeapConfig, Blend, ClearValue, ColorAttachment, Device,
+    GraphicsPipeline, GraphicsPipelineConfig, ImageState, Load, PipelineLayout, ShaderModule,
+    ShaderStage, vk,
 };
 
 fn main() {
@@ -146,6 +149,14 @@ struct Renderer {
     // No separate layout field: `GraphicsPipeline` already holds an `Arc` to it,
     // which is what keeps it alive.
     pipeline: GraphicsPipeline,
+    /// The debug overlay, and the heap holding its font atlas.
+    ///
+    /// The triangle's own pipeline binds nothing, so this heap exists purely for
+    /// the overlay. That is not waste: a heap is descriptors, and the point of a
+    /// bindless model is that one heap serves everything.
+    ui: DebugUi,
+    heap: BindlessHeap,
+    frame_times: FrameTimes,
     renderer: FrameRenderer,
     gpu: Gpu,
 }
@@ -208,6 +219,17 @@ impl Renderer {
         // the pipelines built from it.
         drop(module);
 
+        let mut heap = BindlessHeap::new(gpu.device(), &BindlessHeapConfig::default())
+            .map_err(|error| error.to_string())?;
+        let ui = DebugUi::new(
+            gpu.window(),
+            gpu.device(),
+            &mut heap,
+            &Vfs::for_project(&project_root()),
+            renderer.format(),
+        )
+        .map_err(|error| error.to_string())?;
+
         info!(
             width = renderer.extent().width,
             height = renderer.extent().height,
@@ -216,6 +238,9 @@ impl Renderer {
 
         Ok(Self {
             pipeline,
+            ui,
+            heap,
+            frame_times: FrameTimes::default(),
             renderer,
             gpu,
         })
@@ -239,10 +264,46 @@ impl Renderer {
 
         // Borrowed out of `self` so the closure does not capture it whole:
         // `render` needs `&mut self.renderer` at the same time.
+        self.frame_times.tick();
+
+        // Before the frame opens: uploading the font atlas waits on the GPU.
+        let timing = self.frame_times.summary();
+        let extent = self.renderer.extent();
+        let frames = self.renderer.frame_number();
+
+        let declared = self.ui.run(self.gpu.window(), |context| {
+            slop_app::egui::Window::new("slop").show(context, |ui| {
+                ui.label(format!("{:.2} ms  ({:.0} fps)", timing.last, timing.fps()));
+                ui.label(format!(
+                    "{:.2} ms  worst of last {}",
+                    timing.worst, timing.window
+                ));
+                ui.separator();
+                ui.label(format!("{}x{}", extent.width, extent.height));
+                ui.label(format!("frame {frames}"));
+            });
+        });
+
+        self.ui
+            .upload(&mut self.heap, self.gpu.allocator(), &declared)
+            .map_err(|error| error.to_string())?;
+
         let pipeline = &self.pipeline;
+        let ui = &mut self.ui;
+        let heap = &self.heap;
+        let allocator = self.gpu.allocator();
 
         self.renderer
-            .render(|frame| record(pipeline, frame))
+            .render(|frame| {
+                record(pipeline, frame);
+
+                if let Err(failure) = ui.draw(heap, allocator, frame, &declared) {
+                    error!(error = %failure, "the debug overlay did not draw");
+                }
+
+                // After everything that draws — see `Frame::finish`.
+                frame.finish();
+            })
             .map_err(|error| error.to_string())?;
 
         Ok(())
@@ -260,7 +321,7 @@ fn record(pipeline: &GraphicsPipeline, frame: &Frame<'_>) {
         view,
         extent,
         from,
-        to,
+        ..
     } = frame.target;
 
     // From UNDEFINED rather than from PRESENT: the previous contents are about
@@ -289,15 +350,12 @@ fn record(pipeline: &GraphicsPipeline, frame: &Frame<'_>) {
     // nothing to bind.
     pass.draw(3, 1);
 
-    // Ends the pass, so the transition below is outside it.
+    // Ends the pass, so the overlay can open its own.
+    //
+    // The image is left in `COLOR_ATTACHMENT` rather than the frame's final
+    // state: the overlay draws after this, and only the last writer transitions.
+    // The caller calls `Frame::finish` once everything has drawn.
     drop(pass);
-
-    frame.command.transition_image(
-        image,
-        vk::ImageAspectFlags::COLOR,
-        ImageState::COLOR_ATTACHMENT,
-        to,
-    );
 }
 
 impl Drop for Renderer {
@@ -317,12 +375,18 @@ impl Drop for Renderer {
 ///
 /// Through the asset VFS, so this names the shader rather than a path into the
 /// cache. Where cooked bytes live is `slop-asset`'s business.
-fn load_shader(device: &Arc<Device>) -> Result<ShaderModule, String> {
-    let project = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+/// The repository root, which is where `.slop/cache` lives.
+///
+/// `CARGO_MANIFEST_DIR` is example-grade and does not survive being installed —
+/// see `docs/PLAN.md` §6.1, which has the row for it.
+fn project_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
-        .join("..");
+        .join("..")
+}
 
-    let bytes = Vfs::for_project(&project)
+fn load_shader(device: &Arc<Device>) -> Result<ShaderModule, String> {
+    let bytes = Vfs::for_project(&project_root())
         .read("shaders/passes/triangle.spv")
         .map_err(|error| format!("{error}. Run `cargo run -p slop-cli -- cook` first"))?;
 

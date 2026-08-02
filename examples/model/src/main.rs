@@ -24,7 +24,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use slop_app::debug_ui::DebugUi;
 use slop_app::gpu::{Gpu, GpuConfig};
+use slop_app::timing::FrameTimes;
 use slop_app::window::WindowConfig;
 use slop_app::winit::application::ApplicationHandler;
 use slop_app::winit::event::WindowEvent;
@@ -103,6 +105,12 @@ impl ApplicationHandler for App {
             return;
         };
 
+        // The UI sees every event first and reports whether it consumed one.
+        // Nothing here reads input yet, so the answer is discarded — but a
+        // camera control added later must respect it, or a drag on a UI window
+        // would also swing the camera behind it.
+        let _consumed = renderer.ui.on_window_event(renderer.gpu.window(), &event);
+
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(_) => renderer.frames.invalidate(),
@@ -143,6 +151,11 @@ struct Renderer {
     /// How far the camera sits from the model's centre, from its bounds.
     distance: f32,
     centre: Vec3,
+    /// The debug overlay, and the timing it reports.
+    ui: DebugUi,
+    frame_times: FrameTimes,
+    /// What was loaded, for the overlay to name.
+    model: String,
     gpu: Gpu,
 }
 
@@ -198,6 +211,12 @@ impl Renderer {
 
         let (centre, radius) = bounds(&vfs, &logical);
 
+        // Built after the meshes so its font atlas lands in the same heap, and
+        // before the first frame because the atlas arrives in the *first*
+        // texture delta — a UI wired up mid-frame draws nothing at all.
+        let ui = DebugUi::new(gpu.window(), gpu.device(), &mut heap, &vfs, frames.format())
+            .map_err(|error| error.to_string())?;
+
         info!(
             model = logical,
             meshes = meshes.mesh_count(),
@@ -213,11 +232,16 @@ impl Renderer {
             // with a margin so nothing is clipped by the near plane.
             distance: radius / slop_math::scalar::tan(FIELD_OF_VIEW.to_radians() * 0.5) * 1.4,
             centre,
+            ui,
+            frame_times: FrameTimes::default(),
+            model: logical,
             gpu,
         })
     }
 
     fn render(&mut self) -> Result<(), String> {
+        self.frame_times.tick();
+
         if let Some(extent) = self
             .frames
             .prepare(self.gpu.surface(), self.gpu.extent())
@@ -228,18 +252,72 @@ impl Renderer {
                 .map_err(|error| error.to_string())?;
         }
 
+        // Declared and uploaded before the frame opens: uploading a texture
+        // waits on the GPU, and nothing inside a recorded frame may block on it.
+        let declared = self.declare_ui();
+        self.ui
+            .upload(&mut self.heap, self.gpu.allocator(), &declared)
+            .map_err(|error| error.to_string())?;
+
+        // Borrowed out of `self` field by field, so the closure does not capture
+        // it whole — `render` needs `&mut self.frames` at the same time.
         let meshes = &self.meshes;
         let heap = &self.heap;
+        let ui = &mut self.ui;
+        let allocator = self.gpu.allocator();
         let centre = self.centre;
         let distance = self.distance;
 
         self.frames
             .render(|frame| {
                 meshes.record(heap, frame, camera(frame, centre, distance));
+
+                // Last, in a pass of its own: the overlay loads the colour
+                // attachment rather than clearing it, so it composites over the
+                // model. Errors are logged rather than propagated — a debug
+                // overlay that fails is not a reason to take the frame down.
+                if let Err(failure) = ui.draw(heap, allocator, frame, &declared) {
+                    error!(error = %failure, "the debug overlay did not draw");
+                }
+
+                // After everything that draws. Only the last writer transitions
+                // the target to its final state — see `Frame::finish`.
+                frame.finish();
             })
             .map_err(|error| error.to_string())?;
 
         Ok(())
+    }
+
+    /// Declare this frame's debug UI.
+    ///
+    /// Re-declared every frame from current state, which is what immediate mode
+    /// means (`docs/DESIGN.md` §10.2): there is no widget tree to keep in sync,
+    /// so it cannot disagree with the engine it is reporting on.
+    fn declare_ui(&mut self) -> slop_app::debug_ui::Declared {
+        let timing = self.frame_times.summary();
+        let extent = self.frames.extent();
+        let frames = self.frames.frame_number();
+        let meshes = self.meshes.mesh_count();
+        let draws = self.meshes.draw_count();
+        let model = self.model.clone();
+
+        self.ui.run(self.gpu.window(), |context| {
+            slop_app::egui::Window::new("slop").show(context, |ui| {
+                // Milliseconds first. See `slop_app::timing`.
+                ui.label(format!("{:.2} ms  ({:.0} fps)", timing.last, timing.fps()));
+                ui.label(format!(
+                    "{:.2} ms  worst of last {}",
+                    timing.worst, timing.window
+                ));
+                ui.separator();
+                ui.label(format!("{}x{}", extent.width, extent.height));
+                ui.label(format!("frame {frames}"));
+                ui.separator();
+                ui.label(&model);
+                ui.label(format!("{meshes} meshes, {draws} draws"));
+            });
+        })
     }
 }
 

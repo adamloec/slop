@@ -15,9 +15,16 @@
 //! headless CI to each configure the same engine differently without any of them
 //! fighting over ambient state.
 
+pub mod debug_ui;
 pub mod gpu;
 pub mod logging;
+pub mod timing;
 pub mod window;
+
+/// Re-exported for the same reason as [`winit`]: consumers declare their debug
+/// UI with `egui` types, and two versions of it in one binary would produce type
+/// mismatches that read as nonsense.
+pub use egui;
 
 /// Re-exported so consumers need no `winit` dependency of their own, and so the
 /// engine cannot end up split across two versions of it — which would make the

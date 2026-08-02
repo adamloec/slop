@@ -514,15 +514,19 @@ impl MeshRenderer {
         // Ends the pass, so the transition below is outside it.
         drop(pass);
 
-        // Left in the state the frame asked for. The overlay draws after this
-        // and reopens its own pass, which is why the colour attachment does not
-        // stay in `COLOR_ATTACHMENT` here.
-        frame.command.transition_image(
-            frame.target.image,
-            vk::ImageAspectFlags::COLOR,
-            ImageState::COLOR_ATTACHMENT,
-            frame.target.to,
-        );
+        // **Left in `COLOR_ATTACHMENT`, deliberately not in `frame.target.to`.**
+        //
+        // This used to transition to the frame's final state here, which is
+        // correct only when nothing draws afterwards. The moment a debug overlay
+        // was added, its pass began on an image already in `PRESENT_SRC` and
+        // validation objected on every frame — two renderers in one frame, both
+        // believing they were last.
+        //
+        // Only the last writer may perform the final transition, and a mesh
+        // renderer cannot know whether it is the last. So it leaves the image
+        // ready for the next pass, and the caller ends the frame with
+        // [`Frame::finish`]. The render graph (`docs/PLAN.md` §9.2 item E) is
+        // what will derive this rather than leaving it to a convention.
     }
 }
 

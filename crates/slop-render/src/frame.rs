@@ -94,6 +94,32 @@ pub struct Frame<'a> {
     pub slots: usize,
 }
 
+impl Frame<'_> {
+    /// Put the target into the state the frame renderer needs it in.
+    ///
+    /// Call once, after everything that draws into this frame. Renderers leave
+    /// the colour attachment in [`ImageState::COLOR_ATTACHMENT`] so that another
+    /// pass can follow — the overlay composites over the scene — and **only the
+    /// last writer may perform the final transition.**
+    ///
+    /// Forgetting this leaves the image in the wrong layout for presentation.
+    /// Doing it twice, or doing it before something else draws, is the bug this
+    /// exists to prevent: an overlay pass beginning on an image already handed
+    /// to the presentation engine, which validation reports once per frame.
+    ///
+    /// This is a convention, and conventions rot. The render graph
+    /// (`docs/PLAN.md` §9.2 item E) is what will derive these transitions from
+    /// declared reads and writes instead.
+    pub fn finish(&self) {
+        self.command.transition_image(
+            self.target.image,
+            vk::ImageAspectFlags::COLOR,
+            ImageState::COLOR_ATTACHMENT,
+            self.target.to,
+        );
+    }
+}
+
 /// What happened when a frame was asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameOutcome {

@@ -2091,8 +2091,12 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 name = "slop-app"
 version = "0.0.0"
 dependencies = [
+ "egui",
+ "egui-winit",
+ "slop-asset",
  "slop-core",
  "slop-math",
+ "slop-render",
  "slop-rhi",
  "thiserror 2.0.19",
  "winit",
