@@ -24,7 +24,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use example_cube::{Scene, Target};
+use example_cube::Scene;
+use slop_render::Target;
 use slop_rhi::{
     Allocator, Buffer, BufferConfig, CommandPool, Device, DeviceSelection, Image, ImageConfig,
     ImageState, Instance, InstanceConfig, MemoryLocation, RhiError, TimelineSemaphore, vk,

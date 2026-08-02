@@ -173,6 +173,7 @@ finished.
 | Texture cooking — PNG to a versioned artifact | Landed |
 | `examples/cube` drawing entirely from cooked assets | Landed |
 | `Assets<T>` — the registry, handles, load/reload/unload | Landed |
+| `slop-render` — the frame renderer, both examples driven by it | Landed |
 | Hot reload — `Assets::reload_changed` + `slop-cli cook --watch` | Landed |
 | Block compression — BC7, 4:1, with the golden image unchanged | Landed |
 | Shader reflection — layouts read from cooked SPIR-V, not restated | **Outstanding** |
@@ -688,7 +689,7 @@ freely, never seams.
 
 | What | Where | Standing in for | Fate | When |
 |---|---|---|---|---|
-| Frame loop — acquire, submit, present, frames in flight | `examples/*/src/main.rs` | `slop-render`'s frame renderer | **Rebuilt**, not lifted. Two working copies say what the loop must do — swapchain recreation, per-slot pool reset, timeline waits — and that is what carries over. The `String` errors, the hard-coded frames-in-flight and the panic-on-failure do not. Both copies are then deleted. | M3 |
+| `FrameRenderer` has no automated test | `slop-render` | A smoke test that drives a real window, or a headless path that fakes a swapchain | **Extended.** Everything it does needs a surface, a surface needs a window, and a test harness has no event loop — the cube's golden renders headlessly and so covers `Scene`, not this. The check today is running both examples under `SLOP_FRAMES` with validation on, which is a command someone has to type. **The resize path has no coverage at all**, automated or otherwise, because `SLOP_FRAMES` never resizes the window. | M3 |
 | Scene setup — uploads, pipeline, draw recording | `examples/cube/src/scene.rs` | `slop-render` + `slop-asset` | **Rebuilt.** It proves the pieces fit together; it is not the shape an engine wants. One hard-coded pipeline, a raw sampler freed by hand, `CARGO_MANIFEST_DIR` in the load path, and push constants restated from the shader — all of it example-grade on purpose, none of it moves. | M3 |
 | The vertex layout is restated in Rust beside the shader's | `examples/cube/src/mesh.rs`, `shaders/passes/cube.slang` | Reflection over the cooked SPIR-V (§2.11) | **Deleted.** Two declarations of one layout, and a field added to one and not the other feeds the shader a stride it does not expect — scrambled geometry, no error. Held together by an assertion until the Slang library can hand the layout over. | M2/M3 |
 | Synchronous upload — submit and wait | `examples/cube/src/scene.rs` | Async transfer queue + staging ring | **Replaced.** Correct for startup, wrong for streaming. | M2 |
@@ -854,7 +855,7 @@ render identically afterwards, and neither reference moves.
 
 | | Item | Unblocks | Milestone |
 |---|---|---|---|
-| **A** | `slop-render` — frame renderer: acquire, submit, present, frames in flight, swapchain recreation. Typed errors, configurable frame count. Both examples rewritten onto it and both goldens unchanged. | C, D, E | M2 |
+| **A** | `slop-render` — frame renderer: acquire, submit, present, frames in flight, swapchain recreation. Typed errors, configurable frame count. Both examples rewritten onto it and both goldens unchanged. **Landed.** | C, D, E | M2 |
 | **B** | Shader reflection — Slang as a library rather than `slangc` as a CLI (§2.11), so vertex layouts, push constants and descriptor bindings are read from the cooked shader instead of restated in Rust. | D | M2 |
 | **C** | Debug UI (§10.2) — immediate mode, `egui` versus Dear ImGui researched at this point rather than guessed now. Frame timing and entity inspector; the pass visualizer waits for E. | E | M2 |
 | **D** | Materials — glTF materials, multiple meshes per file, scene hierarchy, mipmaps, then a Sponza-scale scene that loads and draws. **M2's exit criterion.** | E | M2 |

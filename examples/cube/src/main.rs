@@ -7,34 +7,34 @@
 //! without a human closing a window.
 //!
 //! The scene itself lives in this crate's library, shared with the headless
-//! golden test. This file owns `main()` and the frame loop, per
+//! golden test. This file owns `main()` and the event loop, per
 //! `docs/DESIGN.md` §1.2 principle 4 — the engine supplies pieces, it does not
 //! supply a framework to sit inside.
 //!
-//! **This loop is duplicated in `examples/triangle/src/main.rs`**, and that is a
-//! known and deliberate cost — `docs/PLAN.md` §6.1 records why it is being left
-//! until M3 rather than lifted into `slop-app` now, and what would change that
-//! decision. Both copies are deleted when the frame renderer lands. A **third**
-//! copy is the signal to extract it early; do not add one silently.
+//! The *frame* loop is no longer here. Acquire, submit, present and frames in
+//! flight belong to `slop_render::FrameRenderer`, which is what this file and
+//! `examples/triangle` used to hold a copy of each. What is left is genuinely an
+//! application's: a window, a device, a scene, and the decision of when to poll
+//! for reloaded assets.
+//!
+//! Two calls rather than one, and the order matters:
+//! [`FrameRenderer::prepare`] reports a resize so the depth buffer can be
+//! rebuilt, and [`FrameRenderer::render`] then records against a target that
+//! agrees with it. Doing them the other way round draws one wrong frame after
+//! every resize.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use example_cube::{Scene, Target};
+use example_cube::Scene;
 use slop_app::window::{self, WindowConfig};
 use slop_app::winit::application::ApplicationHandler;
 use slop_app::winit::event::WindowEvent;
 use slop_app::winit::event_loop::{ActiveEventLoop, EventLoop};
 use slop_app::winit::window::{Window, WindowId};
 use slop_core::diagnostics::tracing::{error, info};
-use slop_rhi::{
-    AcquireOutcome, Allocator, BinarySemaphore, CommandBuffer, CommandPool, Device,
-    DeviceSelection, ImageState, Instance, InstanceConfig, PresentMode, PresentOutcome, Surface,
-    Swapchain, SwapchainConfig, TimelineSemaphore, vk,
-};
-
-/// How many frames the CPU may prepare ahead of the GPU.
-const FRAMES_IN_FLIGHT: usize = 2;
+use slop_render::{FrameRenderer, FrameRendererConfig};
+use slop_rhi::{Allocator, Device, DeviceSelection, Instance, InstanceConfig, Surface, vk};
 
 /// How often to check whether a cooked asset has been rewritten.
 ///
@@ -97,7 +97,7 @@ impl ApplicationHandler for App {
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(_) => renderer.dirty = true,
+            WindowEvent::Resized(_) => renderer.renderer.invalidate(),
             WindowEvent::RedrawRequested => {
                 if let Err(error) = renderer.render() {
                     self.failure = Some(error);
@@ -114,7 +114,7 @@ impl ApplicationHandler for App {
         };
 
         if let Some(limit) = self.frame_limit
-            && renderer.frame_counter >= limit
+            && renderer.frame_number() >= limit
         {
             println!("rendered {limit} frames; exiting");
             self.frame_limit = None;
@@ -126,32 +126,15 @@ impl ApplicationHandler for App {
     }
 }
 
-/// Everything one frame in flight needs of its own.
-struct Frame {
-    pool: CommandPool,
-    command: CommandBuffer,
-    acquire: BinarySemaphore,
-    signalled: u64,
-}
-
 struct Renderer {
-    // Declared in drop order: the scene and per-frame state first, then the
+    // Declared in drop order: the scene and the frame renderer first, then the
     // allocator that owns their memory, then the device, surface and window.
-    frames: Vec<Frame>,
-    /// One per swapchain image, not per frame in flight — present waits on one
-    /// and there is no way to observe when it is done with it.
-    render_finished: Vec<BinarySemaphore>,
-    timeline: TimelineSemaphore,
     scene: Scene,
-    swapchain: Swapchain,
+    renderer: FrameRenderer,
     allocator: Arc<Allocator>,
     device: Arc<Device>,
     surface: Surface,
     window: Window,
-
-    frame_index: usize,
-    frame_counter: u64,
-    dirty: bool,
     /// When assets were last checked for changes. See `poll_for_reloaded_assets`.
     last_asset_poll: Instant,
 }
@@ -190,69 +173,35 @@ impl Renderer {
         let device = Arc::new(Device::new(&instance, &devices[chosen]).map_err(|e| e.to_string())?);
         let allocator = Allocator::new(&device).map_err(|error| error.to_string())?;
 
-        let size = window.inner_size();
-        let swapchain = Swapchain::new(
+        let renderer = FrameRenderer::new(
             &device,
             &surface,
-            &SwapchainConfig {
-                present_mode: PresentMode::Mailbox,
-                extent: vk::Extent2D {
-                    width: size.width,
-                    height: size.height,
-                },
-            },
+            window_extent(&window),
+            &FrameRendererConfig::default(),
         )
         .map_err(|error| error.to_string())?;
 
-        let scene = Scene::new(&device, &allocator, swapchain.extent(), swapchain.format())?;
+        let scene = Scene::new(&device, &allocator, renderer.extent(), renderer.format())?;
 
-        let graphics_family = device.queue_families().graphics;
-        let mut frames = Vec::with_capacity(FRAMES_IN_FLIGHT);
-
-        for _ in 0..FRAMES_IN_FLIGHT {
-            let pool = CommandPool::new(&device, graphics_family).map_err(|e| e.to_string())?;
-            let command = pool
-                .allocate(1)
-                .map_err(|error| error.to_string())?
-                .pop()
-                .expect("one buffer was requested");
-
-            frames.push(Frame {
-                pool,
-                command,
-                acquire: BinarySemaphore::new(&device).map_err(|e| e.to_string())?,
-                signalled: 0,
-            });
-        }
-
-        let render_finished = (0..swapchain.images().len())
-            .map(|_| BinarySemaphore::new(&device))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| error.to_string())?;
-
-        println!(
-            "cube: {}x{}, {} swapchain images, {} frames in flight",
-            swapchain.extent().width,
-            swapchain.extent().height,
-            swapchain.images().len(),
-            FRAMES_IN_FLIGHT,
+        info!(
+            width = renderer.extent().width,
+            height = renderer.extent().height,
+            "cube ready"
         );
 
         Ok(Self {
-            frames,
-            render_finished,
-            timeline: TimelineSemaphore::new(&device, 0).map_err(|e| e.to_string())?,
             scene,
-            swapchain,
+            renderer,
             allocator,
             device,
             surface,
             window,
-            frame_index: 0,
-            frame_counter: 0,
-            dirty: false,
             last_asset_poll: Instant::now(),
         })
+    }
+
+    fn frame_number(&self) -> u64 {
+        self.renderer.frame_number()
     }
 
     /// Pick up any asset that has been recooked since the last check.
@@ -283,170 +232,48 @@ impl Renderer {
     }
 
     fn render(&mut self) -> Result<(), String> {
-        if self.dirty {
-            self.recreate_swapchain()?;
+        // Before the frame, not after: the depth buffer has to agree with the
+        // colour target while the frame is being recorded, so a resize noticed
+        // afterwards would draw one wrong frame first.
+        if let Some(extent) = self
+            .renderer
+            .prepare(&self.surface, window_extent(&self.window))
+            .map_err(|error| error.to_string())?
+        {
+            self.scene.resize(&self.allocator, extent)?;
         }
 
         self.poll_for_reloaded_assets()?;
 
-        let frame_index = self.frame_index;
+        // Borrowed out of `self` so the closure does not capture it whole —
+        // `render` needs `&mut self.renderer` at the same time.
+        let scene = &self.scene;
 
-        // Wait for this slot's previous submission before touching its pool.
-        self.timeline
-            .wait_forever(self.frames[frame_index].signalled)
+        self.renderer
+            .render(|frame| scene.record(frame.command, frame.target, frame.number))
             .map_err(|error| error.to_string())?;
-
-        self.frames[frame_index]
-            .pool
-            .reset()
-            .map_err(|error| error.to_string())?;
-
-        let acquired = self
-            .swapchain
-            .acquire_next_image(&self.frames[frame_index].acquire, Duration::from_secs(1))
-            .map_err(|error| error.to_string())?;
-
-        let image_index = match acquired {
-            AcquireOutcome::Acquired { index, suboptimal } => {
-                if suboptimal {
-                    self.dirty = true;
-                }
-                index
-            }
-            AcquireOutcome::OutOfDate => {
-                self.recreate_swapchain()?;
-                return Ok(());
-            }
-            AcquireOutcome::TimedOut => return Ok(()),
-        };
-
-        let command = &self.frames[frame_index].command;
-        command.begin().map_err(|error| error.to_string())?;
-
-        self.scene.record(
-            command,
-            Target {
-                image: self.swapchain.images()[image_index as usize],
-                view: self.swapchain.views()[image_index as usize],
-                extent: self.swapchain.extent(),
-                // The frame clears, so the previous contents are worth nothing
-                // and discarding is faster than preserving them.
-                from: ImageState::UNDEFINED,
-                to: ImageState::PRESENT,
-            },
-            self.frame_counter,
-        );
-
-        command.end().map_err(|error| error.to_string())?;
-
-        self.frame_counter += 1;
-        let signalled = self.frame_counter;
-        self.submit(frame_index, image_index, signalled)?;
-        self.frames[frame_index].signalled = signalled;
-
-        let outcome = self
-            .swapchain
-            .present(
-                self.device
-                    .queues()
-                    .present
-                    .unwrap_or(self.device.queues().graphics),
-                image_index,
-                &self.render_finished[image_index as usize],
-            )
-            .map_err(|error| error.to_string())?;
-
-        if matches!(
-            outcome,
-            PresentOutcome::OutOfDate | PresentOutcome::Suboptimal
-        ) {
-            self.dirty = true;
-        }
-
-        self.frame_index = (self.frame_index + 1) % FRAMES_IN_FLIGHT;
-
-        Ok(())
-    }
-
-    fn submit(&self, frame_index: usize, image_index: u32, signalled: u64) -> Result<(), String> {
-        let wait = [vk::SemaphoreSubmitInfo::default()
-            .semaphore(self.frames[frame_index].acquire.handle())
-            // At the colour-attachment stage, not the top of the pipe: vertex
-            // work may begin before the image is available.
-            .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)];
-
-        let signal = [
-            vk::SemaphoreSubmitInfo::default()
-                .semaphore(self.render_finished[image_index as usize].handle())
-                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
-            vk::SemaphoreSubmitInfo::default()
-                .semaphore(self.timeline.handle())
-                .value(signalled)
-                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
-        ];
-
-        let commands = [vk::CommandBufferSubmitInfo::default()
-            .command_buffer(self.frames[frame_index].command.handle())];
-
-        let submits = [vk::SubmitInfo2::default()
-            .wait_semaphore_infos(&wait)
-            .command_buffer_infos(&commands)
-            .signal_semaphore_infos(&signal)];
-
-        // SAFETY: the buffer is recorded and not pending, every semaphore
-        // belongs to this device, and the borrowed arrays outlive the call.
-        unsafe {
-            self.device.raw().queue_submit2(
-                self.device.queues().graphics,
-                &submits,
-                vk::Fence::null(),
-            )
-        }
-        .map_err(|error| error.to_string())
-    }
-
-    fn recreate_swapchain(&mut self) -> Result<(), String> {
-        let size = self.window.inner_size();
-
-        // Minimising produces a zero extent, which is not a valid swapchain.
-        if size.width == 0 || size.height == 0 {
-            return Ok(());
-        }
-
-        self.swapchain
-            .recreate(
-                &self.surface,
-                vk::Extent2D {
-                    width: size.width,
-                    height: size.height,
-                },
-            )
-            .map_err(|error| error.to_string())?;
-
-        // The depth buffer must match the colour target's size, so it is
-        // rebuilt too. Forgetting this is a validation error on the first frame
-        // after a resize.
-        self.scene
-            .resize(&self.allocator, self.swapchain.extent())?;
-
-        // Image count can change on recreation.
-        self.render_finished = (0..self.swapchain.images().len())
-            .map(|_| BinarySemaphore::new(&self.device))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| error.to_string())?;
-
-        self.dirty = false;
 
         Ok(())
     }
 }
 
+/// The window's size, in the form Vulkan wants.
+fn window_extent(window: &Window) -> vk::Extent2D {
+    let size = window.inner_size();
+
+    vk::Extent2D {
+        width: size.width,
+        height: size.height,
+    }
+}
+
 impl Drop for Renderer {
     fn drop(&mut self) {
-        info!(frames = self.frame_counter, "shutting down");
+        info!(frames = self.renderer.frame_number(), "shutting down");
 
-        // Before any field drops — `Device::drop` waits too, but by then the
-        // pools and semaphores declared above it are already destroyed.
+        // Before any field drops. `FrameRenderer::drop` waits too, but it drops
+        // after the scene, and destroying the scene's images while a frame that
+        // samples them is still executing is undefined.
         if let Err(failure) = self.device.wait_idle() {
             error!(error = %failure, "device did not go idle; teardown may be unsafe");
         }

@@ -551,6 +551,7 @@ dependencies = [
  "slop-asset",
  "slop-core",
  "slop-math",
+ "slop-render",
  "slop-rhi",
  "slop-verify",
 ]
@@ -562,6 +563,7 @@ dependencies = [
  "slop-app",
  "slop-asset",
  "slop-core",
+ "slop-render",
  "slop-rhi",
 ]
 
@@ -1775,6 +1777,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.3",
+]
+
+[[package]]
+name = "slop-render"
+version = "0.0.0"
+dependencies = [
+ "slop-core",
+ "slop-rhi",
+ "thiserror 2.0.19",
 ]
 
 [[package]]

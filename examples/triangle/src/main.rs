@@ -2,33 +2,29 @@
 //!
 //! Run `cargo run -p slop-cli -- cook` first, then `cargo run -p example-triangle`.
 //!
-//! This file owns `main()` and drives the frame loop itself, per
-//! `docs/DESIGN.md` §1.2 principle 4. The engine supplies primitives; the render
-//! loop's eventual shape is `slop-render`'s job at M3, and inventing it here
-//! would be designing against imagined requirements
-//! (`docs/PLAN.md` §4.1-D).
+//! This file owns `main()` and the event loop, per `docs/DESIGN.md` §1.2
+//! principle 4 — the engine supplies pieces rather than a shape to sit inside.
+//! What it no longer owns is the *frame* loop: acquire, submit, present and
+//! frames in flight are `slop_render::FrameRenderer`'s, which is why this file
+//! is now about a third of its previous length.
 //!
-//! **This loop is duplicated in `examples/cube/src/main.rs`**, and that is a
-//! known and deliberate cost — `docs/PLAN.md` §6.1 records why it is being left
-//! until M3 rather than lifted into `slop-app` now, and what would change that
-//! decision. Both copies are deleted when the frame renderer lands. A **third**
-//! copy is the signal to extract it early; do not add one silently.
+//! **The synchronisation subtleties this file used to explain have moved with
+//! the code that handles them**, into `slop-render`. Two are worth knowing about
+//! even from here, because they are what makes the loop non-obvious:
 //!
-//! # The two synchronization subtleties
+//! - Acquire returns an index *before* the image is usable, so rendering waits
+//!   on a semaphore at the colour-attachment stage. Skipping that produces
+//!   flicker indistinguishable from a driver bug.
+//! - Render-finished semaphores are per swapchain image rather than per frame in
+//!   flight, because present waits on one and there is no way to observe when it
+//!   is finished with it.
 //!
-//! **Acquire returns an index before the image is usable.** The presentation
-//! engine may still be reading it, so rendering waits on the acquire semaphore
-//! at the colour-attachment stage rather than starting immediately. Skipping
-//! this produces flicker that looks like a driver bug.
-//!
-//! **Render-finished semaphores are per swapchain image, not per frame in
-//! flight.** Present waits on one, and there is no way to observe when present
-//! is done with it — so a per-frame semaphore could be signalled again while a
-//! previous present still waits on it. One per image sidesteps that entirely.
+//! What remains here is what an application genuinely owns: creating a window
+//! and a device, building one pipeline, and recording a draw into whatever
+//! target the frame renderer hands over.
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use slop_asset::Vfs;
 use slop_core::diagnostics::tracing::{error, info};
@@ -38,19 +34,11 @@ use slop_app::winit::application::ApplicationHandler;
 use slop_app::winit::event::WindowEvent;
 use slop_app::winit::event_loop::{ActiveEventLoop, EventLoop};
 use slop_app::winit::window::{Window, WindowId};
+use slop_render::{Frame, FrameRenderer, FrameRendererConfig, Target};
 use slop_rhi::{
-    AcquireOutcome, BinarySemaphore, CommandBuffer, CommandPool, Device, DeviceSelection,
-    GraphicsPipeline, GraphicsPipelineConfig, ImageState, Instance, InstanceConfig, PipelineLayout,
-    PresentMode, PresentOutcome, ShaderModule, ShaderStage, Surface, Swapchain, SwapchainConfig,
-    TimelineSemaphore, vk,
+    Device, DeviceSelection, GraphicsPipeline, GraphicsPipelineConfig, ImageState, Instance,
+    InstanceConfig, PipelineLayout, ShaderModule, ShaderStage, Surface, vk,
 };
-
-/// How many frames the CPU may prepare ahead of the GPU.
-///
-/// Two is the standard trade: enough to keep both busy, few enough that input
-/// latency stays low. `docs/DESIGN.md` §2.9's snapshot is what would eventually
-/// let this rise without the simulation and renderer fighting over state.
-const FRAMES_IN_FLIGHT: usize = 2;
 
 fn main() {
     slop_app::logging::init();
@@ -134,7 +122,7 @@ impl ApplicationHandler for App {
         // headless mode in `docs/DESIGN.md` §5 needs — run a fixed number of
         // frames, then stop.
         if let Some(limit) = self.frame_limit
-            && renderer.frame_counter >= limit
+            && renderer.frame_number() >= limit
         {
             println!("rendered {limit} frames; exiting");
             // Cleared so this fires once: `about_to_wait` runs again before the
@@ -149,37 +137,17 @@ impl ApplicationHandler for App {
         renderer.window.request_redraw();
     }
 }
-
-/// Everything one frame in flight needs of its own.
-struct Frame {
-    pool: CommandPool,
-    command: CommandBuffer,
-    /// Signalled by the presentation engine when its image is ready to write.
-    acquire: BinarySemaphore,
-    /// The timeline value this frame's submission will signal. Waiting on it is
-    /// what makes reusing the pool safe.
-    signalled: u64,
-}
-
 struct Renderer {
     // Declared in drop order: everything built from the device, then the
     // device, then the surface, then the window it came from.
-    frames: Vec<Frame>,
-    /// One per swapchain image — see the module docs.
-    render_finished: Vec<BinarySemaphore>,
-    timeline: TimelineSemaphore,
-    // No separate layout field: `GraphicsPipeline` already holds an `Arc` to
-    // it, which is what keeps it alive.
+    //
+    // No separate layout field: `GraphicsPipeline` already holds an `Arc` to it,
+    // which is what keeps it alive.
     pipeline: GraphicsPipeline,
-    swapchain: Swapchain,
+    renderer: FrameRenderer,
     device: Arc<Device>,
     surface: Surface,
     window: Window,
-
-    frame_index: usize,
-    frame_counter: u64,
-    /// Set when the swapchain is known to no longer match the window.
-    dirty: bool,
 }
 
 impl Renderer {
@@ -215,17 +183,11 @@ impl Renderer {
             .map_err(|error| error.to_string())?;
         let device = Arc::new(Device::new(&instance, &devices[chosen]).map_err(|e| e.to_string())?);
 
-        let size = window.inner_size();
-        let swapchain = Swapchain::new(
+        let renderer = FrameRenderer::new(
             &device,
             &surface,
-            &SwapchainConfig {
-                present_mode: PresentMode::Mailbox,
-                extent: vk::Extent2D {
-                    width: size.width,
-                    height: size.height,
-                },
-            },
+            window_extent(&window),
+            &FrameRendererConfig::default(),
         )
         .map_err(|error| error.to_string())?;
 
@@ -243,9 +205,9 @@ impl Renderer {
                     module: &module,
                     entry: c"fragmentMain",
                 },
-                color_format: swapchain.format(),
-                // No depth: the triangle is a single flat primitive with nothing to
-                // occlude it. Depth arrives with the cube.
+                color_format: renderer.format(),
+                // No depth: the triangle is a single flat primitive with nothing
+                // to occlude it. Depth arrives with the cube.
                 depth_format: None,
                 // Positions come from SV_VertexID, so there is nothing to bind.
                 vertex_layout: None,
@@ -263,292 +225,148 @@ impl Renderer {
         // the pipelines built from it.
         drop(module);
 
-        let graphics_family = device.queue_families().graphics;
-        let mut frames = Vec::with_capacity(FRAMES_IN_FLIGHT);
-
-        for _ in 0..FRAMES_IN_FLIGHT {
-            let pool = CommandPool::new(&device, graphics_family).map_err(|e| e.to_string())?;
-            let command = pool
-                .allocate(1)
-                .map_err(|error| error.to_string())?
-                .pop()
-                .expect("one buffer was requested");
-
-            frames.push(Frame {
-                pool,
-                command,
-                acquire: BinarySemaphore::new(&device).map_err(|e| e.to_string())?,
-                // Zero: the timeline starts there, so the first wait is
-                // satisfied immediately rather than deadlocking.
-                signalled: 0,
-            });
-        }
-
-        let render_finished = (0..swapchain.images().len())
-            .map(|_| BinarySemaphore::new(&device))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| error.to_string())?;
-
-        println!(
-            "triangle: {}x{}, {} swapchain images, {} frames in flight",
-            swapchain.extent().width,
-            swapchain.extent().height,
-            swapchain.images().len(),
-            FRAMES_IN_FLIGHT,
+        info!(
+            width = renderer.extent().width,
+            height = renderer.extent().height,
+            "triangle ready"
         );
 
         Ok(Self {
-            frames,
-            render_finished,
-            timeline: TimelineSemaphore::new(&device, 0).map_err(|e| e.to_string())?,
             pipeline,
-            swapchain,
+            renderer,
             device,
             surface,
             window,
-            frame_index: 0,
-            frame_counter: 0,
-            dirty: false,
         })
     }
 
+    fn frame_number(&self) -> u64 {
+        self.renderer.frame_number()
+    }
+
     fn mark_dirty(&mut self) {
-        self.dirty = true;
+        self.renderer.invalidate();
     }
 
     fn render(&mut self) -> Result<(), String> {
-        if self.dirty {
-            self.recreate_swapchain()?;
-        }
-
-        let frame_index = self.frame_index;
-
-        // Wait for this frame slot's previous submission before touching its
-        // pool. This is the whole reason the timeline exists.
-        self.timeline
-            .wait_forever(self.frames[frame_index].signalled)
+        // Nothing here is sized to the target — no depth buffer, no offscreen
+        // attachment — so the new extent is discarded. The cube, which has one,
+        // is where this return value earns its keep.
+        self.renderer
+            .prepare(&self.surface, window_extent(&self.window))
             .map_err(|error| error.to_string())?;
 
-        self.frames[frame_index]
-            .pool
-            .reset()
+        // Borrowed out of `self` so the closure does not capture it whole:
+        // `render` needs `&mut self.renderer` at the same time.
+        let device = &self.device;
+        let pipeline = &self.pipeline;
+
+        self.renderer
+            .render(|frame| record(device, pipeline, frame))
             .map_err(|error| error.to_string())?;
-
-        let acquired = self
-            .swapchain
-            .acquire_next_image(&self.frames[frame_index].acquire, Duration::from_secs(1))
-            .map_err(|error| error.to_string())?;
-
-        let image_index = match acquired {
-            AcquireOutcome::Acquired { index, suboptimal } => {
-                if suboptimal {
-                    self.dirty = true;
-                }
-                index
-            }
-            AcquireOutcome::OutOfDate => {
-                self.recreate_swapchain()?;
-                return Ok(());
-            }
-            AcquireOutcome::TimedOut => return Ok(()),
-        };
-
-        self.record(frame_index, image_index)?;
-
-        self.frame_counter += 1;
-        let signalled = self.frame_counter;
-        self.submit(frame_index, image_index, signalled)?;
-        self.frames[frame_index].signalled = signalled;
-
-        let outcome = self
-            .swapchain
-            .present(
-                self.device
-                    .queues()
-                    .present
-                    .unwrap_or(self.device.queues().graphics),
-                image_index,
-                &self.render_finished[image_index as usize],
-            )
-            .map_err(|error| error.to_string())?;
-
-        if matches!(
-            outcome,
-            PresentOutcome::OutOfDate | PresentOutcome::Suboptimal
-        ) {
-            self.dirty = true;
-        }
-
-        self.frame_index = (self.frame_index + 1) % FRAMES_IN_FLIGHT;
-
-        Ok(())
-    }
-
-    fn record(&self, frame_index: usize, image_index: u32) -> Result<(), String> {
-        let command = &self.frames[frame_index].command;
-        let extent = self.swapchain.extent();
-        let image = self.swapchain.images()[image_index as usize];
-        let view = self.swapchain.views()[image_index as usize];
-
-        command.begin().map_err(|error| error.to_string())?;
-
-        // From UNDEFINED, not from PRESENT_SRC: the previous contents are about
-        // to be cleared, so discarding is both correct and faster.
-        command.transition_image(
-            image,
-            vk::ImageAspectFlags::COLOR,
-            ImageState::UNDEFINED,
-            ImageState::COLOR_ATTACHMENT,
-        );
-
-        let clear = vk::ClearValue {
-            color: vk::ClearColorValue {
-                float32: [0.02, 0.02, 0.03, 1.0],
-            },
-        };
-        let attachments = [vk::RenderingAttachmentInfo::default()
-            .image_view(view)
-            .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-            .load_op(vk::AttachmentLoadOp::CLEAR)
-            .store_op(vk::AttachmentStoreOp::STORE)
-            .clear_value(clear)];
-
-        let rendering = vk::RenderingInfo::default()
-            .render_area(vk::Rect2D {
-                offset: vk::Offset2D { x: 0, y: 0 },
-                extent,
-            })
-            .layer_count(1)
-            .color_attachments(&attachments);
-
-        let viewports = [vk::Viewport {
-            x: 0.0,
-            y: 0.0,
-            width: extent.width as f32,
-            height: extent.height as f32,
-            min_depth: 0.0,
-            max_depth: 1.0,
-        }];
-        let scissors = [vk::Rect2D {
-            offset: vk::Offset2D { x: 0, y: 0 },
-            extent,
-        }];
-
-        let raw = self.device.raw();
-        let buffer = command.handle();
-
-        // SAFETY: the buffer is recording, every borrowed structure outlives
-        // these calls, and `dynamic_rendering` is in the required feature tier.
-        unsafe {
-            raw.cmd_begin_rendering(buffer, &rendering);
-            raw.cmd_set_viewport(buffer, 0, &viewports);
-            raw.cmd_set_scissor(buffer, 0, &scissors);
-            raw.cmd_bind_pipeline(
-                buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline.handle(),
-            );
-            // Three vertices, one instance. Positions come from SV_VertexID, so
-            // there is nothing to bind.
-            raw.cmd_draw(buffer, 3, 1, 0, 0);
-            raw.cmd_end_rendering(buffer);
-        }
-
-        command.transition_image(
-            image,
-            vk::ImageAspectFlags::COLOR,
-            ImageState::COLOR_ATTACHMENT,
-            ImageState::PRESENT,
-        );
-        command.end().map_err(|error| error.to_string())?;
-
-        Ok(())
-    }
-
-    fn submit(&self, frame_index: usize, image_index: u32, signalled: u64) -> Result<(), String> {
-        let wait = [vk::SemaphoreSubmitInfo::default()
-            .semaphore(self.frames[frame_index].acquire.handle())
-            // Wait at the colour-attachment stage, not the top of the pipe:
-            // vertex work may begin before the image is available, since it
-            // touches nothing the presentation engine is reading.
-            .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)];
-
-        let signal = [
-            // Binary, for present — the swapchain accepts nothing else.
-            vk::SemaphoreSubmitInfo::default()
-                .semaphore(self.render_finished[image_index as usize].handle())
-                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
-            // Timeline, for frame pacing.
-            vk::SemaphoreSubmitInfo::default()
-                .semaphore(self.timeline.handle())
-                .value(signalled)
-                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
-        ];
-
-        let commands = [vk::CommandBufferSubmitInfo::default()
-            .command_buffer(self.frames[frame_index].command.handle())];
-
-        let submits = [vk::SubmitInfo2::default()
-            .wait_semaphore_infos(&wait)
-            .command_buffer_infos(&commands)
-            .signal_semaphore_infos(&signal)];
-
-        // SAFETY: the buffer is recorded and not pending, every semaphore
-        // belongs to this device, and the borrowed arrays outlive the call.
-        unsafe {
-            self.device.raw().queue_submit2(
-                self.device.queues().graphics,
-                &submits,
-                vk::Fence::null(),
-            )
-        }
-        .map_err(|error| error.to_string())
-    }
-
-    fn recreate_swapchain(&mut self) -> Result<(), String> {
-        let size = self.window.inner_size();
-
-        // Minimising produces a zero extent, which is not a valid swapchain.
-        // Skipping rather than failing is correct: the window will come back.
-        if size.width == 0 || size.height == 0 {
-            return Ok(());
-        }
-
-        self.swapchain
-            .recreate(
-                &self.surface,
-                vk::Extent2D {
-                    width: size.width,
-                    height: size.height,
-                },
-            )
-            .map_err(|error| error.to_string())?;
-
-        // Image count can change on recreation, so the per-image semaphores are
-        // rebuilt rather than assumed still to match.
-        self.render_finished = (0..self.swapchain.images().len())
-            .map(|_| BinarySemaphore::new(&self.device))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| error.to_string())?;
-
-        self.dirty = false;
 
         Ok(())
     }
 }
 
+/// Draw the triangle into this frame's target.
+///
+/// A free function rather than a method, because everything it needs arrives in
+/// the [`Frame`] or is borrowed explicitly — which is also what lets it be
+/// called while the frame renderer is mutably borrowed.
+fn record(device: &Arc<Device>, pipeline: &GraphicsPipeline, frame: &Frame<'_>) {
+    let Target {
+        image,
+        view,
+        extent,
+        from,
+        to,
+    } = frame.target;
+
+    // From UNDEFINED rather than from PRESENT: the previous contents are about
+    // to be cleared, so discarding them is both correct and faster. Which state
+    // that is comes from the target rather than being assumed here.
+    frame.command.transition_image(
+        image,
+        vk::ImageAspectFlags::COLOR,
+        from,
+        ImageState::COLOR_ATTACHMENT,
+    );
+
+    let clear = vk::ClearValue {
+        color: vk::ClearColorValue {
+            float32: [0.02, 0.02, 0.03, 1.0],
+        },
+    };
+    let attachments = [vk::RenderingAttachmentInfo::default()
+        .image_view(view)
+        .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+        .load_op(vk::AttachmentLoadOp::CLEAR)
+        .store_op(vk::AttachmentStoreOp::STORE)
+        .clear_value(clear)];
+
+    let rendering = vk::RenderingInfo::default()
+        .render_area(vk::Rect2D {
+            offset: vk::Offset2D { x: 0, y: 0 },
+            extent,
+        })
+        .layer_count(1)
+        .color_attachments(&attachments);
+
+    let viewports = [vk::Viewport {
+        x: 0.0,
+        y: 0.0,
+        width: extent.width as f32,
+        height: extent.height as f32,
+        min_depth: 0.0,
+        max_depth: 1.0,
+    }];
+    let scissors = [vk::Rect2D {
+        offset: vk::Offset2D { x: 0, y: 0 },
+        extent,
+    }];
+
+    let raw = device.raw();
+    let buffer = frame.command.handle();
+
+    // SAFETY: the buffer is recording, every borrowed structure outlives these
+    // calls, and `dynamic_rendering` is in the required feature tier.
+    unsafe {
+        raw.cmd_begin_rendering(buffer, &rendering);
+        raw.cmd_set_viewport(buffer, 0, &viewports);
+        raw.cmd_set_scissor(buffer, 0, &scissors);
+        raw.cmd_bind_pipeline(buffer, vk::PipelineBindPoint::GRAPHICS, pipeline.handle());
+        // Three vertices, one instance. Positions come from SV_VertexID, so
+        // there is nothing to bind.
+        raw.cmd_draw(buffer, 3, 1, 0, 0);
+        raw.cmd_end_rendering(buffer);
+    }
+
+    frame.command.transition_image(
+        image,
+        vk::ImageAspectFlags::COLOR,
+        ImageState::COLOR_ATTACHMENT,
+        to,
+    );
+}
+
+/// The window's size, in the form Vulkan wants.
+fn window_extent(window: &Window) -> vk::Extent2D {
+    let size = window.inner_size();
+
+    vk::Extent2D {
+        width: size.width,
+        height: size.height,
+    }
+}
+
 impl Drop for Renderer {
     fn drop(&mut self) {
-        info!(frames = self.frame_counter, "shutting down");
+        info!(frames = self.renderer.frame_number(), "shutting down");
 
-        // Every Vulkan object below is destroyed when this struct's fields drop,
-        // which happens *after* this function returns — and the GPU may still be
-        // executing the last submitted frame.
-        //
-        // `Device::drop` also waits, but that is far too late: the device field
-        // is declared after the pools and semaphores, so those are already
-        // destroyed by the time it runs. Waiting here, before any field drops,
-        // is what actually makes teardown safe.
+        // Before any field drops. `FrameRenderer::drop` waits too, but it drops
+        // after the pipeline, and destroying a pipeline a pending submission
+        // still references is undefined.
         if let Err(failure) = self.device.wait_idle() {
             error!(error = %failure, "device did not go idle; teardown may be unsafe");
         }

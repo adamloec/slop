@@ -63,12 +63,12 @@ flowchart TD
     reflect -.-> derive
 
     classDef planned stroke-dasharray: 5 5
-    class editor,host,abi,audio,physics,scene,render planned
+    class editor,host,abi,audio,physics,scene planned
 ```
 
 `slop-math`, `slop-core`, `slop-reflect`, `slop-reflect-derive`, `slop-ecs`,
-`slop-asset`, `slop-rhi`, `slop-app`, `slop-cli`, and `slop-verify` exist today.
-The rest land at the milestones in `DESIGN.md` §6.
+`slop-asset`, `slop-rhi`, `slop-render`, `slop-app`, `slop-cli` and `slop-verify`
+exist today. The rest land at the milestones in `DESIGN.md` §6.
 
 `slop-ecs` and `slop-reflect` are drawn solid as of M1 and are finished for that
 milestone. `slop-asset` is solid as of M2 and is not — it has the cook cache, the
@@ -77,15 +77,18 @@ still wants mipmaps, materials and streaming. What each crate still lacks is
 listed in its own document rather than implied by the diagram; a crate existing
 is not a crate being finished.
 
-**`slop-render` is next**, and it arrives before the rest of M2 rather than at
-M3. The frame loop it owns currently exists twice, copied between
-`examples/cube` and `examples/triangle`, and everything M2 still owes — the debug
-UI, materials, Sponza — would be the third copy. `PLAN.md` §9 has the ordering.
+**`slop-render` exists as of M2 and holds one thing: the frame loop.** It arrived
+before the rest of M2 rather than at M3 because that loop existed twice, copied
+between `examples/cube` and `examples/triangle`, and everything M2 still owes —
+the debug UI, materials, Sponza — would have been the third copy. The render
+graph and the passes follow at M3. `PLAN.md` §9 has the ordering.
 
 The dashed arrows into `slop-verify` are **dev-dependencies**, which is why they
 run upward against the layering without breaking it: nothing it contains reaches
 a shipped game, and it depends on none of the crates that depend on it. It is
-the golden-image harness (`DESIGN.md` §5), and `slop-render` picks it up at M3.
+the golden-image harness (`DESIGN.md` §5). `slop-render` picks it up once it has
+something to compare — its frame loop needs a window, so today the coverage sits
+in the examples instead (`docs/slop-render/README.md` §6).
 
 ---
 

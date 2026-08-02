@@ -24,6 +24,7 @@ slop-ecs = { path = "crates/slop-ecs" }
 slop-math = { path = "crates/slop-math" }
 slop-reflect = { path = "crates/slop-reflect" }
 slop-reflect-derive = { path = "crates/slop-reflect-derive" }
+slop-render = { path = "crates/slop-render" }
 slop-rhi = { path = "crates/slop-rhi" }
 slop-verify = { path = "crates/slop-verify" }
 

@@ -7,6 +7,7 @@ use slop_asset::{Assets, Mesh, Texture, Vfs};
 use slop_core::Handle;
 use slop_core::diagnostics::tracing::{info, warn};
 use slop_math::{Mat4, Quat, Vec3};
+use slop_render::Target;
 use slop_rhi::{
     Allocator, BindlessHeap, BindlessHeapConfig, Buffer, BufferConfig, BufferState, CommandBuffer,
     CommandPool, DEPTH_CLEAR, Device, GraphicsPipeline, GraphicsPipelineConfig, Image, ImageConfig,
@@ -15,33 +16,6 @@ use slop_rhi::{
 };
 
 use crate::mesh;
-
-/// Where a frame is drawn.
-///
-/// A borrowed handle rather than an owned image, because the two callers own
-/// their targets differently: the windowed demo's belongs to the swapchain and
-/// changes every frame, while the golden test's is one image it keeps. Taking
-/// either would have forced the other to work around it.
-#[derive(Debug, Clone, Copy)]
-pub struct Target {
-    /// The colour image being rendered into.
-    pub image: vk::Image,
-    /// A view of it.
-    pub view: vk::ImageView,
-    /// Its size in pixels.
-    pub extent: vk::Extent2D,
-    /// The state the image is in on entry.
-    ///
-    /// Almost always [`ImageState::UNDEFINED`]: the frame clears it, so
-    /// discarding the previous contents is both correct and faster than
-    /// preserving them.
-    pub from: ImageState,
-    /// The state the image must be left in.
-    ///
-    /// [`ImageState::PRESENT`] for a swapchain image,
-    /// [`ImageState::TRANSFER_SRC`] for one about to be read back.
-    pub to: ImageState,
-}
 
 /// Per-draw data, matching `PushConstants` in `shaders/passes/cube.slang`.
 ///

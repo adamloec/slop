@@ -45,4 +45,4 @@ pub mod mesh;
 
 mod scene;
 
-pub use scene::{PushConstants, Scene, Target};
+pub use scene::{PushConstants, Scene};
