@@ -175,6 +175,12 @@ Four things that are not obvious, each of which cost a debugging pass:
 - **Vertex buffers are per in-flight slot.** `Frame::slot` exists for this. One
   shared buffer is corrupted by the frame still reading it — `FrameRenderer`
   waits for *this* slot before recording, which says nothing about the others.
+- **Vertex positions are in points; scissor rectangles are in physical pixels.**
+  The shader divides by the screen size *in points*, so a scaled display draws
+  the interface at the right size. Dividing by the physical size instead draws
+  it at 1/scale while its clip rectangles stay full size, which shaves the left
+  edge off every label — invisible at 100% scaling, which is what a headless
+  test defaults to.
 - **The colour attribute is four bytes in the buffer and a `float4` in the
   shader.** Reflection describes the shader side and cannot see the buffer
   format, so this module states its layout explicitly and checks the shader

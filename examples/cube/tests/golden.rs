@@ -327,11 +327,16 @@ impl Headless {
 
     /// Render one frame and bring it back to the CPU.
     fn render(&mut self, frame: u64) -> Rgba8 {
-        self.render_with(frame, &[])
+        self.render_with(frame, &[], 1.0)
     }
 
     /// Render one frame with an overlay drawn over it.
-    fn render_with(&mut self, frame: u64, primitives: &[egui::ClippedPrimitive]) -> Rgba8 {
+    fn render_with(
+        &mut self,
+        frame: u64,
+        primitives: &[egui::ClippedPrimitive],
+        pixels_per_point: f32,
+    ) -> Rgba8 {
         self.pool.reset().expect("the pool must reset");
         let command = self
             .pool
@@ -366,7 +371,7 @@ impl Headless {
                 slots: 1,
             },
             primitives,
-            1.0,
+            pixels_per_point,
         );
 
         command.copy_image_to_buffer(
@@ -517,7 +522,7 @@ fn the_debug_overlay_actually_draws_something() {
         .expect("a later texture delta must upload");
 
     let without = renderer.render(CAPTURED_FRAME);
-    let with = renderer.render_with(CAPTURED_FRAME, &primitives);
+    let with = renderer.render_with(CAPTURED_FRAME, &primitives, 1.0);
 
     // Counted rather than compared whole: `assert_ne!` on two images prints both
     // of them, which is a megabyte of numbers nobody reads.
@@ -544,5 +549,102 @@ fn the_debug_overlay_actually_draws_something() {
         corner(&without, SIZE - 4, SIZE - 4),
         corner(&with, SIZE - 4, SIZE - 4),
         "the far corner is outside the overlay and must be untouched"
+    );
+}
+
+#[test]
+fn a_scaled_display_draws_the_same_interface() {
+    // The bug this exists for: egui's vertex positions are in points and the
+    // scissor rectangles are in physical pixels. Dividing geometry by the
+    // physical size draws the interface at 1/scale while its clip rectangles
+    // stay full size, so the left edge of every label is shaved off.
+    //
+    // Invisible at `pixels_per_point == 1.0`, which is what a headless test
+    // defaults to and why the first overlay test passed while a 150%-scaled
+    // display showed "rame 11447". Rendering the same UI at two scales and
+    // requiring both to cover the same area is what catches it.
+    let Some((device, allocator)) = headless() else {
+        return;
+    };
+
+    let Some(mut renderer) = harness(&device, &allocator) else {
+        return;
+    };
+
+    // Painted at each scale: the same interface in points, so the same region of
+    // the screen in pixels, whatever the scale factor says.
+    let covered = |renderer: &mut Headless, pixels_per_point: f32| -> usize {
+        let context = egui::Context::default();
+
+        // Told to egui, not merely to the renderer. Passing a scale to
+        // `tessellate` alone leaves egui laying out at 1.0, so the test would
+        // not reproduce a scaled display at all — which is how the first
+        // attempt at this test passed against the bug.
+        context.set_pixels_per_point(pixels_per_point);
+
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(
+                    SIZE as f32 / pixels_per_point,
+                    SIZE as f32 / pixels_per_point,
+                ),
+            )),
+            ..Default::default()
+        };
+        let declare = |ui: &mut egui::Ui| {
+            egui::Window::new("scaled")
+                .fixed_pos([4.0, 4.0])
+                .show(&ui.ctx().clone(), |ui| ui.label("MMMMMMMM"));
+        };
+
+        let first = context.run_ui(input.clone(), &declare);
+        renderer
+            .scene
+            .update_overlay_textures(&allocator, &first.textures_delta)
+            .expect("the font atlas must upload");
+
+        let output = context.run_ui(input, &declare);
+        renderer
+            .scene
+            .update_overlay_textures(&allocator, &output.textures_delta)
+            .expect("a later delta must upload");
+
+        assert_eq!(
+            output.pixels_per_point, pixels_per_point,
+            "egui must agree about the scale"
+        );
+
+        let primitives = context.tessellate(output.shapes, output.pixels_per_point);
+        let plain = renderer.render(CAPTURED_FRAME);
+        let drawn = renderer.render_with(CAPTURED_FRAME, &primitives, pixels_per_point);
+
+        plain
+            .pixels()
+            .iter()
+            .zip(drawn.pixels())
+            .filter(|(left, right)| left != right)
+            .count()
+    };
+
+    let unscaled = covered(&mut renderer, 1.0);
+    let scaled = covered(&mut renderer, 1.5);
+
+    assert!(unscaled > 1000 && scaled > 1000, "both must draw something");
+
+    // At 1.5x scale the same interface in points covers substantially *more*
+    // physical pixels — that is what display scaling is. Not the full 2.25x pure
+    // area would predict: coverage is counted as bytes that changed, and a
+    // translucent panel over a varying background does not change every byte it
+    // covers.
+    //
+    // The direction is what discriminates. With geometry in physical units and
+    // scissors in points, the interface *shrinks* as the scale rises: measured
+    // at 0.71x against the bug, 1.61x once fixed.
+    let ratio = scaled as f32 / unscaled as f32;
+    assert!(
+        (1.25..3.0).contains(&ratio),
+        "the interface covers {ratio:.2}x the area at 1.5x scale; scaling up must \
+         cover more, so geometry and scissors disagree about which units they are in"
     );
 }

@@ -418,9 +418,16 @@ impl Overlay {
 
             for draw in &draws {
                 let push = PushConstants {
+                    // In *points*, not physical pixels. egui's vertex positions
+                    // are logical, so mapping them to clip space has to divide
+                    // by the logical size — while the scissor below is physical,
+                    // because Vulkan's is. Dividing geometry by the physical size
+                    // draws the interface at 1/scale while its clip rectangles
+                    // stay full size, which shaves the left edge off every
+                    // label and is invisible at 100% display scaling.
                     screen_size: [
-                        frame.target.extent.width as f32,
-                        frame.target.extent.height as f32,
+                        frame.target.extent.width as f32 / pixels_per_point,
+                        frame.target.extent.height as f32 / pixels_per_point,
                     ],
                     texture: draw.texture,
                     sampler: self.sampler_slot.index(),
