@@ -21,8 +21,14 @@
 //! - [`Assets`] — what is loaded, named by [`Handle`](slop_core::Handle). The
 //!   first thing here that *holds* an asset rather than passing its bytes on.
 //!
+//! Hot reload is built on those three: [`Assets::reload_changed`] picks up any
+//! cooked artifact that changed on disk. The half that *recooks* is `slop-cli
+//! cook --watch`, a separate process on purpose — §2.8 keeps source parsing out
+//! of anything that ships, so the engine watches cooked bytes and never learns
+//! what a PNG is.
+//!
 //! What is deliberately absent, with reasoning in `docs/PLAN.md` §6.1: async
-//! streaming, hot reload, a dependency graph between assets, and reference
+//! streaming, a dependency graph between assets, and reference
 //! counting to decide when something can be unloaded. Each waits for a consumer
 //! rather than being designed against an imagined one — the mistake §4.1-C
 //! avoided for the job system's access declaration, which shipped its API only

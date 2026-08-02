@@ -75,6 +75,28 @@ pub enum VfsError {
     },
 }
 
+/// A token that changes when the bytes at a logical path change.
+///
+/// Opaque on purpose. Today it is the file's modification time and length,
+/// because that is what a directory on disk can answer cheaply; a packed archive
+/// would answer from its index, and a network mount from an etag. Comparing two
+/// of these is the only supported operation, which is what lets the answer come
+/// from somewhere else later without a caller noticing.
+///
+/// **Not a content hash.** Two writes within the filesystem's timestamp
+/// granularity that leave the length unchanged compare equal, so a change can be
+/// missed. Hashing instead would mean reading every byte of every asset on every
+/// poll — the cost this exists to avoid — and the failure mode is one more save
+/// rather than anything incorrect. Where exactness matters, the cook cache
+/// already hashes content (`Cache`, §2.8); this is the cheap runtime check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Version {
+    /// `None` when the filesystem will not report one, which some network and
+    /// container mounts do. Length alone then carries the signal.
+    modified: Option<std::time::SystemTime>,
+    len: u64,
+}
+
 /// Reads cooked assets for one project.
 #[derive(Debug, Clone)]
 pub struct Vfs {
@@ -137,6 +159,26 @@ impl Vfs {
     /// Whether something is cooked at `logical`.
     pub fn exists(&self, logical: &str) -> bool {
         self.resolve(logical).is_ok_and(|path| path.is_file())
+    }
+
+    /// A token for the current bytes at `logical`, for spotting a change without
+    /// reading them.
+    ///
+    /// `None` if the path is malformed or nothing is there. A caller polling for
+    /// changes should read that as *unchanged* rather than as removed: an editor
+    /// saving over a file often deletes and renames, so "absent" is a state a
+    /// perfectly healthy asset passes through for a few milliseconds.
+    pub fn version(&self, logical: &str) -> Option<Version> {
+        let metadata = std::fs::metadata(self.resolve(logical).ok()?).ok()?;
+
+        if !metadata.is_file() {
+            return None;
+        }
+
+        Some(Version {
+            modified: metadata.modified().ok(),
+            len: metadata.len(),
+        })
     }
 
     /// Read the cooked bytes at `logical`.

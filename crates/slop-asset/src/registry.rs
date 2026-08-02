@@ -47,6 +47,7 @@ use std::path::Path;
 use slop_core::{FxHashMap, Handle, SlotMap};
 use thiserror::Error;
 
+use crate::vfs::Version;
 use crate::{Mesh, Texture, Vfs, VfsError};
 
 /// Something that can be loaded from cooked bytes.
@@ -129,6 +130,9 @@ struct Record {
     logical: Box<str>,
     /// Bumped every time [`Assets::reload`] replaces the value.
     revision: u32,
+    /// What the bytes looked like when they were last read, for
+    /// [`Assets::reload_changed`]. `None` when the filesystem would not say.
+    version: Option<Version>,
 }
 
 /// Every loaded asset of one kind.
@@ -186,6 +190,11 @@ impl<T: Asset> Assets<T> {
             return Ok(*handle);
         }
 
+        // Sampled before the read, not after. A write landing between the two
+        // then leaves a version that does not describe what was decoded, so the
+        // next poll reloads — which is the harmless direction. Sampling after
+        // would record the *new* bytes against the *old* value and never notice.
+        let version = self.vfs.version(logical);
         let value = self.read_and_decode(logical)?;
         let handle = self.values.insert(value);
         let logical: Box<str> = logical.into();
@@ -195,6 +204,7 @@ impl<T: Asset> Assets<T> {
             Record {
                 logical: logical.clone(),
                 revision: 0,
+                version,
             },
         );
         self.by_path.insert(logical, handle);
@@ -224,19 +234,90 @@ impl<T: Asset> Assets<T> {
             return Ok(None);
         };
 
-        // Before the replacement, not after.
+        // Both before the replacement, and for the same reason as in `load`.
+        let version = self.vfs.version(logical);
         let value = self.read_and_decode(logical)?;
 
         *self
             .values
             .get_mut(handle)
             .expect("a handle in by_path always has a value") = value;
-        self.records
+
+        let record = self
+            .records
             .get_mut(&handle)
-            .expect("a handle in by_path always has a record")
-            .revision += 1;
+            .expect("a handle in by_path always has a record");
+        record.revision += 1;
+        record.version = version;
 
         Ok(Some(handle))
+    }
+
+    /// Reload every loaded asset whose bytes have changed on disk.
+    ///
+    /// This is the runtime half of hot reload. The other half is a cooker
+    /// rewriting the artifact — `slop-cli cook --watch` — because
+    /// `docs/DESIGN.md` §2.8 keeps source parsing out of anything that ships.
+    /// This side watches *cooked* bytes, so the engine still knows nothing about
+    /// compilers or source formats (invariant 7), and the same code works
+    /// whether the cook was triggered by a watcher, by hand, or by a build
+    /// server.
+    ///
+    /// Returns one entry per asset that was reloaded or tried to be. An empty
+    /// result is the overwhelmingly common case and costs one `stat` per loaded
+    /// asset, which is what makes it callable every frame.
+    ///
+    /// A failure leaves that asset as it was — see [`Assets::reload`] — and is
+    /// reported rather than returned, because one broken texture must not stop
+    /// the other nineteen assets from reloading.
+    pub fn reload_changed(&mut self) -> Vec<(Handle<T>, Result<(), AssetError>)> {
+        // Collected first: reloading borrows `self` mutably, and one poll should
+        // see one consistent set of paths rather than a set that shifts as it
+        // goes. The version travels with the path so a failure can still be
+        // recorded against the bytes that caused it.
+        let stale: Vec<(Box<str>, Option<Version>)> = self
+            .records
+            .values()
+            .filter_map(|record| {
+                // Absent is deliberately *not* a change. Editors save by writing
+                // a temporary file and renaming over the target, so a healthy
+                // asset spends a few milliseconds not existing; treating that as
+                // a change would try to reload a file that is not there yet, and
+                // do it again on every poll until it appeared.
+                let version = self.vfs.version(&record.logical)?;
+
+                (Some(version) != record.version).then(|| (record.logical.clone(), Some(version)))
+            })
+            .collect();
+
+        let mut outcomes = Vec::new();
+
+        for (logical, version) in stale {
+            match self.reload(&logical) {
+                Ok(Some(handle)) => outcomes.push((handle, Ok(()))),
+                Ok(None) => {}
+                Err(error) => {
+                    let Some(handle) = self.by_path.get(&logical).copied() else {
+                        continue;
+                    };
+
+                    // Stamp the failure. `reload` returns before it records
+                    // anything, so without this the same broken file is retried
+                    // and reported on every single poll — hundreds of identical
+                    // errors a second, and no way to tell a new failure from the
+                    // old one. Recorded here, it is reported once and stays
+                    // quiet until the file changes again, which is exactly when
+                    // someone has tried to fix it.
+                    if let Some(record) = self.records.get_mut(&handle) {
+                        record.version = version;
+                    }
+
+                    outcomes.push((handle, Err(error)));
+                }
+            }
+        }
+
+        outcomes
     }
 
     /// The asset behind a handle, or `None` if it is stale or foreign.
@@ -523,6 +604,139 @@ mod tests {
         let handle = assets.load("a.fake").expect("fixed");
 
         assert_eq!(assets.get(handle).expect("loaded").0, "good");
+    }
+
+    /// Write `contents` and make sure the version moves.
+    ///
+    /// A test can rewrite a file well inside the filesystem's timestamp
+    /// granularity, which is precisely the case `Version` documents itself as
+    /// unable to see. Changing the length too is what keeps these tests about
+    /// the registry's logic rather than about clock resolution.
+    fn rewrite(root: &Path, logical: &str, contents: &str) {
+        write(root, logical, contents);
+        assert_ne!(
+            contents.len(),
+            0,
+            "an empty rewrite would not move the length"
+        );
+    }
+
+    #[test]
+    fn nothing_reloads_when_nothing_changed() {
+        // The common case, and the one that has to be cheap: this runs every
+        // frame and must cost a stat per asset and nothing else.
+        let (mut assets, _root) = registry("unchanged", &[("a.fake", "one")]);
+
+        assets.load("a.fake").expect("cooked");
+
+        assert!(assets.reload_changed().is_empty());
+        assert!(assets.reload_changed().is_empty(), "and again");
+    }
+
+    #[test]
+    fn a_changed_file_reloads_itself() {
+        let (mut assets, root) = registry("poll", &[("a.fake", "one")]);
+
+        let handle = assets.load("a.fake").expect("cooked");
+        rewrite(&root, "a.fake", "one plus more");
+
+        let changed = assets.reload_changed();
+
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].0, handle);
+        assert!(changed[0].1.is_ok());
+        assert_eq!(assets.get(handle).expect("loaded").0, "one plus more");
+        assert_eq!(assets.revision(handle), Some(1));
+    }
+
+    #[test]
+    fn a_reloaded_file_does_not_reload_again() {
+        // Without recording the new version, every poll after the first change
+        // would reload forever — a re-upload to the GPU every frame.
+        let (mut assets, root) = registry("poll-once", &[("a.fake", "one")]);
+
+        let handle = assets.load("a.fake").expect("cooked");
+        rewrite(&root, "a.fake", "one plus more");
+
+        assert_eq!(assets.reload_changed().len(), 1);
+        assert!(assets.reload_changed().is_empty(), "already up to date");
+        assert_eq!(assets.revision(handle), Some(1), "reloaded exactly once");
+    }
+
+    #[test]
+    fn only_the_asset_that_changed_reloads() {
+        let (mut assets, root) =
+            registry("poll-one-of-two", &[("a.fake", "one"), ("b.fake", "two")]);
+
+        let a = assets.load("a.fake").expect("cooked");
+        let b = assets.load("b.fake").expect("cooked");
+        rewrite(&root, "b.fake", "two plus more");
+
+        let changed = assets.reload_changed();
+
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].0, b);
+        assert_eq!(assets.revision(a), Some(0), "a was not touched");
+    }
+
+    #[test]
+    fn a_file_that_vanishes_is_not_treated_as_a_change() {
+        // Editors save by writing a temporary file and renaming over the target,
+        // so an asset spends a few milliseconds not existing. Reloading then
+        // would fail against a file that is about to be fine.
+        let (mut assets, root) = registry("poll-vanished", &[("a.fake", "one")]);
+
+        let handle = assets.load("a.fake").expect("cooked");
+        std::fs::remove_file(root.join("a.fake")).expect("removing");
+
+        assert!(assets.reload_changed().is_empty());
+        assert_eq!(
+            assets.get(handle).expect("still loaded").0,
+            "one",
+            "the last good value survives"
+        );
+    }
+
+    #[test]
+    fn a_broken_file_is_reported_once_rather_than_every_poll() {
+        // `reload` returns before recording anything, so a failure has to be
+        // stamped by the poller. Without that, one bad save produces an
+        // identical error every frame and no way to tell a new failure from the
+        // old one.
+        let (mut assets, root) = registry("poll-broken", &[("a.fake", "good")]);
+
+        let handle = assets.load("a.fake").expect("cooked");
+        write(&root, "a.fake", "bad");
+
+        let changed = assets.reload_changed();
+        assert_eq!(changed.len(), 1);
+        assert!(changed[0].1.is_err());
+
+        assert!(assets.reload_changed().is_empty(), "reported once");
+        assert_eq!(
+            assets.get(handle).expect("still loaded").0,
+            "good",
+            "and the old asset is still there"
+        );
+    }
+
+    #[test]
+    fn fixing_a_broken_file_reloads_it() {
+        // The other half of reporting once: the poller must go quiet, but not
+        // deaf. A fix has to be picked up without a restart.
+        let (mut assets, root) = registry("poll-fixed", &[("a.fake", "good")]);
+
+        let handle = assets.load("a.fake").expect("cooked");
+
+        write(&root, "a.fake", "bad");
+        assert!(assets.reload_changed()[0].1.is_err());
+
+        rewrite(&root, "a.fake", "good again");
+        let changed = assets.reload_changed();
+
+        assert_eq!(changed.len(), 1);
+        assert!(changed[0].1.is_ok());
+        assert_eq!(assets.get(handle).expect("loaded").0, "good again");
     }
 
     #[test]

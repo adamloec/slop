@@ -50,6 +50,88 @@ const FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
 const CAPTURED_FRAME: u64 = 40;
 
 #[test]
+fn a_hot_reload_re_uploads_and_still_renders_the_reference() {
+    // The end-to-end check for hot reload, and the one that catches the failures
+    // the unit tests cannot: that the re-upload actually replaces the GPU
+    // resources, that swapping the bindless slot leaves the descriptor pointing
+    // at the new image, and that nothing is freed while the GPU still needs it.
+    //
+    // The cooked bytes are rewritten *identically*, which sounds pointless and
+    // is the whole trick. It moves the file's timestamp, so the registry sees a
+    // change and runs the entire reload path — poll, decode, re-upload, swap the
+    // descriptor — and the render afterwards must still match the reference.
+    // Rewriting with *different* content would prove the same mechanics but
+    // leave the repository's cooked cache disagreeing with its source.
+    let Some((device, allocator)) = headless() else {
+        return;
+    };
+
+    let mut renderer = match Headless::new(&device, &allocator) {
+        Ok(renderer) => renderer,
+        Err(failure) => {
+            eprintln!("skipping: {failure}");
+            return;
+        }
+    };
+
+    for logical in ["textures/checker.tex", "meshes/cube.Cube.0.mesh"] {
+        touch_cooked(logical);
+    }
+
+    assert!(
+        renderer
+            .scene
+            .reload_changed()
+            .expect("the reload must not fail"),
+        "rewriting both artifacts must be noticed"
+    );
+    assert!(
+        !renderer
+            .scene
+            .reload_changed()
+            .expect("the second poll must not fail"),
+        "and must not be noticed twice"
+    );
+
+    let image = renderer.render(CAPTURED_FRAME);
+
+    let difference = Golden {
+        reference: &reference_path(),
+        failures: &failures_path(),
+        tolerance: Tolerance::HARDWARE,
+        // Always `Check`, never `Mode::from_env`. Approving a reference from a
+        // reloaded scene would let a broken reload path define what "correct"
+        // means; this test only ever gets to *disagree* with the reference that
+        // `the_headless_cube_matches_its_reference` approves.
+        mode: Mode::Check,
+    }
+    .check(&image)
+    .unwrap_or_else(|failure| panic!("the reloaded cube did not match: {failure}"));
+
+    println!("after reload, frame {CAPTURED_FRAME}: {difference}");
+}
+
+/// Rewrite a cooked artifact with its own bytes, so only its timestamp moves.
+///
+/// Written to a neighbouring file and renamed, because a plain overwrite is not
+/// atomic: another test constructing a `Scene` at the same moment could read a
+/// truncated artifact. `rename` over an existing file is atomic on both targets.
+fn touch_cooked(logical: &str) {
+    let project = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..");
+    let path = slop_asset::Vfs::for_project(&project)
+        .resolve(logical)
+        .expect("a valid logical path");
+
+    let bytes = std::fs::read(&path).expect("the artifact must be cooked");
+    let temporary = path.with_extension("touch");
+
+    std::fs::write(&temporary, &bytes).expect("writing the replacement");
+    std::fs::rename(&temporary, &path).expect("renaming over the artifact");
+}
+
+#[test]
 fn the_headless_cube_matches_its_reference() {
     let Some((device, allocator)) = headless() else {
         return;

@@ -126,7 +126,7 @@ Two consequences worth carrying into M0:
 renders with a golden image guarding it, and the reflection and ECS foundations
 are built through queries.
 
-697 tests. Clippy and rustdoc clean under `-D warnings` in both feature
+705 tests. Clippy and rustdoc clean under `-D warnings` in both feature
 configurations, Vulkan validation reporting nothing, and every crate containing
 `unsafe` passing under Miri — `slop-ecs` under both Stacked and Tree Borrows.
 
@@ -162,8 +162,9 @@ world at once. Save, load and save again produces byte-identical text.
 | Texture cooking — PNG to a versioned RGBA8 artifact | Landed |
 | `examples/cube` drawing entirely from cooked assets | Landed |
 | `Assets<T>` — the registry, handles, load/reload/unload | Landed |
+| Hot reload — `Assets::reload_changed` + `slop-cli cook --watch` | Landed |
 | Block compression (BC7) | Outstanding |
-| Async streaming, hot reload | Outstanding |
+| Async streaming | Outstanding |
 | Debug UI (§10.2) | Outstanding — wanted before renderer bring-up |
 
 The cache was lifted out of `slop-cli` rather than invented: keying, stamping and
@@ -653,7 +654,9 @@ freely, never seams.
 | The asset VFS reads synchronously | `slop-asset` | Async streaming alongside it | **Joined by, not replaced.** A blocking read stays correct for startup, for tools, and for the cooker itself; §2.8's streaming is an additional entry point rather than a different one. Recorded because "the VFS is sync" reads like a shortcut and is not. | M2 |
 | An asset is unloaded by hand, never by refcount | `slop-asset` | Reference counting, once something holds handles long enough to outlive its need for them | **Extended.** `unload` is explicit and correct; what is missing is *who decides*, and nothing holds a handle past a frame yet. Counting references now would count them from one place. | M2/M3 |
 | `Assets<T>` is single-threaded — every mutation takes `&mut` | `slop-asset` | Interior mutability or a job-system-owned loader, once streaming decodes off the main thread | **Extended.** `Asset: Send + Sync` is already required so the bound does not have to be added later; only the *ownership* is provisional, and no public signature changes when the loader moves. | M2 |
-| `examples/cube` drops its registries after uploading | `examples/cube/src/scene.rs` | A scene that keeps them, once something can act on an asset changing | **Replaced.** Retaining them today would hold state no code reads — the compiler said so. Hot reload is what gives them a reader. | M2 |
+| `cook --watch` polls the source tree on a timer | `slop-cli/src/main.rs` | An event-driven watcher (`notify` or the platform API) | **Replaced.** A tree walk four times a second is nothing here and wrong for a large project. Correctness does not depend on the watcher being right about what changed — the cache decides that, on the same code path a one-shot cook uses — so the loop is all that is replaced. | M2/M3 |
+| The runtime polls cooked mtimes rather than subscribing | `slop-asset/src/vfs.rs` | Watching the cache directory for events | **Replaced.** One `stat` per loaded asset, throttled; fine for tens, wasteful for thousands. `Version` is already opaque, so where the answer comes from can change without a caller noticing. | M2/M3 |
+| Hot reload waits for the device to go idle before swapping | `examples/cube/src/scene.rs` | Deferred deletion — free after the last frame that could reference it retires | **Replaced.** Correct, and the blunt instrument: a stall nobody perceives when a human saves a file. A renderer streaming assets per frame cannot do this, and that is what forces the queue. | M3 |
 | A cooked mesh has one fixed vertex layout — position, normal, UV | `slop-asset` | Flexible attributes, once a material needs tangents or a second UV set | **Replaced.** Cheap to change *because* it is cooked: bump `COOKER_VERSION` and every artifact regenerates from source, which is exactly what that constant is for. A format that guessed at flexibility now would be guessing. | M2 |
 | A cooked mesh is decoded field by field rather than cast | `slop-asset` | A zero-copy read over an aligned or memory-mapped buffer | **Replaced.** `fs::read` returns a `Vec<u8>` aligned to 1, so casting it to `[Vertex]` is undefined; decoding explicitly is also what makes the format little-endian by construction rather than by accident. Zero-copy arrives with the streaming loader, which is what will own an aligned buffer. | M2 |
 | glTF import covers positions, normals, UVs and indices | `slop-cli` | Materials, tangents, skinning, animation, scene hierarchy | **Extended.** Enough that `examples/cube` draws from a file and its golden image still matches, which is the consumer that exists. Each addition is another attribute in the same pipeline, not a different one. | M2/M3 |

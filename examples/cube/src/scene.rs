@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use slop_asset::{Assets, Mesh, Texture, Vfs};
 use slop_core::Handle;
+use slop_core::diagnostics::tracing::{info, warn};
 use slop_math::{Mat4, Quat, Vec3};
 use slop_rhi::{
     Allocator, BindlessHeap, BindlessHeapConfig, Buffer, BufferConfig, BufferState, CommandBuffer,
@@ -90,7 +91,7 @@ pub struct Scene {
     pipeline: GraphicsPipeline,
     heap: BindlessHeap,
     sampler: vk::Sampler,
-    #[expect(dead_code, reason = "held so the heap's descriptor stays valid")]
+    /// Held so the heap's descriptor stays valid, and replaced on hot reload.
     texture: Image,
     depth: Image,
     indices: Buffer,
@@ -99,6 +100,21 @@ pub struct Scene {
     sampler_slot: Handle<Sampler>,
     /// How many indices the cooked mesh has, for the draw call.
     index_count: u32,
+    /// The CPU-side assets, kept so [`Scene::reload_changed`] has something to
+    /// compare against and something to re-upload from.
+    meshes: Assets<Mesh>,
+    textures: Assets<Texture>,
+    mesh: Handle<Mesh>,
+    albedo: Handle<Texture>,
+    /// What was last uploaded to the GPU.
+    ///
+    /// The registry's revision counter says the *asset* changed; these say
+    /// whether the change has reached the GPU yet. Without them a reload would
+    /// re-upload on every frame after the first change, because "the asset has
+    /// been reloaded once" stays true forever.
+    uploaded_mesh: u32,
+    uploaded_albedo: u32,
+    allocator: Arc<Allocator>,
     device: Arc<Device>,
 }
 
@@ -166,12 +182,9 @@ impl Scene {
         // golden image is the oracle for the whole path — parse, cook, key,
         // cache, VFS, decode, upload.
         //
-        // The registries are local to this function, so everything they hold is
-        // dropped once it is on the GPU. That makes them a loader here rather
-        // than the thing they are for: nothing in the cube can act on an asset
-        // changing, so retaining them would be holding state no code reads.
-        // Hot reload is the consumer that changes this, and `docs/PLAN.md` §6.1
-        // records it.
+        // The registries are kept rather than dropped after upload, which is
+        // what [`Scene::reload_changed`] needs: something to compare against,
+        // and something to re-upload from.
         let project = project_root();
         let mut meshes = Assets::<Mesh>::for_project(&project);
         let mut textures = Assets::<Texture>::for_project(&project);
@@ -236,8 +249,117 @@ impl Scene {
             texture_slot,
             sampler_slot,
             index_count,
+            meshes,
+            textures,
+            mesh,
+            albedo,
+            uploaded_mesh: 0,
+            uploaded_albedo: 0,
+            allocator: Arc::clone(allocator),
             device: Arc::clone(device),
         })
+    }
+
+    /// Recook-aware reload: pick up any cooked asset that changed on disk.
+    ///
+    /// The runtime half of hot reload. Run `cargo run -p slop-cli -- cook
+    /// --watch` beside the demo and editing `assets/checker.png` or
+    /// `assets/cube.gltf` changes what is on screen without a restart.
+    ///
+    /// Returns whether anything was re-uploaded.
+    ///
+    /// **Not called from `Scene::record`**, and that is deliberate: the golden
+    /// test renders by frame number and must stay a pure function of it
+    /// (`docs/DESIGN.md` §2.14). Only the windowed demo polls, so a test can
+    /// never race a file on disk.
+    ///
+    /// # Errors
+    ///
+    /// Fails if a replacement GPU resource cannot be created or uploaded. An
+    /// asset that fails to *decode* is logged and skipped instead — a broken
+    /// save mid-edit is expected, and killing the demo over it would defeat the
+    /// point of hot reload.
+    pub fn reload_changed(&mut self) -> Result<bool, String> {
+        for (handle, outcome) in self.meshes.reload_changed() {
+            if let Err(error) = outcome {
+                warn!(asset = self.meshes.path(handle), %error, "mesh reload failed");
+            }
+        }
+        for (handle, outcome) in self.textures.reload_changed() {
+            if let Err(error) = outcome {
+                warn!(asset = self.textures.path(handle), %error, "texture reload failed");
+            }
+        }
+
+        let mesh_revision = self
+            .meshes
+            .revision(self.mesh)
+            .unwrap_or(self.uploaded_mesh);
+        let albedo_revision = self
+            .textures
+            .revision(self.albedo)
+            .unwrap_or(self.uploaded_albedo);
+
+        let mesh_stale = mesh_revision != self.uploaded_mesh;
+        let albedo_stale = albedo_revision != self.uploaded_albedo;
+
+        if !mesh_stale && !albedo_stale {
+            return Ok(false);
+        }
+
+        // Everything below frees a resource the GPU may still be reading from a
+        // frame that has not finished. Waiting is the blunt answer and the right
+        // one here: hot reload happens when a human saves a file, so a stall
+        // nobody can perceive costs nothing. A renderer doing this per frame
+        // would need deferred deletion instead.
+        self.device.wait_idle().map_err(|error| error.to_string())?;
+
+        if mesh_stale {
+            let cooked = self.meshes.get(self.mesh).expect("loaded");
+
+            self.vertices = upload_buffer(
+                &self.device,
+                &self.allocator,
+                "cube vertices",
+                bytes_of(&cooked.vertices),
+                vk::BufferUsageFlags::VERTEX_BUFFER,
+                BufferState::VERTEX_INPUT,
+            )?;
+            self.indices = upload_buffer(
+                &self.device,
+                &self.allocator,
+                "cube indices",
+                bytes_of(&cooked.indices),
+                vk::BufferUsageFlags::INDEX_BUFFER,
+                BufferState::INDEX_INPUT,
+            )?;
+            self.index_count = u32::try_from(cooked.indices.len())
+                .map_err(|_| String::from("the cube has more indices than a draw call can take"))?;
+
+            self.uploaded_mesh = mesh_revision;
+            info!(revision = mesh_revision, "reloaded the cube mesh");
+        }
+
+        if albedo_stale {
+            let cooked = self.textures.get(self.albedo).expect("loaded");
+            let texture = upload_texture(&self.device, &self.allocator, cooked)?;
+
+            // The slot is released and retaken rather than left alone: the
+            // descriptor names an image view, and the new image has a different
+            // one. Freeing first is what lets the allocator hand back the same
+            // index, so a session of reloads does not exhaust the heap.
+            self.heap.remove_sampled_image(self.texture_slot);
+            self.texture_slot = self
+                .heap
+                .insert_sampled_image(texture.view(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .ok_or_else(|| String::from("the bindless heap had no room for one texture"))?;
+            self.texture = texture;
+
+            self.uploaded_albedo = albedo_revision;
+            info!(revision = albedo_revision, "reloaded the cube albedo");
+        }
+
+        Ok(true)
     }
 
     /// Rebuild the depth buffer for a new size.

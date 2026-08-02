@@ -31,9 +31,9 @@ cooked it is the one that understands the format.
 | PNG import + cook | Landed — importer in `slop-cli` | M2 |
 | Proven end to end — `examples/cube` draws only cooked assets | Landed — see §5.4 | M2 |
 | `Assets<T>` — the registry, `Handle<T>`, load, reload, unload | Landed — see §5.5 | M2 |
+| Hot reload — `reload_changed` plus `cook --watch` | Landed — see §5.6 | M2 |
 | Block compression (BC7) | Planned | M2 |
 | Async streaming | Planned — **beside** the sync read, not replacing it | M2 |
-| Hot reload | Planned — the registry is the half it needs | M2 |
 | Reference counting to decide when to unload | Planned — waits for something holding handles | M2/M3 |
 | Dependency graph across assets | Planned | M2 |
 
@@ -222,6 +222,61 @@ artifacts for glTF and one-to-one for a shader, so a trait shaped by either
 breaks on the other (§6 below). Loading is one artifact to one asset, always —
 that is what cooking *is*. `Mesh::read` and `Texture::read` already had identical
 signatures; the trait names an agreement rather than imposing one.
+
+### 5.6 Hot reload is two processes, and that is the design
+
+```mermaid
+flowchart LR
+    subgraph tool["slop-cli cook --watch"]
+        src[("source tree")] --> cook["recook"]
+    end
+    cook --> disk[(".slop/cache")]
+    subgraph game["the running game"]
+        disk --> poll["Assets::reload_changed"]
+        poll --> up["re-upload"]
+    end
+```
+
+`DESIGN.md` §2.8 says a shipping build never parses a source asset, and hot
+reload is where that rule is easiest to break — the obvious implementation
+watches `assets/`, and now the engine links a glTF parser and a shader compiler.
+
+So the split is along the line that already exists. **The cooker watches sources;
+the runtime watches cooked bytes.** The game notices that
+`textures/checker.tex` was rewritten and does not know or care that a PNG was
+involved, which keeps invariant 6 intact. It also means the same runtime code
+works whether the recook came from `--watch`, from a person typing `cook`, or
+from a build server — the runtime has no idea which.
+
+Run them side by side:
+
+```
+term 1:  cargo run -p slop-cli -- cook --watch
+term 2:  cargo run -p example-cube
+```
+
+Three details that are easy to get wrong, each with a test:
+
+- **A vanished file is not a change.** Editors save by writing a temporary file
+  and renaming over the target, so a healthy asset spends a few milliseconds not
+  existing. Reloading then fails against a file that is about to be fine, and
+  fails again on every poll until it appears.
+- **A failed reload is stamped anyway.** `reload` records nothing when it fails,
+  so the poller has to. Without that, one bad save produces an identical error
+  every frame — hundreds a second — and no way to tell a new failure from the old
+  one. Recorded, it is reported once and stays quiet until the file changes
+  again, which is exactly when someone has tried to fix it.
+- **The GPU-side revision is separate from the asset revision.** The registry's
+  counter says the asset changed; the consumer needs its own copy to say whether
+  that change has reached the GPU. Comparing against the registry alone
+  re-uploads on every frame after the first change, because "reloaded once" stays
+  true forever.
+
+`Version` is a modification time and a length, not a content hash. Hashing would
+mean reading every byte of every asset on every poll — the cost the check exists
+to avoid — and the failure mode is a missed reload, which costs one more save.
+The cook cache still hashes content, so nothing about *correctness* rests on
+this.
 
 ## 6. Decisions
 
