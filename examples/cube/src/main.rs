@@ -95,6 +95,22 @@ impl ApplicationHandler for App {
             return;
         };
 
+        // The overlay sees every event first and reports whether it wants
+        // exclusive use of it — a click on a panel is the interface's, a click
+        // on the scene behind it is the game's. Without this the overlay renders
+        // and cannot be touched, which is what it did when it first landed.
+        //
+        // `consumed` is deliberately ignored below rather than unused: the cube
+        // has no camera or picking to suppress yet, and pretending otherwise
+        // would be writing the branch before there is anything on the other side
+        // of it.
+        let response = renderer
+            .egui_winit
+            .on_window_event(&renderer.window, &event);
+        if response.repaint {
+            renderer.window.request_redraw();
+        }
+
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(_) => renderer.renderer.invalidate(),
@@ -137,6 +153,8 @@ struct Renderer {
     window: Window,
     /// When assets were last checked for changes. See `poll_for_reloaded_assets`.
     last_asset_poll: Instant,
+    /// How long recent frames took. See `FrameTimes`.
+    frame_times: FrameTimes,
     /// The debug UI's state, and the winit glue that feeds it input.
     ///
     /// Both live here rather than in `slop-render`, which stays
@@ -203,6 +221,7 @@ impl Renderer {
         Ok(Self {
             scene,
             renderer,
+            frame_times: FrameTimes::new(),
             egui,
             egui_winit,
             allocator,
@@ -245,6 +264,8 @@ impl Renderer {
     }
 
     fn render(&mut self) -> Result<(), String> {
+        self.frame_times.tick();
+
         // Before the frame, not after: the depth buffer has to agree with the
         // colour target while the frame is being recorded, so a resize noticed
         // afterwards would draw one wrong frame first.
@@ -284,11 +305,19 @@ impl Renderer {
         let raw_input = self.egui_winit.take_egui_input(&self.window);
         let frames = self.renderer.frame_number();
         let extent = self.renderer.extent();
+        let timing = self.frame_times.summary();
 
         let output = self.egui.run_ui(raw_input, |ui| {
             egui::Window::new("slop").show(&ui.ctx().clone(), |ui| {
-                ui.label(format!("frame {frames}"));
+                // Milliseconds, not frames per second. See `FrameTimes`.
+                ui.label(format!("{:.2} ms  ({:.0} fps)", timing.last, timing.fps()));
+                ui.label(format!(
+                    "{:.2} ms  worst of last {}",
+                    timing.worst, FRAME_SAMPLES
+                ));
+                ui.separator();
                 ui.label(format!("{}x{}", extent.width, extent.height));
+                ui.label(format!("frame {frames}"));
                 ui.separator();
                 ui.label("cook --watch is live; edit assets/checker.png");
             });
@@ -325,6 +354,101 @@ impl Drop for Renderer {
         // samples them is still executing is undefined.
         if let Err(failure) = self.device.wait_idle() {
             error!(error = %failure, "device did not go idle; teardown may be unsafe");
+        }
+    }
+}
+
+/// How many frames the timing window covers.
+///
+/// A couple of seconds at a typical refresh rate: long enough that one slow
+/// frame does not dominate, short enough that a stall shows up while it is still
+/// happening rather than being averaged away.
+const FRAME_SAMPLES: usize = 240;
+
+/// A rolling window of how long recent frames took.
+///
+/// # Why milliseconds rather than frames per second
+///
+/// FPS is the number everyone quotes and the wrong one to optimise against,
+/// because it is not linear. Going from 1000 to 500 fps and from 60 to 55 fps
+/// look wildly different as ratios and are 1.0 ms and 1.5 ms respectively — the
+/// second is the bigger regression, and FPS says the opposite.
+///
+/// Milliseconds are linear and additive, which is what makes them a *budget*. A
+/// 60 Hz display gives 16.7 ms per frame and a 144 Hz one gives 6.9 ms; every
+/// system spends part of it, and the parts sum. "Shadows cost 2 ms" is a
+/// sentence you can act on. "Shadows cost 40 fps" is not, because the answer
+/// depends on what the frame rate already was.
+///
+/// FPS is still shown, because it is what a display's refresh rate is quoted in
+/// and the comparison is the point.
+///
+/// # Why the worst frame and not the average
+///
+/// An average hides exactly the thing a player feels. Sixty smooth frames and
+/// one that took 50 ms average out to something respectable and read as a
+/// visible hitch. Tracking the worst of a recent window surfaces the stutter
+/// that the mean smooths away — the same reason profilers report 1% lows rather
+/// than a single headline number.
+///
+/// # What this does *not* measure
+///
+/// **CPU wall-clock between frames, not GPU time.** It includes waiting for the
+/// GPU, so it is an honest measure of how fast frames actually arrive and a poor
+/// one for attributing cost to a pass. Doing that needs GPU timestamp queries
+/// written into the command buffer, which arrive with the render graph
+/// (`docs/PLAN.md` §9.2 item E) — the graph is what will know which pass a
+/// timestamp belongs to.
+struct FrameTimes {
+    samples: Vec<f32>,
+    next: usize,
+    last_tick: Instant,
+}
+
+/// What to show about recent frames, in milliseconds.
+struct Timing {
+    last: f32,
+    worst: f32,
+}
+
+impl Timing {
+    /// The same number the display's refresh rate is quoted in.
+    fn fps(&self) -> f32 {
+        if self.last > 0.0 {
+            1000.0 / self.last
+        } else {
+            0.0
+        }
+    }
+}
+
+impl FrameTimes {
+    fn new() -> Self {
+        Self {
+            samples: Vec::with_capacity(FRAME_SAMPLES),
+            next: 0,
+            last_tick: Instant::now(),
+        }
+    }
+
+    /// Record the time since the previous call.
+    fn tick(&mut self) {
+        let elapsed = self.last_tick.elapsed().as_secs_f32() * 1000.0;
+        self.last_tick = Instant::now();
+
+        if self.samples.len() < FRAME_SAMPLES {
+            self.samples.push(elapsed);
+        } else {
+            self.samples[self.next] = elapsed;
+        }
+
+        self.next = (self.next + 1) % FRAME_SAMPLES;
+    }
+
+    fn summary(&self) -> Timing {
+        Timing {
+            last: self.samples.last().copied().unwrap_or(0.0),
+            worst: self.samples.iter().copied().fold(0.0, f32::max),
         }
     }
 }
