@@ -104,6 +104,18 @@ clap = { version = "4.6.5", features = ["derive"] }
 anyhow = "1.0.104"
 blake3 = "1.8.5"
 
+# glTF import, for `slop-cli` only — the engine loads cooked meshes and parses no
+# source format (DESIGN.md §2.8). Default features are off because most of them
+# are material extensions the importer does not read yet; `utils` supplies the
+# accessor readers that turn sparse and strided buffer views into iterators,
+# which is the fiddly part and exactly the sort of solved problem §1.2 principle 1
+# permits taking.
+gltf = { version = "1.4.1", default-features = false, features = [
+    "utils",
+    "import",
+    "names",
+] }
+
 # Golden-image encoding for DESIGN.md §5. Pure Rust deliberately: a C library
 # here would add exactly the MSVC-versus-GCC build surface §2.13's trap table
 # warns about, to a crate whose entire job is making cross-platform differences

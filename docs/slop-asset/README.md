@@ -25,7 +25,8 @@ cooked it is the one that understands the format.
 | `Cache` — layout, content-hash keying, stamps | Landed | M2 |
 | `Vfs` — reading cooked bytes at runtime | Landed | M2 |
 | Shader cooking driven onto the cache | Landed — in `slop-cli` | M2 |
-| glTF import + cook | Planned | M2 |
+| `Mesh` — the cooked mesh format | Landed | M2 |
+| glTF import + cook | Landed — importer in `slop-cli` | M2 |
 | Texture compression | Planned | M2 |
 | Async streaming | Planned — **beside** the sync read, not replacing it | M2 |
 | Asset handles and a registry of loaded assets | Planned — waits for something that holds one | M2 |

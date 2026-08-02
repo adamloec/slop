@@ -45,9 +45,11 @@
 //! untrustworthy.
 
 mod cache;
+pub mod mesh;
 mod vfs;
 
 pub use cache::{Cache, CacheError, CacheKey, KeyBuilder};
+pub use mesh::{Mesh, MeshError, Vertex};
 pub use vfs::{Vfs, VfsError};
 
 use std::path::{Path, PathBuf};

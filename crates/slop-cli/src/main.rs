@@ -16,6 +16,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 mod cook;
+mod gltf_import;
 
 /// Slop engine tooling.
 #[derive(Debug, Parser)]
@@ -29,10 +30,11 @@ struct Cli {
 enum Command {
     /// Compile source assets into the runtime cache.
     ///
-    /// Reads `shaders/` and writes `.slop/cache/shaders/`. Incremental: work
-    /// whose inputs have not changed is skipped.
+    /// Reads `shaders/` and `assets/`, writing into `.slop/cache/`.
+    /// Incremental: work whose inputs have not changed is skipped.
     Cook {
-        /// Project root holding `shaders/`. Defaults to the current directory.
+        /// Project root holding `shaders/` and `assets/`. Defaults to the
+        /// current directory.
         #[arg(long, default_value = ".")]
         root: PathBuf,
 
@@ -51,10 +53,16 @@ fn main() -> Result<()> {
 
     match Cli::parse().command {
         Command::Cook { root, force } => {
-            let summary = cook::shaders(&root, force)
-                .with_context(|| format!("cooking assets under {}", root.display()))?;
+            let context = || format!("cooking assets under {}", root.display());
 
-            println!("cooked {}, up to date {}", summary.cooked, summary.skipped);
+            let shaders = cook::shaders(&root, force).with_context(context)?;
+            let meshes = gltf_import::meshes(&root, force).with_context(context)?;
+
+            println!(
+                "cooked {}, up to date {}",
+                shaders.cooked + meshes.cooked,
+                shaders.skipped + meshes.skipped
+            );
         }
     }
 

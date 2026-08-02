@@ -126,7 +126,7 @@ Two consequences worth carrying into M0:
 renders with a golden image guarding it, and the reflection and ECS foundations
 are built through queries.
 
-641 tests. Clippy and rustdoc clean under `-D warnings` in both feature
+664 tests. Clippy and rustdoc clean under `-D warnings` in both feature
 configurations, Vulkan validation reporting nothing, and every crate containing
 `unsafe` passing under Miri — `slop-ecs` under both Stacked and Tree Borrows.
 
@@ -157,7 +157,8 @@ world at once. Save, load and save again produces byte-identical text.
 | `slop-asset` — cook cache, content-hash keying, stamps | Landed |
 | `slop-asset` — the VFS read path | Landed |
 | Shader cooking driven onto the shared cache | Landed |
-| glTF import and cook | Outstanding |
+| The cooked mesh format — binary, versioned, validated on load | Landed |
+| glTF import — positions, normals, UVs, indices | Landed |
 | Texture compression | Outstanding |
 | Async streaming, hot reload, asset handles | Outstanding |
 | Debug UI (§10.2) | Outstanding — wanted before renderer bring-up |
@@ -622,6 +623,9 @@ freely, never seams.
 | `slangc` invoked as a CLI | `slop-cli/src/cook.rs` | The Slang library, for reflection (§2.11) | **Replaced.** The cache layout, keying and read path all survive. | M2/M3 |
 | The asset VFS reads synchronously | `slop-asset` | Async streaming alongside it | **Joined by, not replaced.** A blocking read stays correct for startup, for tools, and for the cooker itself; §2.8's streaming is an additional entry point rather than a different one. Recorded because "the VFS is sync" reads like a shortcut and is not. | M2 |
 | No asset handles — the VFS deals in paths and bytes | `slop-asset` | `Handle<Mesh>` and friends, once a registry holds loaded assets | **Extended.** Nothing yet holds a loaded asset, so a handle would name a slot in a table that does not exist — the mistake §4.1-C avoided for the job system's access declaration. | M2 |
+| A cooked mesh has one fixed vertex layout — position, normal, UV | `slop-asset` | Flexible attributes, once a material needs tangents or a second UV set | **Replaced.** Cheap to change *because* it is cooked: bump `COOKER_VERSION` and every artifact regenerates from source, which is exactly what that constant is for. A format that guessed at flexibility now would be guessing. | M2 |
+| A cooked mesh is decoded field by field rather than cast | `slop-asset` | A zero-copy read over an aligned or memory-mapped buffer | **Replaced.** `fs::read` returns a `Vec<u8>` aligned to 1, so casting it to `[Vertex]` is undefined; decoding explicitly is also what makes the format little-endian by construction rather than by accident. Zero-copy arrives with the streaming loader, which is what will own an aligned buffer. | M2 |
+| glTF import covers positions, normals, UVs and indices | `slop-cli` | Materials, tangents, skinning, animation, scene hierarchy | **Extended.** Enough to replace the cube's hardcoded geometry, which is the consumer that exists. Each addition is another attribute in the same pipeline, not a different one. | M2/M3 |
 | No `Cooker` trait — each asset kind drives the cache itself | `slop-asset`, `slop-cli` | An asset-kind abstraction, once two kinds disagree usefully | **Extended.** Deliberately not designed against one real implementor: a shader is one source to one artifact, a glTF is one source to many, and a trait shaped by the first would break on the second. The **cache** is what is shared and is what was factored out. | M2 |
 | Coarse include digest — any include recooks everything | `slop-cli/src/cook.rs` | Per-shader dependency lists via `slangc -depfile` | **Replaced.** Correct but pessimistic; wrong would be a cache that lies. | M2 |
 | `JobSystem` backed by `std::thread::scope` | `slop-core/src/jobs.rs` | Work-stealing pool | **Replaced.** API shape is final; do not build on the cost model. | M1 |
