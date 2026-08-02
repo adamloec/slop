@@ -26,6 +26,7 @@ debug UI, materials, Sponza — needed a frame loop that was not copy-pasted.
 | Swapchain recreation, reported so callers can resize with it | Landed | M2 |
 | Both examples driven by it, goldens unchanged | Landed | M2 |
 | `VertexBinding` — vertex layout from cooked reflection | Landed | M2 |
+| `Overlay` — the debug UI's Vulkan backend (§8) | Landed | M2 |
 | Render graph — passes declaring reads and writes | Planned | M3 |
 | Material system | Planned — its blocker, shader reflection, has landed | M2 |
 | Clustered forward+, shadows, IBL, HDR/tonemap | Planned | M3 |
@@ -41,6 +42,7 @@ debug UI, materials, Sponza — needed a frame loop that was not copy-pasted.
 | `VertexBinding` | A pipeline vertex layout derived from a shader's cooked reflection |
 | `Target` | The image being drawn to, and the states it enters and leaves in |
 | `FrameOutcome` | Whether a frame was presented or skipped |
+| `Overlay` | Draws what an immediate-mode UI tessellated, over a target |
 
 ## 4. Why two calls and not one
 
@@ -130,3 +132,69 @@ covers it at all, because `SLOP_FRAMES` never resizes the window.
    not a valid extent; minimising a window on Windows produces one.
 6. **The device is waited idle before the renderer's fields drop.** Destroying a
    semaphore a pending submission still references is undefined.
+
+## 8. The debug overlay
+
+`DESIGN.md` §10.2's overlay, and only its *renderer* half. `Overlay` takes the
+triangles egui produced and draws them; it owns no egui context, reads no input,
+and does not know what a window is. Those live in the application, where the
+platform already put them.
+
+```
+ application            slop-render
+ ───────────            ───────────
+ egui::Context   ──▶  primitives ──▶  Overlay::draw
+ egui_winit      ──▶  raw input
+```
+
+**egui rather than Dear ImGui**, and `DESIGN.md` §4 had already chosen it for
+`slop-editor`. Checked again rather than assumed: egui is at 0.35 and pure Rust,
+`imgui-rs` is at 0.12 and behind upstream, and the actively developed
+`dear-imgui-rs` is at `0.16.0-alpha.1`. Dear ImGui also means a C++ build, which
+`DESIGN.md` §2.13's trap table names as the dependency *most likely to actually
+bite us* — the same surface the §2.11 correction had just removed.
+
+**The backend is written rather than taken.** `egui-ash-renderer` exists, and it
+brings its own descriptor pool, sampler and pipeline management — all of which
+this engine already has in a bindless form a general-purpose backend cannot
+assume. Taking it would mean two descriptor models in one frame. What is written
+instead is an upload, a pipeline and a draw loop that sets a scissor rectangle;
+the font rasterizer and layout engine, which are the genuinely hard parts, are
+egui's.
+
+Four things that are not obvious, each of which cost a debugging pass:
+
+- **The overlay opens its own render pass.** A pipeline used inside a pass must
+  declare the depth format that pass carries. The overlay wants no depth at all,
+  so sharing the scene's pass would depth-test the interface against the cube and
+  let geometry occlude the readout describing it.
+- **The descriptor set is re-bound with the overlay's own layout.** Two pipeline
+  layouts are compatible only if their push constant ranges match as well as
+  their set layouts, and the overlay's block is a different size from the
+  scene's. Validation catches this; nothing else would.
+- **Vertex buffers are per in-flight slot.** `Frame::slot` exists for this. One
+  shared buffer is corrupted by the frame still reading it — `FrameRenderer`
+  waits for *this* slot before recording, which says nothing about the others.
+- **The colour attribute is four bytes in the buffer and a `float4` in the
+  shader.** Reflection describes the shader side and cannot see the buffer
+  format, so this module states its layout explicitly and checks the shader
+  against it. See §9.
+
+## 9. What reflection cannot tell you
+
+`VertexBinding::interleaved` derives a layout from a cooked shader, and that is
+right whenever the buffer supplies exactly what the shader reads — which is every
+attribute the cube has.
+
+The overlay is where it stops being true. egui's vertex packs colour as four
+normalized bytes, and the shader reads a `float4`; the hardware converts. So
+reflection reports `Float32x4` and the correct buffer format is
+`R8G8B8A8_UNORM`. **Deriving the layout from reflection alone would produce
+`R32G32B32A32_SFLOAT` and read each vertex at four times the right stride.**
+
+The split is real rather than a gap: reflection is a fact about the shader, and
+the buffer format is a decision about memory. Where they coincide, deriving is
+right. Where they do not, the caller states the format and reflection is used to
+*check* the shader still reads what was assumed — which is what `check_layout`
+does. A per-location override on `VertexBinding` is recorded in `PLAN.md` §6.1
+for when a second packed layout appears.

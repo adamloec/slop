@@ -36,7 +36,7 @@ use slop_app::winit::event_loop::{ActiveEventLoop, EventLoop};
 use slop_app::winit::window::{Window, WindowId};
 use slop_render::{Frame, FrameRenderer, FrameRendererConfig, Target};
 use slop_rhi::{
-    Device, DeviceSelection, GraphicsPipeline, GraphicsPipelineConfig, ImageState, Instance,
+    Blend, Device, DeviceSelection, GraphicsPipeline, GraphicsPipelineConfig, ImageState, Instance,
     InstanceConfig, PipelineLayout, ShaderModule, ShaderStage, Surface, vk,
 };
 
@@ -217,6 +217,7 @@ impl Renderer {
                 // complaint, so leaving culling off would let the convention rot
                 // unnoticed until real geometry made it expensive.
                 cull_back_faces: true,
+                blend: Blend::Opaque,
             },
         )
         .map_err(|error| error.to_string())?;

@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use ash::vk;
 
-use crate::{Device, RhiError};
+use crate::{Device, RhiError, TimelineSemaphore};
 
 /// A point in an image's lifetime: its layout, and the stage and access that
 /// last touched it or will next touch it.
@@ -562,4 +562,67 @@ impl std::fmt::Debug for CommandBuffer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CommandBuffer").finish_non_exhaustive()
     }
+}
+
+/// How long a one-off submission may take before it is treated as hung.
+///
+/// Generous: an upload of a large texture on a busy queue is slow, not broken.
+/// A timeout here means the GPU is not coming back.
+const ONE_SHOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Record a command buffer, submit it, and wait for it to finish.
+///
+/// The blunt instrument for work that happens outside a frame: uploading a mesh
+/// at load time, building a font atlas, taking a screenshot. It allocates a
+/// pool, submits one buffer, and blocks — none of which belongs in a frame loop,
+/// and all of which is exactly right for startup.
+///
+/// `docs/PLAN.md` §6.1 records the replacement: an async transfer queue with a
+/// staging ring, so streaming does not stall the caller. This stays correct for
+/// the cases that genuinely are one-off.
+///
+/// # Errors
+///
+/// [`RhiError`] if the pool or buffer cannot be created, the submission is
+/// rejected, or the work does not complete within ten seconds.
+pub fn submit_and_wait(
+    device: &Arc<Device>,
+    record: impl FnOnce(&CommandBuffer),
+) -> Result<(), RhiError> {
+    let pool = CommandPool::new(device, device.queue_families().graphics)?;
+    let command = pool
+        .allocate(1)?
+        .pop()
+        .expect("one command buffer was requested");
+
+    command.begin()?;
+    record(&command);
+    command.end()?;
+
+    let timeline = TimelineSemaphore::new(device, 0)?;
+
+    let commands = [vk::CommandBufferSubmitInfo::default().command_buffer(command.handle())];
+    let signals = [vk::SemaphoreSubmitInfo::default()
+        .semaphore(timeline.handle())
+        .value(1)
+        .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)];
+    let submits = [vk::SubmitInfo2::default()
+        .command_buffer_infos(&commands)
+        .signal_semaphore_infos(&signals)];
+
+    // SAFETY: the buffer is recorded and not pending, the timeline belongs to
+    // this device, and every borrowed array outlives the call.
+    unsafe {
+        device
+            .raw()
+            .queue_submit2(device.queues().graphics, &submits, vk::Fence::null())
+    }?;
+
+    if !timeline.wait(1, ONE_SHOT_TIMEOUT)? {
+        return Err(RhiError::Timeout {
+            what: "a one-off submission",
+        });
+    }
+
+    Ok(())
 }

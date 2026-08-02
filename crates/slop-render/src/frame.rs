@@ -82,6 +82,16 @@ pub struct Frame<'a> {
     /// scene possible. Skipped frames do not advance it, so it counts frames
     /// that were actually drawn.
     pub number: u64,
+    /// Which in-flight slot this frame is using.
+    ///
+    /// Anything writing GPU memory *per frame* — a UI's vertex buffer, a
+    /// per-frame uniform block — needs one copy per slot and needs to know which
+    /// one to write. A single shared copy is corrupted by the previous frame
+    /// still reading it: [`FrameRenderer::render`] waits for *this* slot before
+    /// recording, which says nothing about the others still in flight.
+    pub slot: usize,
+    /// How many slots exist, so a caller can size its own ring to match.
+    pub slots: usize,
 }
 
 /// What happened when a frame was asked for.
@@ -329,6 +339,8 @@ impl FrameRenderer {
                 to: ImageState::PRESENT,
             },
             number: self.frame_number,
+            slot: slot_index,
+            slots: self.slots.len(),
         });
         command.end()?;
 

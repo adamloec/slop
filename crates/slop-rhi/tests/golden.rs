@@ -187,6 +187,7 @@ impl Headless {
                 // uniformly cleared reference that still compares equal to
                 // itself every run.
                 cull_back_faces: true,
+                blend: slop_rhi::Blend::Opaque,
             },
         )
         .expect("pipeline creation must succeed");

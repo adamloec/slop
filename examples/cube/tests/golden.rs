@@ -327,6 +327,11 @@ impl Headless {
 
     /// Render one frame and bring it back to the CPU.
     fn render(&mut self, frame: u64) -> Rgba8 {
+        self.render_with(frame, &[])
+    }
+
+    /// Render one frame with an overlay drawn over it.
+    fn render_with(&mut self, frame: u64, primitives: &[egui::ClippedPrimitive]) -> Rgba8 {
         self.pool.reset().expect("the pool must reset");
         let command = self
             .pool
@@ -337,16 +342,31 @@ impl Headless {
 
         command.begin().expect("begin");
 
+        // A `Frame` built by hand rather than by `FrameRenderer`: this test has
+        // no swapchain and no window, which is the whole point of it being
+        // headless. One slot, because nothing here is in flight.
+        //
+        // **No overlay primitives, ever.** The debug UI is declared from live
+        // state — frame counts, window size — and drawing it here would make the
+        // reference depend on something other than the frame number, which is
+        // exactly what `docs/DESIGN.md` §2.14 forbids and what makes a golden
+        // image of a moving object possible at all.
         self.scene.record(
-            &command,
-            Target {
-                image: self.target.handle(),
-                view: self.target.view(),
-                extent: self.target.extent(),
-                from: ImageState::UNDEFINED,
-                to: ImageState::TRANSFER_SRC,
+            &slop_render::Frame {
+                command: &command,
+                target: Target {
+                    image: self.target.handle(),
+                    view: self.target.view(),
+                    extent: self.target.extent(),
+                    from: ImageState::UNDEFINED,
+                    to: ImageState::TRANSFER_SRC,
+                },
+                number: frame,
+                slot: 0,
+                slots: 1,
             },
-            frame,
+            primitives,
+            1.0,
         );
 
         command.copy_image_to_buffer(
@@ -426,4 +446,103 @@ fn failures_path() -> PathBuf {
         .join("..")
         .join("target")
         .join("golden-failures")
+}
+
+#[test]
+fn the_debug_overlay_actually_draws_something() {
+    // Validation being quiet says the overlay did not crash. It does not say a
+    // single pixel changed — an overlay that silently drew nothing would pass
+    // every other check in this file, because every other check renders without
+    // one.
+    //
+    // So: the same frame, twice, with and without an overlay. They must differ.
+    let Some((device, allocator)) = headless() else {
+        return;
+    };
+
+    let Some(mut renderer) = harness(&device, &allocator) else {
+        return;
+    };
+
+    let context = egui::Context::default();
+
+    // The screen rectangle is not optional. Without it egui takes the viewport
+    // to be zero-sized and clips every widget away, tessellating nothing — which
+    // is how this test first failed. `egui-winit` supplies it from the window,
+    // so only a hand-built `RawInput` has to.
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(SIZE as f32, SIZE as f32),
+        )),
+        ..Default::default()
+    };
+
+    // Run the same UI twice and keep the second pass. egui measures a window on
+    // the pass it first appears and can only place it on the next one, so a
+    // single pass emits shapes that tessellate to nothing. A running application
+    // never notices; a test that renders exactly one frame does.
+    let declare = |ui: &mut egui::Ui| {
+        // Filling most of the frame, so this cannot pass by a stray pixel.
+        egui::Window::new("overlay")
+            .fixed_pos([8.0, 8.0])
+            .fixed_size([200.0, 160.0])
+            .show(&ui.ctx().clone(), |ui| {
+                ui.label("the quick brown fox");
+                ui.label("jumps over the lazy dog");
+            });
+    };
+
+    // Every pass's texture delta has to be applied, not just the last: the font
+    // atlas arrives on the *first* pass and the second reports no changes. A
+    // running application applies each frame's delta and never notices; keeping
+    // only the second here left the atlas unuploaded and every draw skipped.
+    let first = context.run_ui(input.clone(), &declare);
+    renderer
+        .scene
+        .update_overlay_textures(&allocator, &first.textures_delta)
+        .expect("the font atlas must upload");
+
+    let output = context.run_ui(input, &declare);
+    let primitives = context.tessellate(output.shapes, output.pixels_per_point);
+
+    assert!(
+        !primitives.is_empty(),
+        "egui must have tessellated something to draw"
+    );
+
+    renderer
+        .scene
+        .update_overlay_textures(&allocator, &output.textures_delta)
+        .expect("a later texture delta must upload");
+
+    let without = renderer.render(CAPTURED_FRAME);
+    let with = renderer.render_with(CAPTURED_FRAME, &primitives);
+
+    // Counted rather than compared whole: `assert_ne!` on two images prints both
+    // of them, which is a megabyte of numbers nobody reads.
+    let changed = without
+        .pixels()
+        .iter()
+        .zip(with.pixels())
+        .filter(|(left, right)| left != right)
+        .count();
+
+    assert!(
+        changed > 1000,
+        "the overlay drew nothing: only {changed} bytes differ with and without it"
+    );
+
+    // And the difference must be where the window was, not everywhere — a
+    // blend mode that wiped the attachment would also make these differ.
+    let corner = |image: &Rgba8, x: u32, y: u32| {
+        let at = ((y * image.width() + x) * Rgba8::CHANNELS as u32) as usize;
+        image.pixels()[at..at + 4].to_vec()
+    };
+
+    assert_eq!(
+        corner(&without, SIZE - 4, SIZE - 4),
+        corner(&with, SIZE - 4, SIZE - 4),
+        "the far corner is outside the overlay and must be untouched"
+    );
 }

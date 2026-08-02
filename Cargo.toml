@@ -128,6 +128,20 @@ png = "0.18.1"
 # shipped build (`slop-asset` invariant 7).
 intel_tex_2 = "0.5.0"
 
+# Immediate-mode UI for the debug overlay (DESIGN.md §10.2, and §4 already names
+# egui for `slop-editor`). Default features off: the bundled loaders, clipboard
+# and accessibility integration are for a windowing frontend, and this crate only
+# consumes tessellated output.
+# `default_fonts` is on deliberately, and is the *only* default feature: without
+# it egui has no font data, every label tessellates to nothing, and the overlay
+# renders an empty window. Found by a test that asserted the overlay changes the
+# image — validation stayed silent throughout.
+egui = { version = "0.35.0", default-features = false, features = ["default_fonts"] }
+
+# The winit half of the debug overlay: raw events in, egui input out. Lives with
+# the application rather than with `slop-render`, which stays windowing-agnostic.
+egui-winit = { version = "0.35.0", default-features = false }
+
 # Reading `slangc -reflection-json` output in the shader cooker. Also `slop-cli`
 # only: the runtime reads a cooked binary, never JSON.
 serde_json = "1.0.151"

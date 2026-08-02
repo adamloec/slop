@@ -93,6 +93,53 @@ pub struct GraphicsPipelineConfig<'a> {
     /// Whether to discard back faces. Off is useful while debugging geometry
     /// whose winding is in doubt.
     pub cull_back_faces: bool,
+    /// How fragments combine with what is already in the attachment.
+    pub blend: Blend,
+}
+
+/// How a pipeline's output combines with the attachment.
+///
+/// Two named modes rather than the full Vulkan blend state. Both exist because
+/// something needs them; exposing the twelve knobs Vulkan has before a pass asks
+/// for them would be designing against imagined requirements
+/// (`docs/PLAN.md` §4.1-D).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Blend {
+    /// Overwrite. What every opaque pass wants.
+    #[default]
+    Opaque,
+
+    /// Composite over what is already there, assuming **premultiplied** alpha.
+    ///
+    /// `source + destination × (1 − source.a)`. Premultiplied rather than
+    /// straight alpha because that is what the debug overlay's tessellator
+    /// produces, and because it composites correctly under filtering and
+    /// repeated blending where straight alpha does not — the classic dark-fringe
+    /// artifact around a blended edge is straight alpha being interpolated.
+    PremultipliedAlpha,
+}
+
+impl Blend {
+    /// The attachment state this mode describes.
+    fn attachment(self) -> vk::PipelineColorBlendAttachmentState {
+        let state = vk::PipelineColorBlendAttachmentState::default()
+            .color_write_mask(vk::ColorComponentFlags::RGBA);
+
+        match self {
+            Self::Opaque => state.blend_enable(false),
+            Self::PremultipliedAlpha => state
+                .blend_enable(true)
+                .src_color_blend_factor(vk::BlendFactor::ONE)
+                .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+                .color_blend_op(vk::BlendOp::ADD)
+                // Alpha accumulates the same way, so drawing into a transparent
+                // target and compositing that later gives the same result as
+                // drawing straight onto the destination.
+                .src_alpha_blend_factor(vk::BlendFactor::ONE)
+                .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+                .alpha_blend_op(vk::BlendOp::ADD),
+        }
+    }
 }
 
 /// How to read one interleaved vertex buffer.
@@ -313,11 +360,7 @@ impl GraphicsPipeline {
         let multisample = vk::PipelineMultisampleStateCreateInfo::default()
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
 
-        // Opaque: write all four channels, blend nothing. Transparency arrives
-        // with the material system.
-        let attachments = [vk::PipelineColorBlendAttachmentState::default()
-            .color_write_mask(vk::ColorComponentFlags::RGBA)
-            .blend_enable(false)];
+        let attachments = [config.blend.attachment()];
         let color_blend =
             vk::PipelineColorBlendStateCreateInfo::default().attachments(&attachments);
 

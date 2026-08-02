@@ -7,12 +7,12 @@ use slop_asset::{Assets, Mesh, Texture, Vfs};
 use slop_core::Handle;
 use slop_core::diagnostics::tracing::{info, warn};
 use slop_math::{Mat4, Quat, Vec3};
-use slop_render::{Target, VertexBinding};
+use slop_render::{Overlay, VertexBinding};
 use slop_rhi::{
-    Allocator, BindlessHeap, BindlessHeapConfig, Buffer, BufferConfig, BufferState, CommandBuffer,
-    CommandPool, DEPTH_CLEAR, Device, GraphicsPipeline, GraphicsPipelineConfig, Image, ImageConfig,
-    ImageState, MemoryLocation, PipelineLayout, PipelineLayoutConfig, RhiError, SampledImage,
-    Sampler, ShaderModule, ShaderStage, TimelineSemaphore, vk,
+    Allocator, BindlessHeap, BindlessHeapConfig, Blend, Buffer, BufferConfig, BufferState,
+    CommandBuffer, CommandPool, DEPTH_CLEAR, Device, GraphicsPipeline, GraphicsPipelineConfig,
+    Image, ImageConfig, ImageState, MemoryLocation, PipelineLayout, PipelineLayoutConfig, RhiError,
+    SampledImage, Sampler, ShaderModule, ShaderStage, TimelineSemaphore, vk,
 };
 
 /// Per-draw data, matching `PushConstants` in `shaders/passes/cube.slang`.
@@ -77,6 +77,13 @@ pub struct Scene {
     index_count: u32,
     /// Bytes the shader's push constant block occupies, from reflection.
     push_constant_bytes: u32,
+    /// The debug overlay.
+    ///
+    /// Owned here because the bindless heap is: `Overlay` inserts its font atlas
+    /// and sampler into the same table everything else uses, which is the point
+    /// of a bindless model. At M3 the renderer owns the heap and the overlay
+    /// sits beside the scene rather than inside it.
+    overlay: Overlay,
     /// The CPU-side assets, kept so [`Scene::reload_changed`] has something to
     /// compare against and something to re-upload from.
     meshes: Assets<Mesh>,
@@ -179,6 +186,7 @@ impl Scene {
                 // On. With culling off a reversed face still renders, and the
                 // cube looks right from outside while being wrong.
                 cull_back_faces: true,
+                blend: Blend::Opaque,
             },
         )
         .map_err(|error| error.to_string())?;
@@ -244,8 +252,19 @@ impl Scene {
             .insert_sampler(sampler)
             .ok_or_else(|| String::from("the bindless heap had no room for one sampler"))?;
 
+        let overlay_module = load_module(device, "shaders/passes/overlay.spv")?;
+        let overlay = Overlay::new(
+            device,
+            &mut heap,
+            &overlay_module,
+            &load_reflection_at("shaders/passes/overlay.refl")?,
+            color_format,
+        )
+        .map_err(|error| error.to_string())?;
+
         Ok(Self {
             pipeline,
+            overlay,
             heap,
             sampler,
             texture,
@@ -286,6 +305,24 @@ impl Scene {
     /// asset that fails to *decode* is logged and skipped instead — a broken
     /// save mid-edit is expected, and killing the demo over it would defeat the
     /// point of hot reload.
+    /// Apply the debug overlay's texture changes.
+    ///
+    /// Separate from `record` because it uploads, and uploading waits — which
+    /// must happen outside a recorded frame.
+    ///
+    /// # Errors
+    ///
+    /// Fails if a texture cannot be created or uploaded.
+    pub fn update_overlay_textures(
+        &mut self,
+        allocator: &Arc<Allocator>,
+        delta: &egui::TexturesDelta,
+    ) -> Result<(), String> {
+        self.overlay
+            .update_textures(&mut self.heap, allocator, delta)
+            .map_err(|error| error.to_string())
+    }
+
     pub fn reload_changed(&mut self) -> Result<bool, String> {
         for (handle, outcome) in self.meshes.reload_changed() {
             if let Err(error) = outcome {
@@ -437,10 +474,22 @@ impl Scene {
             * Mat4::from_scale(Vec3::splat(0.7))
     }
 
-    /// Record one frame into `target`.
+    /// Record one frame.
     ///
-    /// The command buffer must already be recording.
-    pub fn record(&self, command: &CommandBuffer, target: Target, frame: u64) {
+    /// `primitives` is what the debug overlay tessellated, drawn last and inside
+    /// the same pass so it composites over the scene without a second load and
+    /// store of the whole attachment. An empty slice draws no overlay, which is
+    /// what the golden test passes — see the crate docs on determinism.
+    ///
+    /// Takes `&mut self` because the overlay writes this slot's vertex buffer.
+    pub fn record(
+        &mut self,
+        frame: &slop_render::Frame<'_>,
+        primitives: &[egui::ClippedPrimitive],
+        pixels_per_point: f32,
+    ) {
+        let command = frame.command;
+        let target = frame.target;
         let extent = target.extent;
 
         command.transition_image(
@@ -531,7 +580,10 @@ impl Scene {
         // cube first, the far one appears only where depth *lets* it, so a
         // reversed comparison or a wrong clear value punches the far cube
         // straight through the near one.
-        let draws = [Self::model_matrix(frame), Self::second_model_matrix(frame)];
+        let draws = [
+            Self::model_matrix(frame.number),
+            Self::second_model_matrix(frame.number),
+        ];
 
         let raw = self.device.raw();
         let buffer = command.handle();
@@ -584,8 +636,28 @@ impl Scene {
                 );
                 raw.cmd_draw_indexed(buffer, self.index_count, 1, 0, 0, 0);
             }
+        }
 
-            raw.cmd_end_rendering(buffer);
+        // SAFETY: the buffer is recording and the pass was begun above.
+        unsafe {
+            self.device.raw().cmd_end_rendering(command.handle());
+        }
+
+        // After the scene's pass ends, in one of its own. The overlay wants no
+        // depth, and a pipeline used inside a pass must declare the depth format
+        // that pass carries — sharing would depth-test the interface against the
+        // cube and let geometry occlude the readout describing it.
+        //
+        // Errors are logged rather than propagated: a debug overlay that fails
+        // to allocate must not take the frame with it.
+        if let Err(error) = self.overlay.draw(
+            &self.heap,
+            &self.allocator,
+            frame,
+            primitives,
+            pixels_per_point,
+        ) {
+            warn!(%error, "the debug overlay could not be drawn");
         }
 
         command.transition_image(
@@ -866,11 +938,21 @@ fn cook_first(error: slop_asset::AssetError) -> String {
 /// Beside the SPIR-V and from the same compile, so the two cannot describe
 /// different shaders.
 fn load_reflection() -> Result<slop_asset::Reflection, String> {
-    let bytes = Vfs::for_project(&project_root())
-        .read("shaders/passes/cube.refl")
-        .map_err(|error| format!("{error}. Run `cargo run -p slop-cli -- cook` first"))?;
+    load_reflection_at("shaders/passes/cube.refl")
+}
+
+/// Load any cooked reflection by logical path.
+fn load_reflection_at(logical: &str) -> Result<slop_asset::Reflection, String> {
+    let bytes = cooked(logical)?;
 
     slop_asset::Reflection::read(&bytes).map_err(|error| error.to_string())
+}
+
+/// Read cooked bytes, with the hint that says what to do when they are absent.
+fn cooked(logical: &str) -> Result<Vec<u8>, String> {
+    Vfs::for_project(&project_root())
+        .read(logical)
+        .map_err(|error| format!("{error}. Run `cargo run -p slop-cli -- cook` first"))
 }
 
 /// Load the cooked cube shader.
@@ -878,13 +960,12 @@ fn load_reflection() -> Result<slop_asset::Reflection, String> {
 /// Through the asset VFS, so this names the shader rather than a path into the
 /// cache. Where cooked bytes live is `slop-asset`'s business.
 fn load_shader(device: &Arc<Device>) -> Result<ShaderModule, String> {
-    let project = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..");
+    load_module(device, "shaders/passes/cube.spv")
+}
 
-    let bytes = Vfs::for_project(&project)
-        .read("shaders/passes/cube.spv")
-        .map_err(|error| format!("{error}. Run `cargo run -p slop-cli -- cook` first"))?;
+/// Load any cooked SPIR-V module by logical path.
+fn load_module(device: &Arc<Device>, logical: &str) -> Result<ShaderModule, String> {
+    let bytes = cooked(logical)?;
 
     ShaderModule::from_bytes(device, &bytes).map_err(|error| error.to_string())
 }

@@ -26,6 +26,18 @@ pub enum RenderError {
     #[error("frames_in_flight must be at least one")]
     NoFramesInFlight,
 
+    /// The overlay shader does not describe what the overlay writes.
+    ///
+    /// Reflection checks the shader side; the buffer formats are stated in
+    /// `overlay.rs`. This is the two disagreeing, or the bindless heap being
+    /// full — both of which produce an interface that is present and wrong
+    /// rather than an error, if left unchecked.
+    #[error("the debug overlay could not be set up: {what}")]
+    OverlayLayout {
+        /// What was wrong.
+        what: &'static str,
+    },
+
     /// A shader reads vertex locations that are not `0..n`.
     ///
     /// Vulkan allows sparse locations; `VertexLayout` does not express them,

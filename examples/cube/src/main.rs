@@ -137,6 +137,13 @@ struct Renderer {
     window: Window,
     /// When assets were last checked for changes. See `poll_for_reloaded_assets`.
     last_asset_poll: Instant,
+    /// The debug UI's state, and the winit glue that feeds it input.
+    ///
+    /// Both live here rather than in `slop-render`, which stays
+    /// windowing-agnostic: `Context` is UI state and `egui_winit::State` is
+    /// platform plumbing. The renderer only ever sees tessellated triangles.
+    egui: egui::Context,
+    egui_winit: egui_winit::State,
 }
 
 impl Renderer {
@@ -189,9 +196,15 @@ impl Renderer {
             "cube ready"
         );
 
+        let egui = egui::Context::default();
+        let egui_winit =
+            egui_winit::State::new(egui.clone(), egui.viewport_id(), &window, None, None, None);
+
         Ok(Self {
             scene,
             renderer,
+            egui,
+            egui_winit,
             allocator,
             device,
             surface,
@@ -245,15 +258,51 @@ impl Renderer {
 
         self.poll_for_reloaded_assets()?;
 
+        // The UI is declared, tessellated and its textures uploaded *before* the
+        // frame, because uploading waits for the GPU and nothing inside a
+        // recorded frame may block on it.
+        let (primitives, pixels_per_point) = self.run_ui()?;
+
         // Borrowed out of `self` so the closure does not capture it whole —
         // `render` needs `&mut self.renderer` at the same time.
-        let scene = &self.scene;
+        let scene = &mut self.scene;
 
         self.renderer
-            .render(|frame| scene.record(frame.command, frame.target, frame.number))
+            .render(|frame| scene.record(frame, &primitives, pixels_per_point))
             .map_err(|error| error.to_string())?;
 
         Ok(())
+    }
+
+    /// Declare this frame's debug UI and turn it into triangles.
+    ///
+    /// The whole interface is re-declared every frame from current state, which
+    /// is what immediate mode means (`docs/DESIGN.md` §10.2): there is no widget
+    /// tree to keep synchronised, so it cannot fall out of sync with the engine
+    /// it is reporting on.
+    fn run_ui(&mut self) -> Result<(Vec<egui::ClippedPrimitive>, f32), String> {
+        let raw_input = self.egui_winit.take_egui_input(&self.window);
+        let frames = self.renderer.frame_number();
+        let extent = self.renderer.extent();
+
+        let output = self.egui.run_ui(raw_input, |ui| {
+            egui::Window::new("slop").show(&ui.ctx().clone(), |ui| {
+                ui.label(format!("frame {frames}"));
+                ui.label(format!("{}x{}", extent.width, extent.height));
+                ui.separator();
+                ui.label("cook --watch is live; edit assets/checker.png");
+            });
+        });
+
+        self.egui_winit
+            .handle_platform_output(&self.window, output.platform_output);
+
+        let primitives = self.egui.tessellate(output.shapes, output.pixels_per_point);
+
+        self.scene
+            .update_overlay_textures(&self.allocator, &output.textures_delta)?;
+
+        Ok((primitives, output.pixels_per_point))
     }
 }
 

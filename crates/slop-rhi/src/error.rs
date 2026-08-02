@@ -10,6 +10,17 @@ use thiserror::Error;
 /// Anything the render hardware interface can fail at.
 #[derive(Debug, Error)]
 pub enum RhiError {
+    /// Work submitted to the GPU did not finish in a reasonable time.
+    ///
+    /// Distinct from a rejected submission: the driver accepted it and then did
+    /// not come back, which is a hung or lost device rather than a mistake in
+    /// what was asked for.
+    #[error("{what} did not complete in time; the device may be hung")]
+    Timeout {
+        /// What was being waited on.
+        what: &'static str,
+    },
+
     /// The Vulkan loader itself could not be found or loaded.
     ///
     /// Almost always a missing or broken driver installation rather than

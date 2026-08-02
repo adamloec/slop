@@ -1,7 +1,8 @@
 # Slop Engine — Implementation Plan & Session Handoff
 
-**Status:** M0 and M1 complete. M2 about half done — the content pipeline is
-finished; materials, a Sponza-scale scene and the debug UI are not.
+**Status:** M0 and M1 complete. M2 underway — the content pipeline, the frame
+renderer, shader reflection and the debug overlay are in; materials and a
+Sponza-scale scene are not.
 **Last updated:** 2026-08-02
 
 This document is the working companion to `DESIGN.md`. **`DESIGN.md` is
@@ -131,7 +132,7 @@ What M2 still owes is the half that needs a renderer to be worth anything:
 materials, a Sponza-scale scene, and the debug UI. §9 has the order and why
 `slop-render` comes out of the examples first.
 
-746 tests. Clippy and rustdoc clean under `-D warnings` in both feature
+752 tests. Clippy and rustdoc clean under `-D warnings` in both feature
 configurations, Vulkan validation reporting nothing, and every crate containing
 `unsafe` passing under Miri — `slop-ecs` under both Stacked and Tree Borrows.
 
@@ -721,6 +722,8 @@ freely, never seams.
 |---|---|---|---|---|
 | `FrameRenderer` has no automated test | `slop-render` | A smoke test that drives a real window, or a headless path that fakes a swapchain | **Extended.** Everything it does needs a surface, a surface needs a window, and a test harness has no event loop — the cube's golden renders headlessly and so covers `Scene`, not this. The check today is running both examples under `SLOP_FRAMES` with validation on, which is a command someone has to type. **The resize path has no coverage at all**, automated or otherwise, because `SLOP_FRAMES` never resizes the window. | M3 |
 | Scene setup — uploads, pipeline, draw recording | `examples/cube/src/scene.rs` | `slop-render` + `slop-asset` | **Rebuilt.** It proves the pieces fit together; it is not the shape an engine wants. One hard-coded pipeline, a raw sampler freed by hand, `CARGO_MANIFEST_DIR` in the load path, and push constants restated from the shader — all of it example-grade on purpose, none of it moves. | M3 |
+| `VertexBinding` cannot express a buffer format that differs from the shader's type | `slop-render/src/vertex.rs` | A per-location format override | **Extended.** Reflection is a fact about the shader; the buffer format is a decision about memory. They coincide for every float attribute and diverge for a packed one — egui's four-byte colour read as a `float4`. The overlay states its layout and uses reflection to check the shader, which is correct and is not derivation. | M3 |
+| A partial texture update re-uploads the whole image | `slop-render/src/overlay.rs` | `vkCmdCopyBufferToImage` into the sub-region | **Replaced.** Wasteful and correct. Font atlases settle within a few frames of startup, so this runs a handful of times and then never again. | M3 |
 | `PushConstants` field *order* is not checked against the shader | `examples/cube/src/scene.rs` | A generic material parameter writer driven by reflected field offsets | **Replaced.** Reflection gives every field's name, offset and size; only the block *size* is compared today. Swapping two same-sized fields would still pass. The writer that fixes it arrives with materials. | M2 |
 | Synchronous upload — submit and wait | `examples/cube/src/scene.rs` | Async transfer queue + staging ring | **Replaced.** Correct for startup, wrong for streaming. | M2 |
 | `slangc` invoked as a CLI | `slop-cli/src/cook.rs` | The Slang library, for link-time specialization | **Replaced**, and no longer urgent. This was recorded as blocking reflection; that premise was false (`DESIGN.md` §2.11, corrected) and `-reflection-json` now feeds the cooker. What the library still buys is composing modules with specialization constants, and not spawning a process per shader. The cache layout, keying and read path all survive either way. | M3+ |
@@ -887,7 +890,7 @@ render identically afterwards, and neither reference moves.
 |---|---|---|---|
 | **A** | `slop-render` — frame renderer: acquire, submit, present, frames in flight, swapchain recreation. Typed errors, configurable frame count. Both examples rewritten onto it and both goldens unchanged. **Landed.** | C, D, E | M2 |
 | **B** | Shader reflection — vertex layouts and push constant sizes read from the cooked shader instead of restated in Rust. **Landed**, via `slangc -reflection-json`; §2.11's claim that this needed the Slang library was false and has been corrected. | D | M2 |
-| **C** | Debug UI (§10.2) — immediate mode, `egui` versus Dear ImGui researched at this point rather than guessed now. Frame timing and entity inspector; the pass visualizer waits for E. | E | M2 |
+| **C** | Debug UI (§10.2) — immediate mode, egui. **Overlay landed**: it draws, and a headless test proves it changes the image. The entity inspector over `slop-reflect` is what remains; the pass visualizer waits for E. | E | M2 |
 | **D** | Materials — glTF materials, multiple meshes per file, scene hierarchy, mipmaps, then a Sponza-scale scene that loads and draws. **M2's exit criterion.** | E | M2 |
 | **E** | Render graph — passes declaring reads and writes, barriers derived rather than hand-written. Then Stage A proper: clustered forward+, shadows, IBL, HDR/tonemap. | — | M3 |
 
