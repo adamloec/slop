@@ -158,7 +158,7 @@ fn decode(bytes: &[u8]) -> Result<Texture> {
 ///
 /// The dimensions are unchanged — the *real* ones are what the header carries.
 /// What changes is the payload, which becomes 4×4 blocks.
-fn compress(texture: Texture) -> Texture {
+pub(crate) fn compress(texture: Texture) -> Texture {
     debug_assert_eq!(texture.format, Format::Rgba8, "only RGBA8 is compressible");
 
     let padded_width = texture.width.div_ceil(BLOCK) * BLOCK;

@@ -47,7 +47,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use slop_asset::mesh::{Mesh, Vertex};
-use slop_asset::{Cache, CacheKey};
+use slop_asset::texture::{Format, Texture};
+use slop_asset::{AlphaMode, Cache, CacheKey, Material, TextureSlot};
 use slop_core::diagnostics::tracing::{debug, info, warn};
 
 use crate::cook::Summary;
@@ -56,7 +57,8 @@ use crate::cook::Summary;
 ///
 /// Independent of the shader cooker's version: changing how meshes are imported
 /// should not recompile shaders, and a shared constant would make it.
-const COOKER_VERSION: u32 = 1;
+/// 2 — materials and the images they reference are cooked too.
+const COOKER_VERSION: u32 = 2;
 
 /// Where source models live, relative to the project root.
 const SOURCE_DIRECTORY: &str = "assets";
@@ -107,7 +109,7 @@ fn cook_file(
         std::fs::read(source).with_context(|| format!("reading model {}", source.display()))?;
 
     // Parsed *before* the key is computed, because the key needs the buffers.
-    let (document, buffers, _images) =
+    let (document, buffers, images) =
         gltf::import(source).with_context(|| format!("parsing {}", source.display()))?;
 
     // Every buffer is an input, not just the `.gltf` itself.
@@ -127,7 +129,15 @@ fn cook_file(
     // a debugging session.
     let mut key = CacheKey::builder()
         .input("cooker", &COOKER_VERSION.to_le_bytes())
-        .input("format", &slop_asset::mesh::VERSION.to_le_bytes())
+        .input("mesh format", &slop_asset::mesh::VERSION.to_le_bytes())
+        .input(
+            "material format",
+            &slop_asset::material::VERSION.to_le_bytes(),
+        )
+        .input(
+            "texture format",
+            &slop_asset::texture::VERSION.to_le_bytes(),
+        )
         .input("source", &bytes);
 
     for buffer in &buffers {
@@ -135,6 +145,11 @@ fn cook_file(
     }
 
     let key = key.finish();
+
+    // Before the meshes, because a primitive names the material it uses and
+    // naming one that was never written would leave a dangling reference in the
+    // cache.
+    let materials = cook_materials(cache, relative, &document, &images, &key, force, summary)?;
 
     for (index, mesh) in document.meshes().enumerate() {
         let name = mesh_name(&mesh, index);
@@ -149,7 +164,7 @@ fn cook_file(
                 continue;
             }
 
-            let cooked = read_primitive(&primitive, &buffers).with_context(|| {
+            let cooked = read_primitive(&primitive, &buffers, &materials).with_context(|| {
                 format!(
                     "reading primitive {primitive_index} of mesh '{name}' in {}",
                     source.display()
@@ -200,19 +215,32 @@ fn sanitise(name: &str) -> String {
         .collect()
 }
 
-/// Where a primitive's artifact lives.
-fn logical_path(relative: &Path, mesh: &str, primitive: usize) -> String {
-    let stem: Vec<String> = relative
+/// The source file's path, sanitised, without its extension.
+///
+/// Shared by every artifact a glTF produces, so a mesh, its material and its
+/// textures all sort together in the cache.
+fn stem_segments(relative: &Path) -> Vec<String> {
+    relative
         .with_extension("")
         .components()
         .map(|segment| sanitise(&segment.as_os_str().to_string_lossy()))
-        .collect();
+        .collect()
+}
 
-    format!("meshes/{}.{mesh}.{primitive}.mesh", stem.join("/"))
+/// Where a primitive's artifact lives.
+fn logical_path(relative: &Path, mesh: &str, primitive: usize) -> String {
+    format!(
+        "meshes/{}.{mesh}.{primitive}.mesh",
+        stem_segments(relative).join("/")
+    )
 }
 
 /// Read one primitive into the cooked layout.
-fn read_primitive(primitive: &gltf::Primitive<'_>, buffers: &[gltf::buffer::Data]) -> Result<Mesh> {
+fn read_primitive(
+    primitive: &gltf::Primitive<'_>,
+    buffers: &[gltf::buffer::Data],
+    materials: &[String],
+) -> Result<Mesh> {
     if primitive.mode() != gltf::mesh::Mode::Triangles {
         bail!(
             "primitive mode {:?} is not supported; only triangle lists are",
@@ -274,7 +302,18 @@ fn read_primitive(primitive: &gltf::Primitive<'_>, buffers: &[gltf::buffer::Data
         generate_flat_normals(&mut vertices, &mut indices);
     }
 
-    Ok(Mesh { vertices, indices })
+    // `None` when the primitive names no material, which glTF permits and which
+    // means glTF's default rather than "draw it untextured".
+    let material = primitive
+        .material()
+        .index()
+        .and_then(|index| materials.get(index).cloned());
+
+    Ok(Mesh {
+        vertices,
+        indices,
+        material,
+    })
 }
 
 /// Give every triangle the normal of its own plane.
@@ -363,6 +402,269 @@ fn collect_models(directory: &Path, found: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+/// Cook every material in one glTF file, returning each one's logical path by
+/// material index.
+///
+/// Materials are cooked before meshes because a primitive names the material it
+/// uses, and naming one that was never written would be a dangling reference in
+/// the cache.
+fn cook_materials(
+    cache: &Cache,
+    relative: &Path,
+    document: &gltf::Document,
+    images: &[gltf::image::Data],
+    key: &CacheKey,
+    force: bool,
+    summary: &mut Summary,
+) -> Result<Vec<String>> {
+    // glTF's *default* material, for primitives that name none. It is a real
+    // material with defined values rather than an absence, so cooking it means a
+    // primitive always has something to bind.
+    let mut paths = Vec::with_capacity(document.materials().len() + 1);
+
+    for (index, material) in document.materials().enumerate() {
+        let name = material_name(&material, index);
+        let logical = material_path(relative, &name);
+        let artifact = cache.artifact(&logical);
+
+        let cooked = read_material(&material, relative, images, cache, key, force, summary)?;
+
+        if force || !cache.is_current(&artifact, key) {
+            cache.prepare(&artifact)?;
+            std::fs::write(&artifact, cooked.write())
+                .with_context(|| format!("writing {}", artifact.display()))?;
+            cache.record(&artifact, key)?;
+
+            info!(
+                logical,
+                textures = cooked.textures.len(),
+                alpha = ?cooked.alpha_mode,
+                "cooked material"
+            );
+            summary.cooked += 1;
+        } else {
+            debug!(logical, "up to date");
+            summary.skipped += 1;
+        }
+
+        paths.push(logical);
+    }
+
+    Ok(paths)
+}
+
+/// A material's name, or a stand-in derived from its index.
+fn material_name(material: &gltf::Material<'_>, index: usize) -> String {
+    material
+        .name()
+        .map(sanitise)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| format!("material{index}"))
+}
+
+/// Where a cooked material lives.
+fn material_path(relative: &Path, name: &str) -> String {
+    let stem = stem_segments(relative);
+
+    format!("materials/{}.{name}.mat", stem.join("/"))
+}
+
+/// Translate one glTF material, cooking the images it references.
+fn read_material(
+    material: &gltf::Material<'_>,
+    relative: &Path,
+    images: &[gltf::image::Data],
+    cache: &Cache,
+    key: &CacheKey,
+    force: bool,
+    summary: &mut Summary,
+) -> Result<Material> {
+    let pbr = material.pbr_metallic_roughness();
+    let mut textures = Vec::new();
+
+    let mut take = |slot: TextureSlot, info: Option<gltf::texture::Texture<'_>>| -> Result<()> {
+        let Some(texture) = info else {
+            return Ok(());
+        };
+
+        let index = texture.source().index();
+        let logical = image_path(relative, index);
+
+        cook_image(cache, &logical, images, index, key, force, summary)?;
+        textures.push((slot, logical));
+
+        Ok(())
+    };
+
+    take(
+        TextureSlot::BaseColor,
+        pbr.base_color_texture().map(|info| info.texture()),
+    )?;
+    take(
+        TextureSlot::MetallicRoughness,
+        pbr.metallic_roughness_texture().map(|info| info.texture()),
+    )?;
+    take(
+        TextureSlot::Normal,
+        material.normal_texture().map(|info| info.texture()),
+    )?;
+    take(
+        TextureSlot::Emissive,
+        material.emissive_texture().map(|info| info.texture()),
+    )?;
+
+    Ok(Material {
+        base_color: pbr.base_color_factor(),
+        metallic: pbr.metallic_factor(),
+        roughness: pbr.roughness_factor(),
+        emissive: material.emissive_factor(),
+        // glTF only defines a cutoff for the masked mode and leaves it absent
+        // otherwise; the format stores one unconditionally, so an unused value
+        // still has to be something rather than uninitialised.
+        alpha_cutoff: material.alpha_cutoff().unwrap_or(0.5),
+        alpha_mode: match material.alpha_mode() {
+            gltf::material::AlphaMode::Opaque => AlphaMode::Opaque,
+            gltf::material::AlphaMode::Mask => AlphaMode::Mask,
+            gltf::material::AlphaMode::Blend => AlphaMode::Blend,
+        },
+        double_sided: material.double_sided(),
+        textures,
+    })
+}
+
+/// Where a cooked image from inside a glTF lives.
+///
+/// Keyed by the *image* index rather than the texture index: several textures
+/// can share one image with different samplers, and cooking it twice would put
+/// the same pixels in the cache under two names.
+fn image_path(relative: &Path, image: usize) -> String {
+    let stem = stem_segments(relative);
+
+    format!("textures/{}.{image}.tex", stem.join("/"))
+}
+
+/// Cook one image out of a glTF, if it is not already current.
+///
+/// These do not go through `texture_import`, which scans for `.png` files on
+/// disk: a glTF's images may be embedded as base64 or live in a GLB's binary
+/// chunk, where there is no file to find. `gltf::import` has already decoded
+/// them, so this cooks the pixels it was handed.
+fn cook_image(
+    cache: &Cache,
+    logical: &str,
+    images: &[gltf::image::Data],
+    index: usize,
+    key: &CacheKey,
+    force: bool,
+    summary: &mut Summary,
+) -> Result<()> {
+    let artifact = cache.artifact(logical);
+
+    if !force && cache.is_current(&artifact, key) {
+        debug!(logical, "up to date");
+        summary.skipped += 1;
+        return Ok(());
+    }
+
+    let image = images
+        .get(index)
+        .with_context(|| format!("image {index} is referenced but not present"))?;
+
+    let decoded = Texture {
+        width: image.width,
+        height: image.height,
+        format: Format::Rgba8,
+        pixels: to_rgba8(image)?,
+    };
+
+    let compressed = crate::texture_import::compress(decoded);
+
+    cache.prepare(&artifact)?;
+    std::fs::write(&artifact, compressed.write())
+        .with_context(|| format!("writing {}", artifact.display()))?;
+    cache.record(&artifact, key)?;
+
+    info!(
+        logical,
+        width = compressed.width,
+        height = compressed.height,
+        "cooked texture"
+    );
+    summary.cooked += 1;
+
+    Ok(())
+}
+
+/// Expand a glTF image into eight-bit RGBA.
+///
+/// The same widening `texture_import` does for PNGs, over the formats
+/// `gltf::import` produces. Sixteen-bit samples are narrowed to their high byte,
+/// and formats without alpha gain an opaque one — a missing alpha channel read
+/// as zero is the failure that looks like the object vanished.
+fn to_rgba8(image: &gltf::image::Data) -> Result<Vec<u8>> {
+    use gltf::image::Format as In;
+
+    let texels = image.width as usize * image.height as usize;
+    let mut pixels = Vec::with_capacity(texels * 4);
+
+    // Index 0 of each channel is its high byte at either depth, which narrows
+    // sixteen-bit samples without a separate branch.
+    let mut push = |red: u8, green: u8, blue: u8, alpha: u8| {
+        pixels.extend_from_slice(&[red, green, blue, alpha]);
+    };
+
+    match image.format {
+        In::R8 => {
+            for sample in &image.pixels {
+                push(*sample, *sample, *sample, 255);
+            }
+        }
+        In::R8G8 => {
+            for sample in image.pixels.chunks_exact(2) {
+                push(sample[0], sample[0], sample[0], sample[1]);
+            }
+        }
+        In::R8G8B8 => {
+            for sample in image.pixels.chunks_exact(3) {
+                push(sample[0], sample[1], sample[2], 255);
+            }
+        }
+        In::R8G8B8A8 => {
+            for sample in image.pixels.chunks_exact(4) {
+                push(sample[0], sample[1], sample[2], sample[3]);
+            }
+        }
+        In::R16 => {
+            for sample in image.pixels.chunks_exact(2) {
+                push(sample[1], sample[1], sample[1], 255);
+            }
+        }
+        In::R16G16 => {
+            for sample in image.pixels.chunks_exact(4) {
+                push(sample[1], sample[1], sample[1], sample[3]);
+            }
+        }
+        In::R16G16B16 => {
+            for sample in image.pixels.chunks_exact(6) {
+                push(sample[1], sample[3], sample[5], 255);
+            }
+        }
+        In::R16G16B16A16 => {
+            for sample in image.pixels.chunks_exact(8) {
+                push(sample[1], sample[3], sample[5], sample[7]);
+            }
+        }
+        In::R32G32B32FLOAT | In::R32G32B32A32FLOAT => {
+            bail!(
+                "floating-point images are not supported; {:?} would need an HDR \
+                 cooked format, which arrives with IBL",
+                image.format
+            )
+        }
+    }
+
+    Ok(pixels)
+}
 #[cfg(test)]
 mod tests {
     use super::*;

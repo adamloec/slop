@@ -26,7 +26,8 @@ cooked it is the one that understands the format.
 | `Vfs` — reading cooked bytes at runtime | Landed | M2 |
 | Shader cooking driven onto the cache | Landed — in `slop-cli` | M2 |
 | `Mesh` — the cooked mesh format | Landed | M2 |
-| glTF import + cook | Landed — importer in `slop-cli` | M2 |
+| `Material` — the cooked material format | Landed | M2 |
+| glTF import + cook — geometry, materials, referenced images | Landed — importer in `slop-cli` | M2 |
 | `Texture` — the cooked texture format | Landed | M2 |
 | PNG import + cook | Landed — importer in `slop-cli` | M2 |
 | Proven end to end — `examples/cube` draws only cooked assets | Landed — see §5.4 | M2 |

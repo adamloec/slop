@@ -13,11 +13,26 @@
         {
           "attributes": { "POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2 },
           "indices": 3,
-          "mode": 4
+          "mode": 4,
+          "material": 0
         }
       ]
     }
   ],
+  "materials": [
+    {
+      "name": "Checker",
+      "pbrMetallicRoughness": {
+        "baseColorTexture": { "index": 0 },
+        "baseColorFactor": [1.0, 1.0, 1.0, 1.0],
+        "metallicFactor": 0.0,
+        "roughnessFactor": 0.85
+      },
+      "doubleSided": false
+    }
+  ],
+  "textures": [{ "source": 0 }],
+  "images": [{ "uri": "checker.png" }],
   "buffers": [{ "byteLength": 840, "uri": "cube.bin" }],
   "bufferViews": [
     { "buffer": 0, "byteOffset": 0, "byteLength": 288, "target": 34962 },

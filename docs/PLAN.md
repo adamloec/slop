@@ -132,7 +132,7 @@ What M2 still owes is the half that needs a renderer to be worth anything:
 materials, a Sponza-scale scene, and the debug UI. §9 has the order and why
 `slop-render` comes out of the examples first.
 
-753 tests. Clippy and rustdoc clean under `-D warnings` in both feature
+770 tests. Clippy and rustdoc clean under `-D warnings` in both feature
 configurations, Vulkan validation reporting nothing, and every crate containing
 `unsafe` passing under Miri — `slop-ecs` under both Stacked and Tree Borrows.
 
@@ -171,6 +171,9 @@ finished.
 | Shader cooking driven onto the shared cache | Landed |
 | The cooked mesh format — binary, versioned, validated on load | Landed |
 | glTF import — positions, normals, UVs, indices | Landed |
+| Materials — the cooked format, glTF import, referenced images | Landed |
+| Node transforms and a scene artifact | **Outstanding** |
+| Rendering a list of meshes with their materials | **Outstanding** |
 | Texture cooking — PNG to a versioned artifact | Landed |
 | `examples/cube` drawing entirely from cooked assets | Landed |
 | `Assets<T>` — the registry, handles, load/reload/unload | Landed |
@@ -723,6 +726,8 @@ freely, never seams.
 | `FrameRenderer` has no automated test | `slop-render` | A smoke test that drives a real window, or a headless path that fakes a swapchain | **Extended.** Everything it does needs a surface, a surface needs a window, and a test harness has no event loop — the cube's golden renders headlessly and so covers `Scene`, not this. The check today is running both examples under `SLOP_FRAMES` with validation on, which is a command someone has to type. **The resize path has no coverage at all**, automated or otherwise, because `SLOP_FRAMES` never resizes the window. | M3 |
 | Scene setup — uploads, pipeline, draw recording | `examples/cube/src/scene.rs` | `slop-render` + `slop-asset` | **Rebuilt.** It proves the pieces fit together; it is not the shape an engine wants. One hard-coded pipeline, a raw sampler freed by hand, `CARGO_MANIFEST_DIR` in the load path, and push constants restated from the shader — all of it example-grade on purpose, none of it moves. | M3 |
 | `VertexBinding` cannot express a buffer format that differs from the shader's type | `slop-render/src/vertex.rs` | A per-location format override | **Extended.** Reflection is a fact about the shader; the buffer format is a decision about memory. They coincide for every float attribute and diverge for a packed one — egui's four-byte colour read as a `float4`. The overlay states its layout and uses reflection to check the shader, which is correct and is not derivation. | M3 |
+| A glTF-referenced image is cooked separately from the same file under `assets/` | `slop-cli` | One artifact per distinct source image | **Replaced.** `assets/checker.png` cooks to `textures/checker.tex` *and*, because `cube.gltf` references it, to `textures/cube.0.tex`. Correct and wasteful. Deduplicating means keying artifacts by content rather than by name, which is a cache change rather than an importer one. | M2/M3 |
+| Materials carry no occlusion or HDR emissive | `slop-asset/src/material.rs` | More slots and a float texture format | **Extended.** Occlusion is a baked term a real-time renderer computes or ignores; float images are refused by name rather than silently narrowed, and arrive with IBL. | M3 |
 | Frame timing is CPU wall-clock, not GPU time | `examples/cube/src/main.rs` | GPU timestamp queries written into the command buffer | **Joined by.** Wall-clock between frames is the honest measure of how fast frames arrive and a poor one for attributing cost to a pass — it includes waiting for the GPU. Attribution needs timestamps, and the render graph is what will know which pass one belongs to. | M3 |
 | The overlay assumes one scale factor for the whole frame | `slop-render/src/overlay.rs` | Per-viewport scale, once a window can span two monitors at different scalings | **Extended.** `pixels_per_point` arrives per frame and applies to every draw in it, which is right until a window straddles a 100% and a 150% display. | M3 |
 | A partial texture update re-uploads the whole image | `slop-render/src/overlay.rs` | `vkCmdCopyBufferToImage` into the sub-region | **Replaced.** Wasteful and correct. Font atlases settle within a few frames of startup, so this runs a handful of times and then never again. | M3 |

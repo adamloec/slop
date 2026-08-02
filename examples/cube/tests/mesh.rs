@@ -186,3 +186,44 @@ fn every_index_is_in_range() {
 fn subtract(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
+
+#[test]
+fn the_cube_names_the_material_its_gltf_gives_it() {
+    // The link the renderer will follow to find a surface's textures. A
+    // primitive that lost its material still draws — untextured, or with
+    // whatever was bound last — so nothing else would notice it went missing.
+    let Some(mesh) = cooked() else { return };
+
+    assert_eq!(mesh.material.as_deref(), Some("materials/cube.Checker.mat"));
+}
+
+#[test]
+fn that_material_is_cooked_and_names_its_texture() {
+    // The other half: a material naming a texture that was never cooked is a
+    // dangling reference, and the cache is exactly where that would hide.
+    let project = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..");
+    let vfs = Vfs::for_project(&project);
+
+    let Ok(bytes) = vfs.read("materials/cube.Checker.mat") else {
+        eprintln!("skipping: run `cargo run -p slop-cli -- cook`");
+        return;
+    };
+
+    let material = slop_asset::Material::read(&bytes).expect("a cooked material must decode");
+
+    assert_eq!(material.metallic, 0.0);
+    assert_eq!(material.roughness, 0.85);
+    assert_eq!(material.alpha_mode, slop_asset::AlphaMode::Opaque);
+    assert!(!material.double_sided);
+
+    let albedo = material
+        .texture(slop_asset::TextureSlot::BaseColor)
+        .expect("the material declares a base colour texture");
+
+    assert!(
+        vfs.exists(albedo),
+        "the material names '{albedo}', which is not cooked"
+    );
+}

@@ -23,7 +23,7 @@
 //! version    u32      VERSION
 //! vertices   u32      count
 //! indices    u32      count
-//! reserved   u32      zero
+//! material   u32      length of the material path, zero if there is none
 //! vertex data         vertices × 32 bytes
 //! index data          indices × 4 bytes
 //! ```
@@ -48,7 +48,7 @@ const MAGIC: &[u8; 8] = b"SLOPMESH";
 ///
 /// Bump when the layout changes. Every artifact then fails its stamp and
 /// regenerates from source, which is the whole reason cooking is a build step.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// Bytes before the vertex data.
 const HEADER: usize = 24;
@@ -59,6 +59,10 @@ pub const VERTEX_SIZE: usize = 32;
 /// Why a cooked mesh could not be read.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum MeshError {
+    /// The material path is not valid UTF-8.
+    #[error("the material path in the mesh is not valid UTF-8")]
+    MaterialNotUtf8,
+
     /// The bytes are not a cooked mesh.
     #[error("not a cooked mesh: expected magic {expected:?}, found {found:?}")]
     NotAMesh {
@@ -129,6 +133,16 @@ pub struct Mesh {
     pub vertices: Vec<Vertex>,
     /// Triangle indices, three per triangle.
     pub indices: Vec<u32>,
+    /// Logical path of the material this primitive is drawn with.
+    ///
+    /// `None` for a primitive that names none, which glTF permits and which
+    /// means "the default material" rather than "no material".
+    ///
+    /// Carried by the mesh because glTF puts it there: a primitive *has* a
+    /// material, and separating them would mean inventing a third artifact to
+    /// record a pairing the source already states. A scene that wants to
+    /// override it still can — this is the default, not a binding.
+    pub material: Option<String>,
 }
 
 impl Mesh {
@@ -141,7 +155,8 @@ impl Mesh {
         out.extend_from_slice(&VERSION.to_le_bytes());
         out.extend_from_slice(&(self.vertices.len() as u32).to_le_bytes());
         out.extend_from_slice(&(self.indices.len() as u32).to_le_bytes());
-        out.extend_from_slice(&0_u32.to_le_bytes());
+        let material = self.material.as_deref().unwrap_or_default();
+        out.extend_from_slice(&(material.len() as u32).to_le_bytes());
 
         for vertex in &self.vertices {
             for value in vertex
@@ -157,6 +172,10 @@ impl Mesh {
         for index in &self.indices {
             out.extend_from_slice(&index.to_le_bytes());
         }
+
+        // After the geometry, so vertex data stays at a fixed offset — the
+        // zero-copy read `docs/PLAN.md` §6.1 anticipates needs that.
+        out.extend_from_slice(material.as_bytes());
 
         out
     }
@@ -185,8 +204,9 @@ impl Mesh {
 
         let vertex_count = read_u32(bytes, 12) as usize;
         let index_count = read_u32(bytes, 16) as usize;
+        let material_length = read_u32(bytes, 20) as usize;
 
-        let expected = HEADER + vertex_count * VERTEX_SIZE + index_count * 4;
+        let expected = HEADER + vertex_count * VERTEX_SIZE + index_count * 4 + material_length;
         if bytes.len() < expected {
             return Err(MeshError::Truncated {
                 expected,
@@ -229,7 +249,21 @@ impl Mesh {
             indices.push(vertex);
         }
 
-        Ok(Self { vertices, indices })
+        let at = HEADER + vertex_count * VERTEX_SIZE + index_count * 4;
+        let material = match material_length {
+            0 => None,
+            length => Some(
+                std::str::from_utf8(&bytes[at..at + length])
+                    .map_err(|_| MeshError::MaterialNotUtf8)?
+                    .to_owned(),
+            ),
+        };
+
+        Ok(Self {
+            vertices,
+            indices,
+            material,
+        })
     }
 
     /// How many triangles the index buffer describes.
@@ -275,6 +309,7 @@ mod tests {
                 },
             ],
             indices: vec![0, 1, 2],
+            material: None,
         }
     }
 
@@ -303,6 +338,7 @@ mod tests {
                 uv: [f32::INFINITY, f32::NEG_INFINITY],
             }],
             indices: vec![0, 0, 0],
+            material: None,
         };
 
         let back = Mesh::read(&mesh.write()).expect("valid");
@@ -325,6 +361,7 @@ mod tests {
                 uv: [0.0, 0.0],
             }],
             indices: vec![0],
+            material: None,
         };
 
         let bytes = mesh.write();

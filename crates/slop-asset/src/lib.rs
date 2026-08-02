@@ -60,6 +60,7 @@
 //! untrustworthy.
 
 mod cache;
+pub mod material;
 pub mod mesh;
 mod registry;
 pub mod shader;
@@ -67,6 +68,7 @@ pub mod texture;
 mod vfs;
 
 pub use cache::{Cache, CacheError, CacheKey, KeyBuilder};
+pub use material::{AlphaMode, Material, MaterialError, TextureSlot};
 pub use mesh::{Mesh, MeshError, Vertex};
 pub use registry::{Asset, AssetError, Assets};
 pub use shader::{Reflection, ReflectionError, VertexFormat, VertexInput};
