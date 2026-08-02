@@ -62,12 +62,14 @@
 mod cache;
 pub mod mesh;
 mod registry;
+pub mod shader;
 pub mod texture;
 mod vfs;
 
 pub use cache::{Cache, CacheError, CacheKey, KeyBuilder};
 pub use mesh::{Mesh, MeshError, Vertex};
 pub use registry::{Asset, AssetError, Assets};
+pub use shader::{Reflection, ReflectionError, VertexFormat, VertexInput};
 pub use texture::{Format, Texture, TextureError};
 pub use vfs::{Vfs, VfsError};
 

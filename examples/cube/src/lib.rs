@@ -41,8 +41,6 @@
 //! machine, which is what makes a golden image of a moving object possible at
 //! all. A wall-clock rotation would make this scene untestable.
 
-pub mod mesh;
-
 mod scene;
 
 pub use scene::{PushConstants, Scene};

@@ -31,6 +31,7 @@ cooked it is the one that understands the format.
 | PNG import + cook | Landed — importer in `slop-cli` | M2 |
 | Proven end to end — `examples/cube` draws only cooked assets | Landed — see §5.4 | M2 |
 | `Assets<T>` — the registry, `Handle<T>`, load, reload, unload | Landed — see §5.5 | M2 |
+| `Reflection` — what a cooked shader says about itself | Landed — see §5.8 | M2 |
 | Hot reload — `reload_changed` plus `cook --watch` | Landed — see §5.6 | M2 |
 | Block compression — BC7 in the importer | Landed — see §5.7 | M2 |
 | Mipmaps | Planned — BC7 without them aliases at distance | M2 |
@@ -326,6 +327,38 @@ existed still matches exactly. That is worth stating precisely because it proves
 less than it appears to: it says BC7 did not break the pipeline, not that the
 encoder is good on hard content. The quality claim rests on the encoder's
 reputation, not on this repository's tests.
+
+### 5.8 Shader reflection
+
+Cooked beside every `.spv`, from the same `slangc` invocation, so the two can
+never describe different builds of a shader.
+
+```
+ cube.slang ──► slangc ──┬──► cube.spv    (what the GPU runs)
+                         └──► cube.refl   (what it says about itself)
+```
+
+It carries two things: the vertex inputs a shader reads, and how big its push
+constant block is. Both used to be restated in Rust beside the shader, where
+nothing checked them — a field added to the shader's input struct and not to the
+Rust table is not a compile error, it makes the GPU read the previous vertex's
+data, and the symptom is geometry that looks scrambled.
+
+**`slangc -reflection-json` is what makes this possible without linking Slang.**
+`DESIGN.md` §2.11 stated that reflection was reachable only through the
+compilation API and that shelling out foreclosed it; that was false and has been
+corrected there. The flag emits vertex locations with semantic names, push
+constant fields with byte offsets and sizes, and descriptor table slots.
+
+Two things it deliberately does not carry:
+
+- **Byte offsets.** Reflection says a shader reads location 1 as three floats. It
+  does not say where that lives in a vertex buffer, because that is a layout
+  decision — interleaved or separate streams, packed or padded.
+  `Reflection::interleaved` computes offsets for the one convention the cooked
+  mesh format uses, keeping the choice at the call site.
+- **Descriptor bindings.** The bindless heap layout is fixed and shared by every
+  shader, so there is nothing per-shader to derive.
 
 ## 6. Decisions
 

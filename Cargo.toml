@@ -123,6 +123,15 @@ gltf = { version = "1.4.1", default-features = false, features = [
 # visible.
 png = "0.18.1"
 
+# BC7 block compression, for the texture cooker. Bindings to Intel's ISPC
+# texture compressor — `slop-cli` only, so nothing it brings in can reach a
+# shipped build (`slop-asset` invariant 7).
+intel_tex_2 = "0.5.0"
+
+# Reading `slangc -reflection-json` output in the shader cooker. Also `slop-cli`
+# only: the runtime reads a cooked binary, never JSON.
+serde_json = "1.0.151"
+
 # Proc-macro machinery, for `slop-reflect-derive` only. A proc macro must live in
 # its own crate — a Rust restriction, not a design choice — which is why
 # DESIGN.md §4's crate list gains a sibling it does not mention.

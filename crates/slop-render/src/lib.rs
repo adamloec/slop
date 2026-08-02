@@ -51,6 +51,8 @@
 
 mod error;
 mod frame;
+mod vertex;
 
 pub use error::RenderError;
 pub use frame::{Frame, FrameOutcome, FrameRenderer, FrameRendererConfig, Target};
+pub use vertex::VertexBinding;

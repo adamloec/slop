@@ -323,13 +323,32 @@ system.
 - **Proven at scale.** The Khronos Vulkan Samples repository carries Slang
   versions of nearly a hundred samples.
 
-**Why library integration is mandatory, not a preference:** reflection
-information cannot be queried from shaders compiled with the `slangc`
-command-line tool — it is available only through the compilation API. Reflection
-is how `slop-rhi` derives descriptor set layouts and pipeline layouts directly
-from shader source instead of hand-maintaining parallel definitions in Rust and
-relying on discipline to keep them synchronized. Shelling out to a binary
-forecloses that.
+**Corrected 2026-08-02.** This section previously said library integration was
+"mandatory, not a preference", on the grounds that reflection could not be
+queried from shaders compiled with the `slangc` command-line tool and that
+shelling out to a binary foreclosed it. **That was false.** `slangc
+-reflection-json <path>` emits complete reflection alongside the SPIR-V: vertex
+input locations with their semantic names, push constant fields with byte offsets
+and sizes, and descriptor table slots. It was verified against
+`shaders/passes/cube.slang` before this correction was written, and the shader
+cooker has used it since — `slop-cli/src/reflection.rs`.
+
+The claim mattered, because it was the sole justification for taking on a
+vendored C++ build. Reflection now works with the CLI, and the parallel
+definitions in Rust that it was meant to remove **are removed**.
+
+**Why the library is still wanted, on weaker grounds:**
+
+- **Link-time specialization.** Composing modules and linking with specialization
+  constants at build time is a compilation feature, not a reflection one, and is
+  the real answer to permutation explosion. This is the strongest remaining
+  reason.
+- **Not paying a process spawn per shader.** Minor at this scale; it matters when
+  a project has hundreds of shaders and a hot-reload loop recompiles on save.
+
+Neither is urgent, and neither is *mandatory*. Library integration is now a
+performance-and-capability preference scheduled by need, recorded in
+`PLAN.md` §6.1 rather than blocking anything.
 
 **Integration point.** Shaders are a cooked asset type (§2.8). The pipeline
 compiles Slang → SPIR-V and cooks the reflection metadata alongside the binary.

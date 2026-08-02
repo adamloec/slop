@@ -67,12 +67,8 @@ fn a_hot_reload_re_uploads_and_still_renders_the_reference() {
         return;
     };
 
-    let mut renderer = match Headless::new(&device, &allocator) {
-        Ok(renderer) => renderer,
-        Err(failure) => {
-            eprintln!("skipping: {failure}");
-            return;
-        }
+    let Some(mut renderer) = harness(&device, &allocator) else {
+        return;
     };
 
     for logical in ["textures/checker.tex", "meshes/cube.Cube.0.mesh"] {
@@ -138,12 +134,8 @@ fn the_headless_cube_matches_its_reference() {
         return;
     };
 
-    let mut renderer = match Headless::new(&device, &allocator) {
-        Ok(renderer) => renderer,
-        Err(failure) => {
-            eprintln!("skipping: {failure}");
-            return;
-        }
+    let Some(mut renderer) = harness(&device, &allocator) else {
+        return;
     };
 
     let image = renderer.render(CAPTURED_FRAME);
@@ -170,12 +162,8 @@ fn the_same_frame_renders_identically_every_time() {
         return;
     };
 
-    let mut renderer = match Headless::new(&device, &allocator) {
-        Ok(renderer) => renderer,
-        Err(failure) => {
-            eprintln!("skipping: {failure}");
-            return;
-        }
+    let Some(mut renderer) = harness(&device, &allocator) else {
+        return;
     };
 
     let first = renderer.render(CAPTURED_FRAME);
@@ -199,12 +187,8 @@ fn consecutive_frames_actually_differ() {
         return;
     };
 
-    let mut renderer = match Headless::new(&device, &allocator) {
-        Ok(renderer) => renderer,
-        Err(failure) => {
-            eprintln!("skipping: {failure}");
-            return;
-        }
+    let Some(mut renderer) = harness(&device, &allocator) else {
+        return;
     };
 
     assert_ne!(
@@ -252,6 +236,43 @@ fn headless() -> Option<(Arc<Device>, Arc<Allocator>)> {
     let allocator = Allocator::new(&device).expect("allocator creation");
 
     Some((device, allocator))
+}
+
+/// Build the harness, or skip if the assets it needs have not been cooked.
+///
+/// **A scene that fails to build is a failure, not a skip.** These tests used to
+/// print "skipping" and return for *any* `Headless::new` error, which meant a
+/// shader disagreeing with its Rust side, a broken pipeline, or a mangled
+/// artifact all reported the suite green. That was found by breaking the cube
+/// shader on purpose and watching every golden pass while the demo refused to
+/// start.
+///
+/// The one legitimate skip is "nothing has been cooked yet", which is a state a
+/// fresh clone is genuinely in and which no amount of correct code fixes. That
+/// is checked for by name, before anything is constructed, so it cannot swallow
+/// a real failure.
+fn harness(device: &Arc<Device>, allocator: &Arc<Allocator>) -> Option<Headless> {
+    let project = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..");
+    let vfs = slop_asset::Vfs::for_project(&project);
+
+    for logical in [
+        "shaders/passes/cube.spv",
+        "shaders/passes/cube.refl",
+        "meshes/cube.Cube.0.mesh",
+        "textures/checker.tex",
+    ] {
+        if !vfs.exists(logical) {
+            eprintln!("skipping: '{logical}' is not cooked — run `cargo run -p slop-cli -- cook`");
+            return None;
+        }
+    }
+
+    match Headless::new(device, allocator) {
+        Ok(headless) => Some(headless),
+        Err(failure) => panic!("the scene must build once its assets are cooked: {failure}"),
+    }
 }
 
 /// The scene plus an offscreen target and the readback path.

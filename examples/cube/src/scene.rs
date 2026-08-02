@@ -7,22 +7,23 @@ use slop_asset::{Assets, Mesh, Texture, Vfs};
 use slop_core::Handle;
 use slop_core::diagnostics::tracing::{info, warn};
 use slop_math::{Mat4, Quat, Vec3};
-use slop_render::Target;
+use slop_render::{Target, VertexBinding};
 use slop_rhi::{
     Allocator, BindlessHeap, BindlessHeapConfig, Buffer, BufferConfig, BufferState, CommandBuffer,
     CommandPool, DEPTH_CLEAR, Device, GraphicsPipeline, GraphicsPipelineConfig, Image, ImageConfig,
     ImageState, MemoryLocation, PipelineLayout, PipelineLayoutConfig, RhiError, SampledImage,
-    Sampler, ShaderModule, ShaderStage, TimelineSemaphore, VertexLayout, vk,
+    Sampler, ShaderModule, ShaderStage, TimelineSemaphore, vk,
 };
-
-use crate::mesh;
 
 /// Per-draw data, matching `PushConstants` in `shaders/passes/cube.slang`.
 ///
-/// `#[repr(C)]` for the same reason [`mesh::Vertex`] needs it: Rust may reorder
-/// fields otherwise, and the shader reads by offset. A field added on one side
-/// and not the other reads garbage rather than failing to compile — shader
-/// reflection at M2 is what removes the duplication.
+/// `#[repr(C)]` is load-bearing: Rust may reorder the fields of a default-layout
+/// struct, and the shader reads this block by offset.
+///
+/// Its *size* is checked against the shader's reflected block at startup, which
+/// is what catches a field added on one side and not the other. The field order
+/// is not checked and cannot be from reflection alone — that is what a generic
+/// material parameter writer would fix, and `docs/PLAN.md` §6.1 records it.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct PushConstants {
@@ -74,6 +75,8 @@ pub struct Scene {
     sampler_slot: Handle<Sampler>,
     /// How many indices the cooked mesh has, for the draw call.
     index_count: u32,
+    /// Bytes the shader's push constant block occupies, from reflection.
+    push_constant_bytes: u32,
     /// The CPU-side assets, kept so [`Scene::reload_changed`] has something to
     /// compare against and something to re-upload from.
     meshes: Assets<Mesh>,
@@ -109,6 +112,39 @@ impl Scene {
     ) -> Result<Self, String> {
         let module = load_shader(device)?;
 
+        // What the shader says about itself, cooked from the same compile that
+        // produced the SPIR-V above. Everything below that used to be restated
+        // in Rust — the attribute formats, their offsets, the stride, the push
+        // constant size — is derived from this instead.
+        let reflection = load_reflection()?;
+        let vertices_layout = VertexBinding::interleaved(&reflection)
+            .map_err(|error| format!("the cube shader's vertex inputs: {error}"))?;
+
+        // The shader's block, which is what the layout is sized to and what gets
+        // pushed — not `size_of::<PushConstants>()`.
+        //
+        // Those two differ, and finding out why is the reason this is written
+        // down. `PushConstants` is 136 bytes of fields and `size_of` reports
+        // **144**: `Mat4` has 16-byte alignment, so Rust rounds the struct up to
+        // a multiple of it, and the last eight bytes are tail padding no field
+        // occupies. Pushing `size_of` bytes therefore sends eight bytes of
+        // nothing past the end of what the shader declared. It was harmless —
+        // the range was simply larger than the block — but it meant the engine's
+        // idea of the block and the shader's had never actually agreed, and
+        // nothing would have said so.
+        //
+        // Reflection is the authority now: the layout is sized from the shader,
+        // and the push below sends exactly that many bytes.
+        let push_constant_bytes = reflection.push_constant_bytes;
+        if push_constant_bytes as usize > size_of::<PushConstants>() {
+            return Err(format!(
+                "the shader's push constant block is {push_constant_bytes} bytes and \
+                 `PushConstants` is only {}; the shader would read past the end of what \
+                 this pushes",
+                size_of::<PushConstants>()
+            ));
+        }
+
         let mut heap = BindlessHeap::new(device, &BindlessHeapConfig::default())
             .map_err(|error| error.to_string())?;
 
@@ -117,8 +153,7 @@ impl Scene {
                 device,
                 &PipelineLayoutConfig {
                     heap: Some(&heap),
-                    push_constant_bytes: u32::try_from(size_of::<PushConstants>())
-                        .expect("the push constant block is far under 4 GiB"),
+                    push_constant_bytes,
                 },
             )
             .map_err(|error| error.to_string())?,
@@ -140,10 +175,7 @@ impl Scene {
                 },
                 color_format,
                 depth_format: Some(depth_format),
-                vertex_layout: Some(VertexLayout {
-                    stride: mesh::VERTEX_STRIDE,
-                    attributes: &mesh::VERTEX_ATTRIBUTES,
-                }),
+                vertex_layout: Some(vertices_layout.layout()),
                 // On. With culling off a reversed face still renders, and the
                 // cube looks right from outside while being wrong.
                 cull_back_faces: true,
@@ -223,6 +255,7 @@ impl Scene {
             texture_slot,
             sampler_slot,
             index_count,
+            push_constant_bytes,
             meshes,
             textures,
             mesh,
@@ -544,7 +577,10 @@ impl Scene {
                     self.pipeline.layout().handle(),
                     vk::ShaderStageFlags::ALL,
                     0,
-                    as_bytes(&push),
+                    // Exactly the shader's block, not the Rust struct's
+                    // `size_of` — see `Scene::new` on the eight bytes of tail
+                    // padding that `Mat4` alignment adds.
+                    &as_bytes(&push)[..self.push_constant_bytes as usize],
                 );
                 raw.cmd_draw_indexed(buffer, self.index_count, 1, 0, 0, 0);
             }
@@ -823,6 +859,18 @@ fn cook_first(error: slop_asset::AssetError) -> String {
     }
 
     format!("{message}. Run `cargo run -p slop-cli -- cook` first")
+}
+
+/// Load the cooked cube shader's reflection.
+///
+/// Beside the SPIR-V and from the same compile, so the two cannot describe
+/// different shaders.
+fn load_reflection() -> Result<slop_asset::Reflection, String> {
+    let bytes = Vfs::for_project(&project_root())
+        .read("shaders/passes/cube.refl")
+        .map_err(|error| format!("{error}. Run `cargo run -p slop-cli -- cook` first"))?;
+
+    slop_asset::Reflection::read(&bytes).map_err(|error| error.to_string())
 }
 
 /// Load the cooked cube shader.

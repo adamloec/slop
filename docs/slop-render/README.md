@@ -25,8 +25,9 @@ debug UI, materials, Sponza — needed a frame loop that was not copy-pasted.
 | `FrameRenderer` — acquire, submit, present, frames in flight | Landed | M2 |
 | Swapchain recreation, reported so callers can resize with it | Landed | M2 |
 | Both examples driven by it, goldens unchanged | Landed | M2 |
+| `VertexBinding` — vertex layout from cooked reflection | Landed | M2 |
 | Render graph — passes declaring reads and writes | Planned | M3 |
-| Material system | Planned — blocked on shader reflection | M2 |
+| Material system | Planned — its blocker, shader reflection, has landed | M2 |
 | Clustered forward+, shadows, IBL, HDR/tonemap | Planned | M3 |
 | Automated coverage of the loop itself | **Absent** — see §6 | M3 |
 
@@ -37,6 +38,7 @@ debug UI, materials, Sponza — needed a frame loop that was not copy-pasted.
 | `FrameRenderer` | Owns the swapchain and per-frame synchronisation |
 | `FrameRendererConfig` | Frames in flight, present mode, acquire timeout |
 | `Frame` | What a caller records into: a command buffer, a target, a frame number |
+| `VertexBinding` | A pipeline vertex layout derived from a shader's cooked reflection |
 | `Target` | The image being drawn to, and the states it enters and leaves in |
 | `FrameOutcome` | Whether a frame was presented or skipped |
 

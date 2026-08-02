@@ -17,6 +17,7 @@ use clap::{Parser, Subcommand};
 
 mod cook;
 mod gltf_import;
+mod reflection;
 mod texture_import;
 
 /// Slop engine tooling.

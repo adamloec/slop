@@ -131,7 +131,7 @@ What M2 still owes is the half that needs a renderer to be worth anything:
 materials, a Sponza-scale scene, and the debug UI. §9 has the order and why
 `slop-render` comes out of the examples first.
 
-718 tests. Clippy and rustdoc clean under `-D warnings` in both feature
+746 tests. Clippy and rustdoc clean under `-D warnings` in both feature
 configurations, Vulkan validation reporting nothing, and every crate containing
 `unsafe` passing under Miri — `slop-ecs` under both Stacked and Tree Borrows.
 
@@ -176,7 +176,7 @@ finished.
 | `slop-render` — the frame renderer, both examples driven by it | Landed |
 | Hot reload — `Assets::reload_changed` + `slop-cli cook --watch` | Landed |
 | Block compression — BC7, 4:1, with the golden image unchanged | Landed |
-| Shader reflection — layouts read from cooked SPIR-V, not restated | **Outstanding** |
+| Shader reflection — layouts read from the cooked shader, not restated | Landed |
 | Material system | **Outstanding** — blocked on shader reflection |
 | glTF materials, multiple meshes, scene hierarchy | **Outstanding** |
 | A Sponza-scale scene loading and drawing | **Outstanding** — the exit criterion |
@@ -301,6 +301,31 @@ tested from one platform by construction. Both are claims the docs already make.
 
 Two lists, and the contrast between them is the argument for having pulled
 task G ahead of the cube.
+
+**First, a correction to this section's own premise.** For most of M0 and M1 the
+golden tests could not fail for the most important reason they exist. Every one
+of them was written as:
+
+```rust
+let mut renderer = match Headless::new(&device, &allocator) {
+    Ok(renderer) => renderer,
+    Err(failure) => { eprintln!("skipping: {failure}"); return; }   // ← test passes
+};
+```
+
+`Headless::new` builds the `Scene`. So a shader that disagreed with its Rust
+side, a pipeline that would not build, a missing artifact — **any** setup failure
+— printed a line nobody reads and reported the suite green. Found on 2026-08-02
+by breaking the cube shader on purpose to check that reflection caught it: the
+new reflection tests failed loudly, the demo refused to start, and all five
+golden tests passed.
+
+Fixed by separating the one legitimate skip — "nothing has been cooked yet",
+checked by name against the VFS before anything is constructed — from every other
+failure, which now panics. The lesson generalises past this file: **a test that
+skips on setup failure is a test that reports success when the thing it guards is
+most broken.** Any `return` in a test body deserves the question "what state does
+this silently accept?".
 
 **Before the verification skeleton existed, three bugs reached a running
 program:**
@@ -647,8 +672,13 @@ problem later. Check work against this list.
 5. **Asset paths are lowercase, always.** (§2.13) Enforced at cook time. This is
    the single most common Windows→Linux breakage.
 6. **`PathBuf` / `Path::join` only.** No separator literals, no string concatenation.
-7. **Slang integrates as a library, not the `slangc` binary,** once reflection is
-   needed (§2.11) — reflection is unavailable from CLI-compiled shaders.
+7. **Nothing a shader declares is restated in Rust.** Vertex layouts, attribute
+   offsets and push constant sizes come from cooked reflection, never from a
+   parallel table someone maintains by hand. *(This invariant used to read
+   "Slang integrates as a library, because reflection is unavailable from
+   CLI-compiled shaders" — which was false. `slangc -reflection-json` produces
+   it; see `DESIGN.md` §2.11's correction. The library is still wanted, for
+   link-time specialization, and is no longer blocking.)*
 8. **Nothing parses source assets at runtime in shipping builds.** (§2.8)
 9. **Both platforms stay green.** (§2.13) Do not defer a Linux fix.
 
@@ -691,9 +721,9 @@ freely, never seams.
 |---|---|---|---|---|
 | `FrameRenderer` has no automated test | `slop-render` | A smoke test that drives a real window, or a headless path that fakes a swapchain | **Extended.** Everything it does needs a surface, a surface needs a window, and a test harness has no event loop — the cube's golden renders headlessly and so covers `Scene`, not this. The check today is running both examples under `SLOP_FRAMES` with validation on, which is a command someone has to type. **The resize path has no coverage at all**, automated or otherwise, because `SLOP_FRAMES` never resizes the window. | M3 |
 | Scene setup — uploads, pipeline, draw recording | `examples/cube/src/scene.rs` | `slop-render` + `slop-asset` | **Rebuilt.** It proves the pieces fit together; it is not the shape an engine wants. One hard-coded pipeline, a raw sampler freed by hand, `CARGO_MANIFEST_DIR` in the load path, and push constants restated from the shader — all of it example-grade on purpose, none of it moves. | M3 |
-| The vertex layout is restated in Rust beside the shader's | `examples/cube/src/mesh.rs`, `shaders/passes/cube.slang` | Reflection over the cooked SPIR-V (§2.11) | **Deleted.** Two declarations of one layout, and a field added to one and not the other feeds the shader a stride it does not expect — scrambled geometry, no error. Held together by an assertion until the Slang library can hand the layout over. | M2/M3 |
+| `PushConstants` field *order* is not checked against the shader | `examples/cube/src/scene.rs` | A generic material parameter writer driven by reflected field offsets | **Replaced.** Reflection gives every field's name, offset and size; only the block *size* is compared today. Swapping two same-sized fields would still pass. The writer that fixes it arrives with materials. | M2 |
 | Synchronous upload — submit and wait | `examples/cube/src/scene.rs` | Async transfer queue + staging ring | **Replaced.** Correct for startup, wrong for streaming. | M2 |
-| `slangc` invoked as a CLI | `slop-cli/src/cook.rs` | The Slang library, for reflection (§2.11) | **Replaced.** The cache layout, keying and read path all survive. | M2/M3 |
+| `slangc` invoked as a CLI | `slop-cli/src/cook.rs` | The Slang library, for link-time specialization | **Replaced**, and no longer urgent. This was recorded as blocking reflection; that premise was false (`DESIGN.md` §2.11, corrected) and `-reflection-json` now feeds the cooker. What the library still buys is composing modules with specialization constants, and not spawning a process per shader. The cache layout, keying and read path all survive either way. | M3+ |
 | The asset VFS reads synchronously | `slop-asset` | Async streaming alongside it | **Joined by, not replaced.** A blocking read stays correct for startup, for tools, and for the cooker itself; §2.8's streaming is an additional entry point rather than a different one. Recorded because "the VFS is sync" reads like a shortcut and is not.  Moved to M3: nothing yet loads enough at once to notice, and a Sponza-scale scene is what will say what the streaming API needs. | M3 |
 | An asset is unloaded by hand, never by refcount | `slop-asset` | Reference counting, once something holds handles long enough to outlive its need for them | **Extended.** `unload` is explicit and correct; what is missing is *who decides*, and nothing holds a handle past a frame yet. Counting references now would count them from one place. | M2/M3 |
 | `Assets<T>` is single-threaded — every mutation takes `&mut` | `slop-asset` | Interior mutability or a job-system-owned loader, once streaming decodes off the main thread | **Extended.** `Asset: Send + Sync` is already required so the bound does not have to be added later; only the *ownership* is provisional, and no public signature changes when the loader moves. | M2 |
@@ -856,7 +886,7 @@ render identically afterwards, and neither reference moves.
 | | Item | Unblocks | Milestone |
 |---|---|---|---|
 | **A** | `slop-render` — frame renderer: acquire, submit, present, frames in flight, swapchain recreation. Typed errors, configurable frame count. Both examples rewritten onto it and both goldens unchanged. **Landed.** | C, D, E | M2 |
-| **B** | Shader reflection — Slang as a library rather than `slangc` as a CLI (§2.11), so vertex layouts, push constants and descriptor bindings are read from the cooked shader instead of restated in Rust. | D | M2 |
+| **B** | Shader reflection — vertex layouts and push constant sizes read from the cooked shader instead of restated in Rust. **Landed**, via `slangc -reflection-json`; §2.11's claim that this needed the Slang library was false and has been corrected. | D | M2 |
 | **C** | Debug UI (§10.2) — immediate mode, `egui` versus Dear ImGui researched at this point rather than guessed now. Frame timing and entity inspector; the pass visualizer waits for E. | E | M2 |
 | **D** | Materials — glTF materials, multiple meshes per file, scene hierarchy, mipmaps, then a Sponza-scale scene that loads and draws. **M2's exit criterion.** | E | M2 |
 | **E** | Render graph — passes declaring reads and writes, barriers derived rather than hand-written. Then Stage A proper: clustered forward+, shadows, IBL, HDR/tonemap. | — | M3 |

@@ -1731,6 +1731,7 @@ dependencies = [
  "gltf",
  "intel_tex_2",
  "png",
+ "serde_json",
  "slop-asset",
  "slop-core",
 ]
@@ -1783,6 +1784,7 @@ dependencies = [
 name = "slop-render"
 version = "0.0.0"
 dependencies = [
+ "slop-asset",
  "slop-core",
  "slop-rhi",
  "thiserror 2.0.19",

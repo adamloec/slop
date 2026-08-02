@@ -26,6 +26,21 @@ pub enum RenderError {
     #[error("frames_in_flight must be at least one")]
     NoFramesInFlight,
 
+    /// A shader reads vertex locations that are not `0..n`.
+    ///
+    /// Vulkan allows sparse locations; `VertexLayout` does not express them,
+    /// because its attribute array is positional. Refused rather than packed
+    /// down, which would bind every attribute after the gap to the wrong slot.
+    #[error(
+        "vertex input locations must be contiguous from zero; expected {expected}, found {found}"
+    )]
+    VertexLocationGap {
+        /// The location the layout needed next.
+        expected: u32,
+        /// What the shader declared instead.
+        found: u32,
+    },
+
     /// Something underneath failed.
     #[error(transparent)]
     Rhi(#[from] slop_rhi::RhiError),

@@ -10,11 +10,13 @@
 //! the engine loads cooked bytes and never compiles anything. Those are the
 //! parts every later asset type inherits.
 //!
-//! **Provisional:** shaders are compiled by invoking the `slangc` binary.
-//! `docs/DESIGN.md` §2.11 requires Slang as a *library*, because reflection is
-//! only reachable through the compilation API — a command-line invocation cannot
-//! produce it. `docs/PLAN.md` §4.1-F permits the CLI for M0 specifically, and
-//! replacing it changes only [`compile`], not the cache around it.
+//! **Provisional:** shaders are compiled by invoking the `slangc` binary rather
+//! than linking Slang as a library. This used to be recorded as a shortcut on
+//! the grounds that reflection was unreachable from the CLI — `docs/DESIGN.md`
+//! §2.11 said so, and it was wrong. `-reflection-json` produces everything a
+//! pipeline needs, and [`compile`] now asks for it. What library integration
+//! still buys is link-time specialization and not paying a process spawn per
+//! shader, which is a real but much weaker argument; §6.1 carries it.
 //!
 //! # The cache itself lives in `slop-asset`
 //!
@@ -40,6 +42,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::reflection;
 use anyhow::{Context, Result, bail};
 use slop_asset::{Cache, CacheKey};
 use slop_core::diagnostics::tracing::{debug, info, warn};
@@ -49,10 +52,13 @@ use slop_core::diagnostics::tracing::{debug, info, warn};
 /// Any change to how cooking works — different compiler flags, a different
 /// output layout, a bug fix in this file — must bump this, or existing caches
 /// keep serving artifacts produced by the old rules.
-const COOKER_VERSION: u32 = 2;
+const COOKER_VERSION: u32 = 3;
 
 /// Extension of the shader sources this cooks.
 const SHADER_SOURCE_EXTENSION: &str = "slang";
+
+/// Extension of the cooked reflection that sits beside each `.spv`.
+const REFLECTION_EXTENSION: &str = "refl";
 
 /// Directory of shared includes, relative to the shader root.
 ///
@@ -159,29 +165,64 @@ fn cook_one(
         .with_context(|| format!("reading shader source {}", source.display()))?;
     let key = cache_key(&bytes, &compiler.version, includes);
 
-    if !force && cache.is_current(output, &key) {
+    let reflection_output = output.with_extension(REFLECTION_EXTENSION);
+
+    // Both artifacts, or neither. Checking only the SPIR-V would let a cache
+    // written before reflection existed report itself current while the
+    // reflection file is missing, and the symptom would be a shader that loads
+    // and a pipeline that cannot be built.
+    if !force && cache.is_current(output, &key) && reflection_output.is_file() {
         debug!(source = %source.display(), "up to date");
         return Ok(false);
     }
 
     cache.prepare(output)?;
-    compile(compiler, source_root, source, output)?;
 
-    // Recorded *after* the artifact, so an interrupted cook leaves a missing
-    // stamp rather than one promising a file that was never finished.
+    // One compile produces both, which is the point: reflection describing a
+    // different build of the shader than the SPIR-V beside it would be worse
+    // than no reflection at all.
+    let reflection_json = compile(compiler, source_root, source, output)?;
+    let reflection = reflection::parse(&reflection_json)
+        .with_context(|| format!("reading reflection for {}", source.display()))?;
+
+    std::fs::write(&reflection_output, reflection.write())
+        .with_context(|| format!("writing {}", reflection_output.display()))?;
+
+    // Recorded *after* both artifacts, so an interrupted cook leaves a missing
+    // stamp rather than one promising files that were never finished.
     cache.record(output, &key)?;
 
-    info!(source = %source.display(), output = %output.display(), "cooked");
+    info!(
+        source = %source.display(),
+        output = %output.display(),
+        inputs = reflection.vertex_inputs.len(),
+        push_bytes = reflection.push_constant_bytes,
+        "cooked"
+    );
 
     Ok(true)
 }
 
-/// Invoke the shader compiler.
+/// Invoke the shader compiler, returning its reflection JSON.
 ///
-/// The one provisional part of this module — see the module docs. Compiling the
-/// whole file emits a single SPIR-V module containing every `[shader(...)]`
-/// entry point, so a vertex and fragment pair travels as one artifact.
-fn compile(compiler: &Compiler, source_root: &Path, source: &Path, output: &Path) -> Result<()> {
+/// Compiling the whole file emits a single SPIR-V module containing every
+/// `[shader(...)]` entry point, so a vertex and fragment pair travels as one
+/// artifact.
+///
+/// **`-reflection-json` is what makes the `slangc` binary sufficient.**
+/// `docs/DESIGN.md` §2.11 used to state that reflection was reachable only
+/// through the compilation API and that shelling out foreclosed it. That was
+/// wrong, and the correction is recorded there: the flag produces vertex input
+/// locations with their semantic names, push constant fields with byte offsets
+/// and sizes, and descriptor table slots — everything a pipeline needs.
+fn compile(
+    compiler: &Compiler,
+    source_root: &Path,
+    source: &Path,
+    output: &Path,
+) -> Result<String> {
+    let reflection = output.with_extension("reflection.json");
+
     let result = Command::new(&compiler.path)
         .arg(source)
         .args(["-target", "spirv"])
@@ -191,6 +232,8 @@ fn compile(compiler: &Compiler, source_root: &Path, source: &Path, output: &Path
         // directories.
         .arg("-I")
         .arg(source_root)
+        .arg("-reflection-json")
+        .arg(&reflection)
         .arg("-o")
         .arg(output)
         .output()
@@ -210,7 +253,16 @@ fn compile(compiler: &Compiler, source_root: &Path, source: &Path, output: &Path
         );
     }
 
-    Ok(())
+    let json = std::fs::read_to_string(&reflection)
+        .with_context(|| format!("reading {}", reflection.display()))?;
+
+    // The JSON is the compiler's intermediate, not an artifact. Leaving it in
+    // the cache would put a second, differently-shaped description of every
+    // shader beside the one the engine reads, and eventually something would
+    // read the wrong one.
+    let _ = std::fs::remove_file(&reflection);
+
+    Ok(json)
 }
 
 /// Hex-encoded key covering the source, its includes, this cooker, and the
