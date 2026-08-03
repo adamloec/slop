@@ -64,7 +64,7 @@ Three edges are load-bearing and easy to break by accident:
 ```sh
 cargo build --workspace --all-targets
 cargo test --workspace
-cargo clippy --workspace --all-targets      # CI runs with -D warnings
+cargo clippy --workspace --all-targets      # must be clean under -D warnings
 cargo fmt --all --check
 cargo doc --workspace --no-deps --all-features
 ```
