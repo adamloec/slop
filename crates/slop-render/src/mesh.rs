@@ -37,8 +37,8 @@ use slop_math::Mat4;
 use slop_rhi::{
     Allocator, Attachments, BindlessHeap, Blend, Buffer, BufferConfig, BufferState, BufferUsage,
     ClearValue, ColorAttachment, CommandBuffer, CommandPool, DepthAttachment, Device, Extent2D,
-    Format, GraphicsPipeline, GraphicsPipelineConfig, Image, ImageAspect, ImageConfig, ImageState,
-    ImageUsage, Load, MemoryLocation, PipelineLayout, PipelineLayoutConfig, SampledImage, Sampler,
+    Format, GraphicsPipeline, GraphicsPipelineConfig, Image, ImageConfig, ImageState, ImageUsage,
+    Load, MemoryLocation, PipelineLayout, PipelineLayoutConfig, SampledImage, Sampler,
     SamplerConfig, ShaderModule, ShaderStage, StorageBuffer, TextureSampler,
 };
 
@@ -546,7 +546,13 @@ impl MeshRenderer {
     /// learning once from golden tests that skipped on setup failure, and a
     /// `debug_assert` puts the complaint where the mistake is rather than
     /// leaving it to be diagnosed from an empty window.
-    pub fn record(&self, heap: &BindlessHeap, frame: &crate::Frame<'_>, view_projection: Mat4) {
+    pub fn record(
+        &self,
+        heap: &BindlessHeap,
+        frame: &crate::Frame<'_>,
+        target: &crate::HdrTarget,
+        view_projection: Mat4,
+    ) {
         debug_assert!(
             !(self.materials_slot.is_some() && self.depth.is_none()),
             "a model is loaded but `MeshRenderer::resize` has never run, so there is \
@@ -557,12 +563,12 @@ impl MeshRenderer {
             return;
         };
 
-        frame.command.transition_image(
-            frame.target.image,
-            ImageAspect::Color,
-            frame.target.from,
-            ImageState::COLOR_ATTACHMENT,
-        );
+        // The pass brackets its own writes rather than leaving the caller to.
+        // Forgetting `end_writing` is a tonemap sampling a target the scene may
+        // not have finished writing, which desktop hardware usually gets away
+        // with — the class of bug `docs/PLAN.md` §9.5 E3's graph exists to make
+        // unrepresentable, and until then worth keeping in one place.
+        target.begin_writing(frame);
         frame.command.transition_image(
             depth.handle(),
             depth.aspect(),
@@ -574,7 +580,7 @@ impl MeshRenderer {
 
         let mut pass = frame.command.begin_rendering(&Attachments {
             color: ColorAttachment {
-                view: frame.target.view,
+                view: target.view(),
                 load: Load::Clear(ClearValue::Color([0.02, 0.02, 0.03, 1.0])),
             },
             depth: Some(DepthAttachment {
@@ -584,7 +590,7 @@ impl MeshRenderer {
                 // bandwidth for something nothing reads.
                 store: false,
             }),
-            extent: frame.target.extent,
+            extent: target.extent(),
         });
 
         pass.bind_pipeline(&self.pipeline);
@@ -610,19 +616,19 @@ impl MeshRenderer {
         // Ends the pass, so the transition below is outside it.
         drop(pass);
 
-        // **Left in `COLOR_ATTACHMENT`, deliberately not in `frame.target.to`.**
-        //
-        // This used to transition to the frame's final state here, which is
-        // correct only when nothing draws afterwards. The moment a debug overlay
-        // was added, its pass began on an image already in `PRESENT_SRC` and
-        // validation objected on every frame — two renderers in one frame, both
-        // believing they were last.
-        //
-        // Only the last writer may perform the final transition, and a mesh
-        // renderer cannot know whether it is the last. So it leaves the image
-        // ready for the next pass, and the caller ends the frame with
-        // [`Frame::finish`]. The render graph (`docs/PLAN.md` §9.2 item E) is
-        // what will derive this rather than leaving it to a convention.
+        // Make the scene visible to whatever samples it — the tonemap pass, and
+        // later the post stack. This is the engine's first real pass dependency:
+        // everything before it was two passes writing the same image in
+        // sequence, which is an ordering rather than a dependency.
+        target.end_writing(frame);
+
+        // **This renderer no longer touches the frame's target at all.** It used
+        // to draw straight into it and leave it in `COLOR_ATTACHMENT` for the
+        // overlay, with a comment about only the last writer transitioning.
+        // Now `Tonemap` is what writes the presentable image, and the overlay
+        // still draws over that — so the last-writer rule has not gone away,
+        // it has moved to a shorter list. `Frame::finish` still ends the frame,
+        // and `docs/PLAN.md` §9.5 E3 is still what will derive it.
     }
 }
 

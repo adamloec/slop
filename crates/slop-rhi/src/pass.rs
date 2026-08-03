@@ -47,6 +47,18 @@ pub enum Load {
     Clear(ClearValue),
     /// Keep them, for a pass compositing over what is already there.
     Preserve,
+    /// Neither clear nor load them.
+    ///
+    /// For a pass that writes every pixel of the attachment — a fullscreen
+    /// resolve, a blit. Clearing first would write the target twice, and
+    /// preserving would read contents about to be overwritten; both cost
+    /// bandwidth for nothing.
+    ///
+    /// **Only correct when the coverage really is total.** Anything the pass
+    /// does not write reads as whatever the driver left there, which varies by
+    /// vendor and by frame — so a partial pass using this looks right on one
+    /// machine and shows garbage on another.
+    Discard,
 }
 
 /// What to clear an attachment to.
@@ -359,6 +371,7 @@ fn rendering_attachment(
 
     match load {
         Load::Preserve => info.load_op(vk::AttachmentLoadOp::LOAD),
+        Load::Discard => info.load_op(vk::AttachmentLoadOp::DONT_CARE),
         Load::Clear(value) => info
             .load_op(vk::AttachmentLoadOp::CLEAR)
             .clear_value(match value {

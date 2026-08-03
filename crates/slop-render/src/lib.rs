@@ -51,10 +51,16 @@
 
 mod error;
 mod frame;
+mod hdr;
 mod mesh;
 mod vertex;
 
 pub use error::RenderError;
 pub use frame::{Frame, FrameOutcome, FrameRenderer, FrameRendererConfig, Target};
+pub use hdr::{HdrTarget, Tonemap};
 pub use mesh::MeshRenderer;
 pub use vertex::VertexBinding;
+
+/// The format the HDR target uses, re-exported so a pipeline drawing into it
+/// declares the same one rather than restating it.
+pub use hdr::FORMAT as HDR_FORMAT;

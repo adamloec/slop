@@ -40,7 +40,7 @@ use std::time::Duration;
 
 use example_model::{OrbitCamera, bounds, camera};
 use slop_math::Vec3;
-use slop_render::{MeshRenderer, Target};
+use slop_render::{HdrTarget, MeshRenderer, Target, Tonemap};
 use slop_rhi::{
     Allocator, BindlessHeap, BindlessHeapConfig, Buffer, BufferConfig, BufferUsage, CommandPool,
     Device, DeviceSelection, Extent2D, Format, Image, ImageConfig, ImageState, ImageUsage,
@@ -365,6 +365,9 @@ fn harness(device: &Arc<Device>, allocator: &Arc<Allocator>, model: &str) -> Opt
 struct Headless {
     pool: CommandPool,
     meshes: MeshRenderer,
+    /// Where the scene is drawn before being resolved, as in the window.
+    hdr: HdrTarget,
+    tonemap: Tonemap,
     heap: BindlessHeap,
     readback: Buffer,
     target: Image,
@@ -406,8 +409,34 @@ impl Headless {
             &mut heap,
             &module,
             &reflection,
-            FORMAT,
+            // The scene is drawn in floating point and resolved by `Tonemap`,
+            // exactly as the windowed viewer does it. Rendering straight into
+            // `FORMAT` here would test a path the window does not take.
+            slop_render::HDR_FORMAT,
             slop_rhi::preferred_depth_format(device),
+        )
+        .map_err(|error| error.to_string())?;
+
+        let hdr =
+            HdrTarget::new(allocator, &mut heap, extent).map_err(|error| error.to_string())?;
+
+        let tonemap_module = ShaderModule::from_bytes(
+            device,
+            &vfs.read("shaders/passes/tonemap.spv")
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let tonemap = Tonemap::new(
+            device,
+            &mut heap,
+            &tonemap_module,
+            &slop_asset::Reflection::read(
+                &vfs.read("shaders/passes/tonemap.refl")
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?,
+            FORMAT,
         )
         .map_err(|error| error.to_string())?;
 
@@ -456,6 +485,8 @@ impl Headless {
             pool: CommandPool::new(device, device.queue_families().graphics)
                 .map_err(|error| error.to_string())?,
             meshes,
+            hdr,
+            tonemap,
             heap,
             readback,
             target,
@@ -529,8 +560,10 @@ impl Headless {
         self.meshes.record(
             &self.heap,
             &frame,
+            &self.hdr,
             camera(aspect, self.centre, angle, self.settings),
         );
+        self.tonemap.record(&self.heap, &frame, &self.hdr);
 
         // Only the last thing to draw transitions the target — here to
         // TRANSFER_SRC, so the copy below can read it.

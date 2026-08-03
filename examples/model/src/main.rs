@@ -34,7 +34,7 @@ use slop_core::diagnostics::tracing::{error, info};
 use slop_ecs::{Entity, World};
 use slop_editor::{DebugUi, InspectorState};
 use slop_math::Vec3;
-use slop_render::{FrameRenderer, FrameRendererConfig, MeshRenderer};
+use slop_render::{FrameRenderer, FrameRendererConfig, HdrTarget, MeshRenderer, Tonemap};
 use slop_rhi::{BindlessHeap, BindlessHeapConfig, Device, ShaderModule};
 
 // Shared with `tests/golden.rs`, so the window and the reference image are
@@ -82,6 +82,10 @@ struct Renderer {
     // Declared in drop order: what draws, then the heap it indexes, then the
     // frame renderer, then the `Gpu` everything was built from.
     meshes: MeshRenderer,
+    /// Where the scene is drawn, in floating point, before being resolved.
+    hdr: HdrTarget,
+    /// What resolves it onto the swapchain.
+    tonemap: Tonemap,
     heap: BindlessHeap,
     frames: FrameRenderer,
     /// Where the model sits, for the camera to look at.
@@ -135,16 +139,33 @@ impl Renderer {
             .map_err(|error| error.to_string())?;
 
         let vfs = assets()?;
-        let module = load_shader(gpu.device(), &vfs)?;
-        let reflection = load_reflection(&vfs)?;
+        let module = load_shader(gpu.device(), &vfs, "model")?;
+        let reflection = load_reflection(&vfs, "model")?;
 
         let mut meshes = MeshRenderer::new(
             gpu.device(),
             &mut heap,
             &module,
             &reflection,
-            frames.format(),
+            // The HDR target's format, not the swapchain's. The scene is drawn
+            // in floating point and resolved by `Tonemap` — see
+            // `slop_render::HdrTarget`.
+            slop_render::HDR_FORMAT,
             slop_rhi::preferred_depth_format(gpu.device()),
+        )
+        .map_err(|error| error.to_string())?;
+
+        let hdr = HdrTarget::new(gpu.allocator(), &mut heap, frames.extent())
+            .map_err(|error| error.to_string())?;
+
+        let tonemap_module = load_shader(gpu.device(), &vfs, "tonemap")?;
+        let tonemap = Tonemap::new(
+            gpu.device(),
+            &mut heap,
+            &tonemap_module,
+            &load_reflection(&vfs, "tonemap")?,
+            // The swapchain's, because this is the pass that writes it.
+            frames.format(),
         )
         .map_err(|error| error.to_string())?;
 
@@ -188,6 +209,8 @@ impl Renderer {
 
         Ok(Self {
             meshes,
+            hdr,
+            tonemap,
             heap,
             frames,
             centre,
@@ -215,6 +238,14 @@ impl Renderer {
             self.meshes
                 .resize(self.gpu.allocator(), extent)
                 .map_err(|error| error.to_string())?;
+            self.hdr
+                .resize(
+                    self.gpu.device(),
+                    self.gpu.allocator(),
+                    &mut self.heap,
+                    extent,
+                )
+                .map_err(|error| error.to_string())?;
         }
 
         // Declared and uploaded before the frame opens: uploading a texture
@@ -237,6 +268,8 @@ impl Renderer {
         }
 
         let meshes = &self.meshes;
+        let hdr = &self.hdr;
+        let tonemap = &self.tonemap;
         let heap = &self.heap;
         let ui = &mut self.ui;
         let allocator = self.gpu.allocator();
@@ -251,7 +284,12 @@ impl Renderer {
                 let aspect =
                     frame.target.extent.width as f32 / frame.target.extent.height.max(1) as f32;
 
-                meshes.record(heap, frame, camera(aspect, centre, angle, settings));
+                // Into the HDR target, not the swapchain.
+                meshes.record(heap, frame, hdr, camera(aspect, centre, angle, settings));
+
+                // And back out of it. The first read-after-write dependency in
+                // the engine: this pass samples what the one above wrote.
+                tonemap.record(heap, frame, hdr);
 
                 // Last, in a pass of its own: the overlay loads the colour
                 // attachment rather than clearing it, so it composites over the
@@ -319,17 +357,17 @@ impl Renderer {
     }
 }
 
-fn load_shader(device: &Arc<Device>, vfs: &Vfs) -> Result<ShaderModule, String> {
+fn load_shader(device: &Arc<Device>, vfs: &Vfs, name: &str) -> Result<ShaderModule, String> {
     let bytes = vfs
-        .read("shaders/passes/model.spv")
+        .read(&format!("shaders/passes/{name}.spv"))
         .map_err(|error| format!("{error}. Run `cargo run -p slop-cli -- cook` first"))?;
 
     ShaderModule::from_bytes(device, &bytes).map_err(|error| error.to_string())
 }
 
-fn load_reflection(vfs: &Vfs) -> Result<slop_asset::Reflection, String> {
+fn load_reflection(vfs: &Vfs, name: &str) -> Result<slop_asset::Reflection, String> {
     let bytes = vfs
-        .read("shaders/passes/model.refl")
+        .read(&format!("shaders/passes/{name}.refl"))
         .map_err(|error| format!("{error}. Run `cargo run -p slop-cli -- cook` first"))?;
 
     slop_asset::Reflection::read(&bytes).map_err(|error| error.to_string())

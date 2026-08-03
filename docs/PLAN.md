@@ -1170,25 +1170,32 @@ correct. The frame loop was the exception, and only the examples exercise it.
 | | Item | Unblocks | Notes |
 |---|---|---|---|
 | **E1** | Float colour formats, and `ComputePipeline` + `dispatch` in `slop-rhi` | E2, E4 | The §9.4 prerequisites. **Landed.** Grew a third missing piece — `ImageUsage` had no `STORAGE`, so no image could declare itself writable by compute despite the heap having the slot and the device enabling the feature |
-| **E2** | HDR offscreen target and a tonemap pass | E3 | **Before the graph, deliberately** — see below |
+| **E2** | HDR offscreen target and a tonemap pass | E3 | **Landed.** Before the graph, deliberately — see below. `example-model` only; `cube` and `triangle` still draw straight to the swapchain, and `scene.rs` is absorbed at E3 rather than converted twice |
 | **E3** | Render graph — passes declare reads and writes, barriers derived | E4–E7 | Designed against §9.4, validated by re-expressing E2's frame through it. `MeshRenderer` decomposes here |
 | **E4** | Clustered forward+ — light list, cluster build, forward pass | E5 | The first compute-feeding-graphics dependency |
 | **E5** | Cascaded shadow maps | E6 | |
 | **E6** | IBL from an HDR environment | E7 | Needs a cooked environment format — new work in `slop-cook` |
 | **E7** | Post stack — SSAO, bloom, TAA | — | TAA last: it needs motion vectors, which need previous-frame transforms |
 
-**Why E2 comes before the graph.** Everything currently renders straight into an
+**Why E2 comes before the graph.** Everything used to render straight into an
 sRGB swapchain image. Stage A requires rendering into a float target and
 resolving through a tonemap pass, and that single change creates **the first
 genuine read-after-write dependency in the engine** — one pass writes an image,
 another reads it. That is the thing a graph exists to manage and the thing that
-does not exist yet.
+did not exist yet.
 
-It also retires the `Frame::finish` convention naturally rather than by
-decree: once tonemap is the only pass writing the swapchain image, "only the
-last writer may transition" stops being a rule anyone can forget. The §6.1 row —
-*"Every renderer must be told whether it is the last to draw"* — closes at E2,
-and E3 is what makes it structural.
+**Landed.** The identity tonemap is what makes it checkable: the golden images
+were approved against geometry drawn straight into the swapchain, and all six
+still pass unchanged through the float target. Verified by removing the resolve,
+which fails at 100% of pixels — so the scene really does go through `Rgba16Float`
+and back rather than the pass being decorative.
+
+**One claim above was wrong and is withdrawn.** This section previously said E2
+"retires the `Frame::finish` convention, once tonemap is the only pass writing
+the swapchain image." Tonemap is *not* the only writer: the debug overlay draws
+over it, and must, because a UI should not be tonemapped. E2 changes the writer
+list from {mesh, overlay} to {tonemap, overlay} — still two, so the last-writer
+rule survives. The §6.1 row closes at **E3**, where the graph derives it.
 
 The cost of this ordering is that E2's HDR target is hand-managed and then
 re-managed by the graph at E3. That is one image and one barrier of rework, and
