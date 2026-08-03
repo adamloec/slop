@@ -214,8 +214,11 @@ impl ImageState {
     /// reported it ten times per frame in every example.
     ///
     /// The rule to keep: **the first barrier on an acquired image must be staged
-    /// no earlier than the stage its semaphore is waited at.** Those two live in
-    /// different files, so changing either alone reintroduces this.
+    /// no earlier than the stage its semaphore is waited at.** Both halves are
+    /// in `slop_render::FrameRenderer` — the state here is chosen in `render`
+    /// and the wait stage in `submit`, forty lines apart — and
+    /// `the_acquired_state_matches_the_wait_stage` below asserts they agree, so
+    /// changing one alone is a test failure rather than a silent race.
     pub const ACQUIRED: Self = Self {
         layout: vk::ImageLayout::UNDEFINED,
         stage: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
@@ -932,5 +935,83 @@ impl Device {
         }?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The two halves of the acquire race fix must agree.
+    ///
+    /// A frame waits on the acquire semaphore at one stage and transitions the
+    /// image at another, and the transition must not be *earlier* — otherwise it
+    /// is ordered before the wait and may run while the presentation engine
+    /// still owns the image. That was a real race, present from M0 until
+    /// synchronization validation reported it ten times a frame.
+    ///
+    /// Asserted rather than left as a comment because both halves are ordinary
+    /// values in one file, so a well-meaning change to either — narrowing the
+    /// wait to save a stall, widening the transition — silently reintroduces it.
+    #[test]
+    fn the_acquired_state_matches_the_wait_stage() {
+        assert_eq!(
+            ImageState::ACQUIRED.stage,
+            WaitStage::ColorAttachmentOutput.to_vk(),
+            "the first barrier on an acquired image is staged earlier than the \
+             semaphore it must follow"
+        );
+    }
+
+    /// `ACQUIRED` discards, exactly as `UNDEFINED` does.
+    ///
+    /// The stage is the only difference. Giving it a real layout would preserve
+    /// contents the frame is about to clear, which costs bandwidth for nothing.
+    #[test]
+    fn the_acquired_state_still_discards() {
+        assert_eq!(ImageState::ACQUIRED.layout, ImageState::UNDEFINED.layout);
+        assert!(ImageState::ACQUIRED.access.is_empty());
+    }
+
+    /// Naming a stage must actually change the barrier.
+    ///
+    /// Guards `Stage::to_vk` collapsing two variants onto one mask, which would
+    /// make a compute read order against fragment work and look correct.
+    #[test]
+    fn each_stage_is_a_distinct_mask() {
+        let all = [Stage::Fragment, Stage::Compute, Stage::Any];
+
+        for (index, one) in all.iter().enumerate() {
+            for other in &all[index + 1..] {
+                assert_ne!(one.to_vk(), other.to_vk(), "{one:?} and {other:?} collide");
+            }
+        }
+    }
+
+    /// The constants are the stage-chosen functions, not a second spelling.
+    #[test]
+    fn the_fragment_constants_are_the_selector_applied() {
+        assert_eq!(
+            ImageState::SHADER_READ,
+            ImageState::shader_read(Stage::Fragment)
+        );
+        assert_eq!(
+            ImageState::DEPTH_READ,
+            ImageState::depth_read(Stage::Fragment)
+        );
+    }
+
+    /// A storage write declares the read too, so a pass that accumulates into a
+    /// resource is ordered against itself.
+    #[test]
+    fn a_storage_write_covers_reading_back_what_it_wrote() {
+        let state = BufferState::storage_write(Stage::Compute);
+
+        assert!(
+            state
+                .access
+                .contains(vk::AccessFlags2::SHADER_STORAGE_WRITE)
+        );
+        assert!(state.access.contains(vk::AccessFlags2::SHADER_STORAGE_READ));
     }
 }
