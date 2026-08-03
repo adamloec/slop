@@ -120,8 +120,26 @@ pub unsafe trait QueryData {
     /// Column pointers resolved for one archetype.
     type State: Copy;
 
-    /// Record every component this reads or writes.
-    fn collect_access(out: &mut Vec<Access>);
+    /// Visit every component this reads or writes.
+    ///
+    /// A visitor rather than a `&mut Vec<Access>` out-parameter, because this
+    /// runs once per query per frame and the `Vec` was an allocation per call
+    /// in the frame loop — see [`collect_access`](Self::collect_access).
+    fn each_access(visit: &mut dyn FnMut(Access));
+
+    /// Every access this names, collected into a `Vec`.
+    ///
+    /// Convenience for building a system's declaration up front, which is a
+    /// once-per-system cost. The frame loop uses
+    /// [`each_access`](Self::each_access) instead, because a `Vec` per query is
+    /// an allocation per call in exactly the place `docs/CONVENTIONS.md` §8
+    /// says there are none.
+    #[must_use]
+    fn collect_access() -> Vec<Access> {
+        let mut out = Vec::new();
+        Self::each_access(&mut |access| out.push(access));
+        out
+    }
 
     /// Resolve `archetype`'s columns, or `None` if it does not match.
     ///
@@ -157,8 +175,8 @@ unsafe impl<T: Reflect> QueryData for &T {
     type Item<'w> = &'w T;
     type State = *const T;
 
-    fn collect_access(out: &mut Vec<Access>) {
-        out.push(Access {
+    fn each_access(visit: &mut dyn FnMut(Access)) {
+        visit(Access {
             kind: AccessKind::Component,
             type_id: T::type_id(),
             mutable: false,
@@ -296,8 +314,8 @@ unsafe impl<T: Reflect> QueryData for &mut T {
     type Item<'w> = Mut<'w, T>;
     type State = (*mut T, *const std::cell::Cell<Tick>, Tick);
 
-    fn collect_access(out: &mut Vec<Access>) {
-        out.push(Access {
+    fn each_access(visit: &mut dyn FnMut(Access)) {
+        visit(Access {
             kind: AccessKind::Component,
             type_id: T::type_id(),
             mutable: true,
@@ -340,11 +358,11 @@ unsafe impl<T: Reflect> QueryData for Option<&T> {
     /// this inner one says whether it has the component.
     type State = Option<*const T>;
 
-    fn collect_access(out: &mut Vec<Access>) {
+    fn each_access(visit: &mut dyn FnMut(Access)) {
         // Declared even though the component is optional: where it *is* present
         // this reads it, and a scheduler that let another system write `T`
         // concurrently would be wrong for those archetypes.
-        <&T as QueryData>::collect_access(out);
+        <&T as QueryData>::each_access(visit);
     }
 
     fn state(archetype: &Archetype, _ticks: Ticks) -> Option<Self::State> {
@@ -372,8 +390,8 @@ unsafe impl<T: Reflect> QueryData for Option<&mut T> {
     type Item<'w> = Option<Mut<'w, T>>;
     type State = Option<<&'static mut T as QueryData>::State>;
 
-    fn collect_access(out: &mut Vec<Access>) {
-        <&mut T as QueryData>::collect_access(out);
+    fn each_access(visit: &mut dyn FnMut(Access)) {
+        <&mut T as QueryData>::each_access(visit);
     }
 
     fn state(archetype: &Archetype, ticks: Ticks) -> Option<Self::State> {
@@ -392,7 +410,7 @@ unsafe impl QueryData for Entity {
     type Item<'w> = Entity;
     type State = *const Entity;
 
-    fn collect_access(_out: &mut Vec<Access>) {}
+    fn each_access(_visit: &mut dyn FnMut(Access)) {}
 
     fn state(archetype: &Archetype, _ticks: Ticks) -> Option<Self::State> {
         Some(archetype.entities().as_ptr())
@@ -418,8 +436,8 @@ macro_rules! tuple_query {
             type Item<'w> = ($($name::Item<'w>,)+);
             type State = ($($name::State,)+);
 
-            fn collect_access(out: &mut Vec<Access>) {
-                $($name::collect_access(out);)+
+            fn each_access(visit: &mut dyn FnMut(Access)) {
+                $($name::each_access(visit);)+
             }
 
             fn state(archetype: &Archetype, ticks: Ticks) -> Option<Self::State> {
@@ -487,7 +505,21 @@ pub unsafe trait QueryFilter {
     /// This is for the scheduler and is deliberately **not** fed into the
     /// aliasing check a query performs on its own data. `&mut Position` filtered
     /// by `Changed<Position>` is an ordinary query, not an aliasing pair.
-    fn collect_access(out: &mut Vec<Access>);
+    fn each_access(visit: &mut dyn FnMut(Access));
+
+    /// Every access this names, collected into a `Vec`.
+    ///
+    /// Convenience for building a system's declaration up front, which is a
+    /// once-per-system cost. The frame loop uses
+    /// [`each_access`](Self::each_access) instead, because a `Vec` per query is
+    /// an allocation per call in exactly the place `docs/CONVENTIONS.md` §8
+    /// says there are none.
+    #[must_use]
+    fn collect_access() -> Vec<Access> {
+        let mut out = Vec::new();
+        Self::each_access(&mut |access| out.push(access));
+        out
+    }
 
     /// Whether row `row` passes.
     ///
@@ -517,7 +549,7 @@ unsafe impl<T: Reflect> QueryFilter for With<T> {
         archetype.signature().contains(T::type_id()).then_some(())
     }
 
-    fn collect_access(_out: &mut Vec<Access>) {}
+    fn each_access(_visit: &mut dyn FnMut(Access)) {}
 
     unsafe fn matches(_state: Self::State, _row: usize) -> bool {
         true
@@ -539,7 +571,7 @@ unsafe impl<T: Reflect> QueryFilter for Without<T> {
         (!archetype.signature().contains(T::type_id())).then_some(())
     }
 
-    fn collect_access(_out: &mut Vec<Access>) {}
+    fn each_access(_visit: &mut dyn FnMut(Access)) {}
 
     unsafe fn matches(_state: Self::State, _row: usize) -> bool {
         true
@@ -574,8 +606,8 @@ unsafe impl<T: Reflect> QueryFilter for Changed<T> {
             .map(|column| (column.changed_ticks_ptr(), ticks))
     }
 
-    fn collect_access(out: &mut Vec<Access>) {
-        <&T as QueryData>::collect_access(out);
+    fn each_access(visit: &mut dyn FnMut(Access)) {
+        <&T as QueryData>::each_access(visit);
     }
 
     unsafe fn matches(state: Self::State, row: usize) -> bool {
@@ -611,8 +643,8 @@ unsafe impl<T: Reflect> QueryFilter for Added<T> {
             .map(|column| (column.added_ticks_ptr(), ticks))
     }
 
-    fn collect_access(out: &mut Vec<Access>) {
-        <&T as QueryData>::collect_access(out);
+    fn each_access(visit: &mut dyn FnMut(Access)) {
+        <&T as QueryData>::each_access(visit);
     }
 
     unsafe fn matches(state: Self::State, row: usize) -> bool {
@@ -651,7 +683,7 @@ unsafe impl QueryFilter for () {
         Some(())
     }
 
-    fn collect_access(_out: &mut Vec<Access>) {}
+    fn each_access(_visit: &mut dyn FnMut(Access)) {}
 
     unsafe fn matches(_state: Self::State, _row: usize) -> bool {
         true
@@ -672,8 +704,8 @@ macro_rules! tuple_filter {
                 Some(($($name::state(archetype, ticks)?,)+))
             }
 
-            fn collect_access(out: &mut Vec<Access>) {
-                $($name::collect_access(out);)+
+            fn each_access(visit: &mut dyn FnMut(Access)) {
+                $($name::each_access(visit);)+
             }
 
             unsafe fn matches(state: Self::State, row: usize) -> bool {
@@ -698,8 +730,8 @@ macro_rules! tuple_filter {
                 ($($name.is_some())||+).then_some(state)
             }
 
-            fn collect_access(out: &mut Vec<Access>) {
-                $($name::collect_access(out);)+
+            fn each_access(visit: &mut dyn FnMut(Access)) {
+                $($name::each_access(visit);)+
             }
 
             unsafe fn matches(state: Self::State, row: usize) -> bool {
@@ -913,8 +945,7 @@ impl<D: QueryData, F: QueryFilter> std::fmt::Debug for Query<'_, D, F> {
 
 /// Panic if `D` names a component twice with either access mutable.
 fn assert_no_conflicts<D: QueryData>() {
-    let mut access = Vec::new();
-    D::collect_access(&mut access);
+    let access = D::collect_access();
 
     for (index, left) in access.iter().enumerate() {
         for right in &access[index + 1..] {
@@ -935,8 +966,7 @@ mod tests {
 
     #[test]
     fn shared_access_is_recorded_without_mutability() {
-        let mut access = Vec::new();
-        <&u32 as QueryData>::collect_access(&mut access);
+        let access = <&u32 as QueryData>::collect_access();
 
         assert_eq!(access.len(), 1);
         assert_eq!(access[0].type_id, u32::type_id());
@@ -945,8 +975,7 @@ mod tests {
 
     #[test]
     fn exclusive_access_is_recorded_as_mutable() {
-        let mut access = Vec::new();
-        <&mut u32 as QueryData>::collect_access(&mut access);
+        let access = <&mut u32 as QueryData>::collect_access();
 
         assert!(access[0].mutable);
     }
@@ -955,16 +984,14 @@ mod tests {
     fn an_entity_constrains_nothing() {
         // `Entity` matches every archetype and names no component, so a query
         // of `(Entity,)` alone visits everything.
-        let mut access = Vec::new();
-        <Entity as QueryData>::collect_access(&mut access);
+        let access = <Entity as QueryData>::collect_access();
 
         assert!(access.is_empty());
     }
 
     #[test]
     fn a_tuple_collects_every_members_access() {
-        let mut access = Vec::new();
-        <(&u32, &mut f32, Entity) as QueryData>::collect_access(&mut access);
+        let access = <(&u32, &mut f32, Entity) as QueryData>::collect_access();
 
         assert_eq!(access.len(), 2, "Entity contributes nothing");
         assert!(!access[0].mutable);

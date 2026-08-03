@@ -279,13 +279,15 @@ impl<'w> WorldCell<'w> {
     }
 
     /// Panic unless `D` is covered by what this system declared.
+    /// Panic unless `D` is covered by what this system declared.
+    ///
+    /// Visits `D`'s access rather than collecting it. This ran once per query
+    /// per frame and allocated a `Vec` each time, in the frame loop, which
+    /// `docs/CONVENTIONS.md` §8 says allocates nothing — `CONSIDERATIONS.md`
+    /// item 7. The set is a pure function of `D`, so there was never anything
+    /// to keep; the `Vec` existed only because the trait's shape asked for one.
     fn assert_declared<D: QueryData>(&self) {
-        let mut wanted = Vec::new();
-        D::collect_access(&mut wanted);
-
-        for wanted in wanted {
-            self.assert_covers(wanted);
-        }
+        D::each_access(&mut |wanted| self.assert_covers(wanted));
     }
 
     /// Panic unless `wanted` is covered by what this system declared.
