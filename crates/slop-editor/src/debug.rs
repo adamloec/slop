@@ -101,10 +101,12 @@ impl DebugUi {
         })?;
         let module = ShaderModule::from_bytes(device, &bytes)?;
 
-        let bytes = vfs.read(REFLECTION).map_err(|source| EditorError::NotCooked {
-            logical: String::from(REFLECTION),
-            source,
-        })?;
+        let bytes = vfs
+            .read(REFLECTION)
+            .map_err(|source| EditorError::NotCooked {
+                logical: String::from(REFLECTION),
+                source,
+            })?;
         let reflection =
             slop_asset::Reflection::read(&bytes).map_err(|source| EditorError::Malformed {
                 logical: String::from(REFLECTION),

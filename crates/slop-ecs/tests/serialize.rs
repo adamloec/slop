@@ -293,7 +293,11 @@ fn an_owning_component_round_trips_and_is_dropped_exactly_once() {
 
     assert_eq!(drops.load(Ordering::Relaxed), 0);
     drop(world);
-    assert_eq!(drops.load(Ordering::Relaxed), 1, "one component, one destructor");
+    assert_eq!(
+        drops.load(Ordering::Relaxed),
+        1,
+        "one component, one destructor"
+    );
 }
 
 #[test]

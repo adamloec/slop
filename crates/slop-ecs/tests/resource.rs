@@ -159,7 +159,11 @@ fn inserting_twice_replaces_and_drops_the_old_value() {
         })
         .expect("registered");
 
-    assert_eq!(drops.load(Ordering::Relaxed), 1, "the first value was destroyed");
+    assert_eq!(
+        drops.load(Ordering::Relaxed),
+        1,
+        "the first value was destroyed"
+    );
     assert_eq!(world.resource_count(), 1, "and there is still only one");
     world.assert_consistent();
 }

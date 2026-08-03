@@ -130,7 +130,9 @@ pub fn run<A: Application>() -> ! {
             .and_then(|value| value.parse().ok()),
     };
 
-    event_loop.run_app(&mut shell).expect("the event loop failed");
+    event_loop
+        .run_app(&mut shell)
+        .expect("the event loop failed");
 
     if let Some(failure) = &shell.failure {
         error!(error = %failure, "the application failed");

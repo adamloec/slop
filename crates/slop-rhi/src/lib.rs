@@ -32,7 +32,14 @@ mod device;
 mod error;
 mod format;
 mod geometry;
-mod handle;
+/// Public for its module documentation, not for its contents — every type in it
+/// is re-exported at the crate root and that is how callers should name them.
+///
+/// Seven `to_vk` methods across this crate cite it as "the escape hatch", and
+/// what they are citing is the module's own explanation of why a named escape
+/// hatch beats callers taking their own `ash` dependency. A private module makes
+/// those links dangle, which rustdoc reports and `-D warnings` rejects.
+pub mod handle;
 mod instance;
 mod pass;
 mod pipeline;

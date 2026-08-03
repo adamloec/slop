@@ -86,7 +86,6 @@ impl Drop for Graphics {
     }
 }
 
-
 /// Everything this example does, in the order Vulkan permits.
 ///
 /// Reached only through `Application::new`, and so only from `main`. Cargo

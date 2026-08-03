@@ -166,13 +166,11 @@ impl Buffer {
     /// that reproduces on one vendor.
     #[must_use]
     pub fn is_host_coherent(&self) -> bool {
-        self.allocation
-            .as_ref()
-            .is_some_and(|allocation| {
-                allocation
-                    .memory_properties()
-                    .contains(vk::MemoryPropertyFlags::HOST_COHERENT)
-            })
+        self.allocation.as_ref().is_some_and(|allocation| {
+            allocation
+                .memory_properties()
+                .contains(vk::MemoryPropertyFlags::HOST_COHERENT)
+        })
     }
 }
 

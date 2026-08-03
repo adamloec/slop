@@ -460,7 +460,11 @@ fn an_unregistered_component_is_reported_and_destroyed() {
         Some(&Health { value: 5 }),
         "the commands after the failure still applied"
     );
-    assert_eq!(drops.load(Ordering::Relaxed), 0, "the registered component was taken");
+    assert_eq!(
+        drops.load(Ordering::Relaxed),
+        0,
+        "the registered component was taken"
+    );
     world.assert_consistent();
 }
 
@@ -558,7 +562,11 @@ fn clearing_destroys_what_was_staged_and_leaves_the_buffer_reusable() {
     world.apply(&mut commands).expect("Health is registered");
 
     assert_eq!(world.len(), 1);
-    assert_eq!(drops.load(Ordering::Relaxed), 1, "clearing did not disturb the count");
+    assert_eq!(
+        drops.load(Ordering::Relaxed),
+        1,
+        "clearing did not disturb the count"
+    );
     world.assert_consistent();
 }
 
@@ -581,7 +589,11 @@ fn an_applied_component_is_destroyed_by_the_world_not_the_buffer() {
     assert_eq!(drops.load(Ordering::Relaxed), 0, "the world owns it now");
 
     drop(commands);
-    assert_eq!(drops.load(Ordering::Relaxed), 0, "the buffer must not double free");
+    assert_eq!(
+        drops.load(Ordering::Relaxed),
+        0,
+        "the buffer must not double free"
+    );
 
     drop(world);
     assert_eq!(drops.load(Ordering::Relaxed), 1);
