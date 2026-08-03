@@ -68,6 +68,7 @@ mod graph;
 mod hdr;
 mod light;
 mod mesh;
+mod shadow;
 mod vertex;
 mod view;
 
@@ -75,12 +76,15 @@ pub use cluster::{ClusterCamera, ClusterGrid, Clusters, sphere_touches_box};
 pub use environment::{DirectionalLight, Environment, default_ambient};
 pub use error::RenderError;
 pub use frame::{Frame, FrameOutcome, FrameRenderer, FrameRendererConfig, Target};
-pub use graph::{BufferId, ComputePass, Graph, ImageId, Imported, ImportedBuffer, RenderPass};
+pub use graph::{
+    BufferId, ComputePass, DepthTarget, Graph, ImageId, Imported, ImportedBuffer, RenderPass,
+};
 pub use hdr::{HdrTarget, Tonemap};
 pub use light::{Lights, PointLight};
 pub use mesh::MeshRenderer;
+pub use shadow::{CASCADES, CascadeFit, SPLIT_BLEND, ShadowConfig, Shadows, light_basis, splits};
 pub use vertex::VertexBinding;
-pub use view::{NO_CLUSTERS, View};
+pub use view::{NO_CLUSTERS, NO_SHADOWS, View};
 
 /// The format the HDR target uses, re-exported so a pipeline drawing into it
 /// declares the same one rather than restating it.

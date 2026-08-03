@@ -344,6 +344,7 @@ fn colour_target(allocator: &Arc<Allocator>) -> Image {
             // validation error rather than a wrong result.
             usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
             mip_levels: 1,
+            array_layers: 1,
         },
     )
     .expect("the colour target must be creatable")

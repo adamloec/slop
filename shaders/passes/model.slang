@@ -9,6 +9,7 @@
 #include "lib/cluster.slang"
 #include "lib/environment.slang"
 #include "lib/light.slang"
+#include "lib/shadow.slang"
 
 // Per-material parameters, matching `MaterialGpu` in
 // `crates/slop-render/src/mesh.rs`.
@@ -91,8 +92,12 @@ struct PushConstants
     uint grid;
     // The directional light and the ambient term. A second index rather than
     // fields in the grid buffer: that one describes where the *cells* are, and
-    // the shadow passes at E5 will read this without caring about clustering.
+    // the shadow passes read this without caring about clustering.
     uint environment;
+    // The cascades, or `NO_SHADOWS` while a pass has none — which is every
+    // shadow render itself, since a cascade does not shadow itself.
+    uint shadows;
+    uint _pad;
 };
 
 [[vk::push_constant]] PushConstants g_push;
@@ -286,8 +291,31 @@ float4 fragmentMain(VertexOut input) : SV_Target
     EnvironmentGpu environment =
         loadFromBuffer<EnvironmentGpu>(BufferHandle(g_push.environment), 0);
 
+    // The view-space depth this fragment sits at, which both the cluster lookup
+    // and the cascade choice need. The projection puts `-z` in `w`, and a
+    // fragment shader's `SV_Position.w` holds its reciprocal.
+    float viewDepth = 1.0 / input.position.w;
+
+    // How much of the sun reaches here. One when there are no cascades, which
+    // is what a shadow render itself uses — a cascade cannot shadow itself, and
+    // reading the map it is currently writing would be a hazard as well as
+    // nonsense.
+    float sunlight = 1.0;
+
+    if (g_push.shadows != 0xFFFFFFFF)
+    {
+        ShadowsGpu shadows = loadFromBuffer<ShadowsGpu>(BufferHandle(g_push.shadows), 0);
+
+        sunlight = shadowFactor(
+            shadows,
+            input.worldPosition,
+            normal,
+            environment.sunDirection,
+            viewDepth);
+    }
+
     float3 lit = environment.ambient
-               + environment.sunColor * environment.sunIntensity
+               + environment.sunColor * environment.sunIntensity * sunlight
                      * saturate(dot(normal, environment.sunDirection));
 
     // Matching `slop_render::NO_CLUSTERS`. Not zero, because zero is a real heap
@@ -299,12 +327,8 @@ float4 fragmentMain(VertexOut input) : SV_Target
 
     ClusterGridGpu grid = loadFromBuffer<ClusterGridGpu>(BufferHandle(g_push.grid), 0);
 
-    // Which cell this fragment is in. The depth is the positive distance in
-    // front of the camera, which the projection put in `w` — and a fragment
-    // shader's `SV_Position.w` holds its reciprocal, so this is one divide
-    // rather than a view matrix this shader would otherwise have to carry.
-    float depth = 1.0 / input.position.w;
-    uint3 cell = clusterCellOf(grid, input.position.xy, depth);
+    // Which cell this fragment is in, from the depth computed above.
+    uint3 cell = clusterCellOf(grid, input.position.xy, viewDepth);
     uint cluster = clusterIndex(grid, cell);
 
     ClusterRange range = loadFromBuffer<ClusterRange>(BufferHandle(grid.ranges), cluster);

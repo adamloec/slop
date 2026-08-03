@@ -35,9 +35,9 @@ use slop_ecs::{Entity, World};
 use slop_editor::{DebugUi, InspectorState};
 use slop_math::Vec3;
 use slop_render::{
-    ClusterGrid, Clusters, ComputePass, DirectionalLight, Environment, FrameRenderer,
-    FrameRendererConfig, Graph, HdrTarget, Imported, ImportedBuffer, Lights, MeshRenderer,
-    PointLight, RenderPass, Tonemap, View,
+    CASCADES, ClusterGrid, Clusters, ComputePass, DepthTarget, DirectionalLight, Environment,
+    FrameRenderer, FrameRendererConfig, Graph, HdrTarget, Imported, ImportedBuffer, Lights,
+    MeshRenderer, PointLight, RenderPass, ShadowConfig, Shadows, Tonemap, View,
 };
 
 /// What the scene pass clears the HDR target to.
@@ -52,6 +52,18 @@ const CLEAR: [f32; 4] = [0.02, 0.02, 0.03, 1.0];
 /// heading towards rather than for the four this example places. A thousand
 /// rows is thirty-two kilobytes, which is not worth being careful about.
 const LIGHT_CAPACITY: u32 = 1024;
+
+/// What each cascade's pass is called.
+///
+/// `RenderPass::name` is `&'static str` so the pass visualiser can hold one
+/// without owning a string; a formatted name would need an allocation per pass
+/// per frame, which `docs/CONVENTIONS.md` §8 rules out of the frame loop.
+const CASCADE_NAMES: [&str; CASCADES] = [
+    "shadow cascade 0",
+    "shadow cascade 1",
+    "shadow cascade 2",
+    "shadow cascade 3",
+];
 use slop_rhi::{
     BindlessHeap, BindlessHeapConfig, ClearValue, Device, ImageAspect, ImageState, Load,
     ShaderModule, Stage,
@@ -112,6 +124,8 @@ struct Renderer {
     clusters: Clusters,
     /// The sun and the ambient term, one buffer per frame in flight.
     environment: Environment,
+    /// The four cascades the sun casts into.
+    shadows: Shadows,
     /// Which way the sun points. A field so E5's cascades and the shading read
     /// the same one, and so the inspector can eventually move it.
     sun: DirectionalLight,
@@ -237,6 +251,22 @@ impl Renderer {
         let environment = Environment::new(gpu.allocator(), &mut heap, frames.frames_in_flight())
             .map_err(|error| error.to_string())?;
 
+        // The shadowed range follows the model, as the clustering range does.
+        // A fixed hundred metres would put a cube entirely in cascade zero and
+        // leave most of Sponza past the last one.
+        let shadows = Shadows::new(
+            gpu.device(),
+            gpu.allocator(),
+            &mut heap,
+            ShadowConfig {
+                near: radius * 0.02,
+                far: radius * 4.0,
+                ..ShadowConfig::default()
+            },
+            frames.frames_in_flight(),
+        )
+        .map_err(|error| error.to_string())?;
+
         let cluster_module = load_shader(gpu.device(), &vfs, "cluster_build")?;
         let clusters = Clusters::new(
             gpu.device(),
@@ -283,6 +313,7 @@ impl Renderer {
             lights,
             clusters,
             environment,
+            shadows,
             sun: DirectionalLight::default(),
             placed_lights,
             heap,
@@ -348,6 +379,7 @@ impl Renderer {
         let lights = &mut self.lights;
         let clusters = &mut self.clusters;
         let environment = &mut self.environment;
+        let shadows = &mut self.shadows;
         let sun = self.sun;
         let placed_lights = &self.placed_lights;
         let ui = &mut self.ui;
@@ -363,44 +395,15 @@ impl Renderer {
                 let aspect =
                     frame.target.extent.width as f32 / frame.target.extent.height.max(1) as f32;
 
-                // **The frame as a declaration.** Nothing below names a barrier;
-                // the graph derives every one of them from what each pass says
-                // it touches. `docs/PLAN.md` §9.5 E3.
-                let mut graph = Graph::new();
-
-                let scene = graph.import(&Imported {
-                    name: "hdr",
-                    image: hdr.image(),
-                    view: hdr.view(),
-                    aspect: hdr.aspect(),
-                    extent: hdr.extent(),
-                    // Cleared by the pass that writes it, so its previous
-                    // contents are worth nothing.
-                    state: ImageState::UNDEFINED,
-                    final_state: None,
-                });
-
-                let screen = graph.import(&Imported {
-                    name: "swapchain",
-                    image: frame.target.image,
-                    view: frame.target.view,
-                    aspect: ImageAspect::Color,
-                    extent: frame.target.extent,
-                    state: frame.target.from,
-                    // Left in COLOR_ATTACHMENT: the overlay still draws over it
-                    // outside the graph, and `Frame::finish` ends the frame.
-                    final_state: None,
-                });
-
-                // Written here rather than before the frame opened, and that is
-                // the safe place rather than a convenient one: `render` waits
-                // for *this* slot's previous submission before handing the
-                // frame over, so the GPU has finished reading what was here.
+                // Everything the frame writes to GPU memory happens here, before
+                // the graph exists, and that is the safe place rather than a
+                // convenient one: `render` has already waited for *this* slot's
+                // previous submission, so the GPU has finished reading whatever
+                // was in these buffers.
                 //
-                // A failure is logged rather than propagated. The only way this
-                // fails is more lights than the buffer holds, and a scene that
-                // renders with the lighting it had is better than one that does
-                // not render.
+                // Failures are logged rather than propagated. Each is a
+                // capacity mistake, and a frame rendered with the data it had is
+                // better than no frame.
                 if let Err(failure) = lights.write(frame.slot, placed_lights) {
                     error!(error = %failure, "this frame's lights were not written");
                 }
@@ -426,12 +429,66 @@ impl Renderer {
                     error!(error = %failure, "this frame's environment was not written");
                 }
 
+                // The cascades are fitted to the *camera's* frustum, so they
+                // need the same view the frame is drawn with — see
+                // `slop_render::CascadeFit`.
+                if let Err(failure) = shadows.write(
+                    frame.slot,
+                    &sun,
+                    example_model::view_of(centre, angle, settings).inverse(),
+                    cluster_camera.tan_half_fov_y,
+                    aspect,
+                ) {
+                    error!(error = %failure, "this frame's cascades were not written");
+                }
+
+                // Declared before the graph, because the graph borrows the layer
+                // views and outlives nothing.
+                let cascade_map = shadows.map(frame.slot);
+                let cascade_views: [slop_rhi::ImageViewHandle; CASCADES] =
+                    std::array::from_fn(|index| cascade_map.layer_view(index as u32));
+                let cascade_cameras: [View; CASCADES] = std::array::from_fn(|index| {
+                    shadows.cascade_view(index, environment, frame.slot)
+                });
+
                 let view = View::new(
                     camera(aspect, centre, angle, settings),
                     environment,
                     clusters,
+                    Some(shadows),
                     frame.slot,
                 );
+
+                // **The frame as a declaration.** Nothing below names a barrier;
+                // the graph derives every one of them from what each pass says
+                // it touches. `docs/PLAN.md` §9.5 E3.
+                let mut graph = Graph::new();
+
+                let scene = graph.import(&Imported {
+                    name: "hdr",
+                    image: hdr.image(),
+                    view: hdr.view(),
+                    layer_views: &[],
+                    aspect: hdr.aspect(),
+                    extent: hdr.extent(),
+                    // Cleared by the pass that writes it, so its previous
+                    // contents are worth nothing.
+                    state: ImageState::UNDEFINED,
+                    final_state: None,
+                });
+
+                let screen = graph.import(&Imported {
+                    name: "swapchain",
+                    image: frame.target.image,
+                    view: frame.target.view,
+                    layer_views: &[],
+                    aspect: ImageAspect::Color,
+                    extent: frame.target.extent,
+                    state: frame.target.from,
+                    // Left in COLOR_ATTACHMENT: the overlay still draws over it
+                    // outside the graph, and `Frame::finish` ends the frame.
+                    final_state: None,
+                });
 
                 let [ranges, indices] = clusters.buffers(frame.slot);
 
@@ -463,11 +520,51 @@ impl Renderer {
                     |command| clusters.build(command, heap, frame.slot),
                 );
 
+                // The cascades, before anything that reads them. Four passes
+                // into four layers of one image — declared as one resource, so
+                // the graph barriers the image as a whole and each pass names
+                // only which layer it attaches.
+                let cascades = graph.import(&Imported {
+                    name: "shadow cascades",
+                    image: cascade_map.handle(),
+                    view: cascade_map.view(),
+                    layer_views: &cascade_views,
+                    aspect: cascade_map.aspect(),
+                    extent: cascade_map.extent(),
+                    // Every layer is cleared by the pass that writes it.
+                    state: ImageState::UNDEFINED,
+                    final_state: None,
+                });
+
+                for index in 0..CASCADES {
+                    graph.add(
+                        &RenderPass {
+                            name: CASCADE_NAMES[index],
+                            color: None,
+                            depth: Some(DepthTarget {
+                                image: cascades,
+                                load: Load::Clear(ClearValue::Depth(slop_rhi::DEPTH_CLEAR)),
+                                // Stored: the scene pass is what reads it.
+                                store: true,
+                                layer: index as u32,
+                            }),
+                            samples: &[],
+                            reads: &[],
+                        },
+                        // The same depth-only draws the prepass makes, from the
+                        // light's camera instead of the player's — so a cascade
+                        // needs no shader of its own. The view carries
+                        // `NO_SHADOWS`, because a cascade cannot shadow itself.
+                        move |pass| meshes.draw_depth(pass, heap, &cascade_cameras[index]),
+                    );
+                }
+
                 if let Some((image, depth_view, depth_aspect)) = meshes.depth() {
                     let depth = graph.import(&Imported {
                         name: "depth",
                         image,
                         view: depth_view,
+                        layer_views: &[],
                         aspect: depth_aspect,
                         extent: hdr.extent(),
                         state: ImageState::UNDEFINED,
@@ -480,13 +577,14 @@ impl Renderer {
                         &RenderPass {
                             name: "depth prepass",
                             color: None,
-                            depth: Some((
-                                depth,
-                                Load::Clear(ClearValue::Depth(slop_rhi::DEPTH_CLEAR)),
+                            depth: Some(DepthTarget {
+                                image: depth,
+                                load: Load::Clear(ClearValue::Depth(slop_rhi::DEPTH_CLEAR)),
                                 // Stored, unlike every depth attachment before
-                                // this one: the pass below is what reads it.
-                                true,
-                            )),
+                                // the prepass: the pass below is what reads it.
+                                store: true,
+                                layer: 0,
+                            }),
                             ..RenderPass::default()
                         },
                         // Unlit: the prepass shades nothing, so the lights in
@@ -498,20 +596,24 @@ impl Renderer {
                         &RenderPass {
                             name: "scene",
                             color: Some((scene, Load::Clear(ClearValue::Color(CLEAR)))),
-                            depth: Some((
-                                depth,
+                            depth: Some(DepthTarget {
+                                image: depth,
                                 // What the prepass wrote. Clearing here would
                                 // throw the prepass away and leave it pure cost.
-                                Load::Preserve,
+                                load: Load::Preserve,
                                 // Scratch from here on, so storing it would
                                 // cost bandwidth nothing reads.
-                                false,
-                            )),
+                                store: false,
+                                layer: 0,
+                            }),
                             // What the cluster build wrote. This is the
                             // declaration the compute-to-fragment barrier comes
                             // from.
                             reads: &[(ranges, Stage::Fragment), (indices, Stage::Fragment)],
-                            ..RenderPass::default()
+                            // And what the four cascade passes wrote. The graph
+                            // moves the whole array from depth attachment to
+                            // depth-read once, here.
+                            samples: &[(cascades, Stage::Fragment)],
                         },
                         |pass| meshes.draw(pass, heap, &view),
                     );

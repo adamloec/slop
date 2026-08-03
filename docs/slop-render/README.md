@@ -16,6 +16,7 @@ its passes, and the passes that draw a cooked model into HDR and resolve it.
                    │
                    ├──► Graph::add        — declare each pass and what it touches
                    │      ├─ cluster build  Clusters::build          ──► light lists
+                   │      ├─ shadow ×4      MeshRenderer::draw_depth ──► cascades
                    │      ├─ depth prepass  MeshRenderer::draw_depth
                    │      ├─ scene          MeshRenderer::draw       ──► HDR
                    │      └─ tonemap        Tonemap::draw            ──► swapchain
@@ -24,10 +25,11 @@ its passes, and the passes that draw a cooked model into HDR and resolve it.
                    └──► Frame::finish               — and what keeps it alive
 ```
 
-Nothing in that declaration names a barrier — including the one between the
-compute pass and the fragments that read what it wrote. The remaining passes of
-Stage A — shadows, IBL, the post stack — arrive across `PLAN.md` §9.5 E5–E7, and
-are added to the same declaration rather than to a call order.
+Nothing in that declaration names a barrier — not the one between the compute
+pass and the fragments that read what it wrote, and not the one moving the
+cascade array from depth attachment to depth-read. The rest of Stage A — IBL and
+the post stack — arrives across `PLAN.md` §9.5 E6–E7, added to the same
+declaration rather than to a call order.
 
 ## 2. Status
 
@@ -48,7 +50,8 @@ are added to the same declaration rather than to a call order.
 | Per-instance transforms in a storage buffer | Landed | M3, E4 |
 | Clustered forward+ — grid, build pass, forward pass reading it | Landed — see §14 | M3, E4 |
 | The directional light and ambient term as data — `Environment` | Landed | M3, E5 |
-| Cascaded shadows, IBL, post stack | Planned | M3, E5–E7 |
+| Cascaded shadow maps — `Shadows`, `ShadowConfig` | Landed — see §15 | M3, E5 |
+| IBL, post stack | Planned | M3, E6–E7 |
 | The overlay drawing inside the graph | **Absent** — the last caller of `Frame::finish` | M3 |
 | `MeshRenderer` decomposition — it is a god object today | Planned — `docs/reviews/2026-08-03.md` item 2 | M3 |
 | Automated coverage of the loop itself | **Absent** — see §6 | M3 |
@@ -78,6 +81,10 @@ are added to the same declaration rather than to a call order.
 | `ClusterGrid` | How the frustum is divided, and the depth-to-slice mapping |
 | `ClusterCamera` | What the build pass needs about the camera |
 | `Clusters` | The build pass and the per-cell light lists it fills |
+| `ShadowConfig` | Cascade resolution, range, and the two biases |
+| `Shadows` | The cascade array, and the matrices that fill it |
+| `CascadeFit` | One cascade's bounding sphere, snapped to the texel grid |
+| `DepthTarget` | A pass's depth attachment, including which array layer |
 
 ## 4. Why two calls and not one
 
@@ -408,3 +415,72 @@ radius from the same place.
   stop being square away from 16:9. That costs efficiency, not correctness.
 
 All three are in `PLAN.md` §6.1.
+
+## 15. Cascaded shadows, and three decisions worth knowing
+
+Four cascades at 2048² in one `D32Float` array. The view frustum is split by
+depth, each slice gets its own map, and texel density therefore follows how
+close a thing is to the camera rather than being spread evenly over everything.
+
+### A cascade needs no shader of its own
+
+It is `MeshRenderer::draw_depth` — the depth prepass — drawn from the light's
+camera instead of the player's. Same pipelines, same push constants, only a
+different view-projection in the `View`.
+
+That is not a saving so much as a guarantee: the alpha-masked cutout comes free
+and cannot drift, because a leaf that cuts a fragment away in the prepass cuts
+the same fragment away when casting. A separate shadow shader is exactly where
+that agreement breaks silently.
+
+The `View` a cascade renders with carries `NO_SHADOWS`, since a cascade cannot
+shadow itself — and sampling the array a pass is currently writing would be a
+hazard as well as nonsense.
+
+### The fit is a sphere, and it is snapped
+
+Fitting the orthographic box tightly to the slice's eight corners gives the best
+resolution and makes the box **change shape as the camera rotates** — so every
+shadow edge crawls. A bounding sphere has no orientation, so the box derived
+from it is the same size whichever way the camera faces.
+
+That alone is not enough: a box of constant size that *slides* by a third of a
+texel shimmers just as badly, so the centre is quantised to the texel grid.
+`snap_to_texel` uses `round` rather than `floor`, and that is not taste — a
+centre already on the grid comes back through the world-space round trip as
+`k ± ε`, and `floor` turns a negative ε into `k − 1`. The test
+`snapping_is_idempotent` is what caught it.
+
+### Two biases, because one cannot work
+
+A surface at a glancing angle to the light spans a range of depths inside one
+shadow texel, so comparing against the single recorded value makes half of it
+shadow itself. A constant bias large enough to clear that is far too large on a
+surface facing the light, where it detaches the shadow from its caster. So the
+bias scales with `1/dot(N, L)`, clamped, and a **normal offset** does the rest —
+moving the sample point along the normal sidesteps self-shadowing geometrically
+rather than by fudging the comparison.
+
+Reverse-Z matters here: `slop_math::orthographic` reverses depth, so larger is
+nearer and the map holds the maximum. The bias is *added* to the fragment. The
+opposite convention shadows everything except what should be shadowed.
+
+### What is not verified
+
+The fitting maths is tested on the CPU, and the reference images show shadows
+where a roof is overhead. But **"everything is shadowed" and "correctly
+shadowed" are not distinguishable from one interior view**, which is the same
+trap `tests/cluster.rs` §14 describes.
+
+What stands in for a test, and is not one:
+
+| Observation | What it rules out |
+|---|---|
+| The cube's reference is bit-identical | Shadowing surfaces nothing occludes |
+| Sponza's interior darkens under its roof | Cascades containing no depth at all |
+| An exterior render shows a sunlit roof, no acne | The comparison inverted; bias too small |
+
+A readback test over the depth array, as the cluster build has, is the thing
+that would actually settle it. `PLAN.md` §6.1 carries the row, along with the
+bias being tuned by eye on two scenes and the lack of blending across a cascade
+boundary.

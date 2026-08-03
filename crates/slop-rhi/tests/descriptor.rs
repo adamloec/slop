@@ -276,6 +276,7 @@ fn texture(allocator: &Arc<slop_rhi::Allocator>) -> Image {
             format: Format::Rgba8Unorm,
             usage: ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
             mip_levels: 1,
+            array_layers: 1,
         },
     )
     .expect("the texture must be creatable")

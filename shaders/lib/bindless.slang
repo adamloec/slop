@@ -40,6 +40,24 @@
 [[vk::binding(1, 0)]] SamplerState g_samplers[];
 [[vk::binding(2, 0)]] RWTexture2D<float4> g_storage_images[];
 
+// The sampled-image binding again, as arrays.
+//
+// Not a second descriptor and not a second slot: binding 0 holds image *views*,
+// and a view created with `VK_IMAGE_VIEW_TYPE_2D_ARRAY` is what this reads. The
+// same aliasing the storage buffers use above, and for the same reason -- the
+// shadow cascades at `docs/PLAN.md` §9.4 are one image with four layers, and a
+// shader sampling them needs a third coordinate that `Texture2D` has no room
+// for.
+//
+// A slot holds one or the other. Reading a plain 2D texture through this view,
+// or an array through `g_textures`, is a type mismatch nothing reports -- so a
+// handle's *kind* is tracked on the CPU side by `Handle<SampledImage>` and by
+// which accessor a shader reaches for.
+//
+// Slang warns "explicit binding overlap" on this pair, as it does for the
+// buffers. The cooker disables that warning by id.
+[[vk::binding(0, 0)]] Texture2DArray<float4> g_texture_arrays[];
+
 // Structured data a shader indexes: per-material parameters, per-instance
 // transforms, and the draw lists a GPU-driven pass builds (DESIGN.md 4.2).
 //
@@ -129,6 +147,17 @@ float4 sampleTexture(TextureHandle texture, SamplerHandle sampler, float2 uv)
 {
     return g_textures[NonUniformResourceIndex(texture.index)]
         .Sample(g_samplers[NonUniformResourceIndex(sampler.index)], uv);
+}
+
+// Sample one layer of an array texture, at the base mip level.
+//
+// `SampleLevel` rather than `Sample`: a shadow lookup happens inside branches
+// that differ between neighbouring fragments, where implicit derivatives are
+// undefined. The shadow map has one level anyway, so nothing is lost.
+float4 sampleTextureArrayLevel(TextureHandle texture, SamplerHandle sampler, float2 uv, uint layer)
+{
+    return g_texture_arrays[NonUniformResourceIndex(texture.index)]
+        .SampleLevel(g_samplers[NonUniformResourceIndex(sampler.index)], float3(uv, float(layer)), 0.0);
 }
 
 // Sample with an explicit mip level, for shaders outside a pixel stage where

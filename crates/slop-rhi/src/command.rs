@@ -639,7 +639,11 @@ impl CommandBuffer {
                 // validation reports as a layout mismatch far from here.
                 level_count: vk::REMAINING_MIP_LEVELS,
                 base_array_layer: 0,
-                layer_count: 1,
+                // Every layer, for the same reason as every level. A shadow
+                // cascade array is rendered a layer at a time and sampled whole,
+                // so a barrier covering only layer zero would leave the other
+                // three in whatever layout the render left them.
+                layer_count: vk::REMAINING_ARRAY_LAYERS,
             });
 
         let barriers = [barrier];

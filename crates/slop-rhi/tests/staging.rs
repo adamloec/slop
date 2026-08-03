@@ -202,6 +202,7 @@ fn a_texture_uploads_and_reads_back_unchanged() {
             format: Format::Rgba8Unorm,
             usage: ImageUsage::TRANSFER_DST | ImageUsage::TRANSFER_SRC,
             mip_levels: 1,
+            array_layers: 1,
         },
     )
     .expect("texture creation");
@@ -315,6 +316,7 @@ fn a_depth_image_clears_to_the_far_plane_at_zero() {
             format,
             usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::TRANSFER_SRC,
             mip_levels: 1,
+            array_layers: 1,
         },
     )
     .expect("depth image creation");

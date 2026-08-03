@@ -31,10 +31,21 @@ pub struct View {
     /// Heap index of the directional light and ambient term.
     ///
     /// A second index rather than fields in the grid: the grid describes where
-    /// the *cells* are, and E5's shadow passes read the sun's direction without
+    /// the *cells* are, and the shadow passes read the sun's direction without
     /// caring about clustering at all.
     pub environment: u32,
+    /// Heap index of the shadow cascades, or [`NO_SHADOWS`].
+    ///
+    /// `NO_SHADOWS` is what a shadow render itself uses: a cascade cannot
+    /// shadow itself, and sampling the map a pass is currently writing would be
+    /// a hazard as well as nonsense.
+    pub shadows: u32,
 }
+
+/// The shadow index meaning "there are no cascades".
+///
+/// Not zero, for the reason [`NO_CLUSTERS`] is not zero.
+pub const NO_SHADOWS: u32 = u32::MAX;
 
 /// The grid index meaning "there is no cluster grid".
 ///
@@ -50,17 +61,21 @@ impl View {
     /// letting a caller pass a bare index is the point: both are rings, and
     /// reading the wrong element of one is a corrupted frame rather than an
     /// error.
+    /// `shadows` is `None` for a pass that casts rather than receives — see
+    /// [`NO_SHADOWS`].
     #[must_use]
     pub fn new(
         view_projection: Mat4,
         environment: &Environment,
         clusters: &Clusters,
+        shadows: Option<&crate::Shadows>,
         slot: usize,
     ) -> Self {
         Self {
             view_projection,
             grid: clusters.handle(slot),
             environment: environment.handle(slot),
+            shadows: shadows.map_or(NO_SHADOWS, |shadows| shadows.handle(slot)),
         }
     }
 
@@ -75,6 +90,7 @@ impl View {
             view_projection,
             grid: NO_CLUSTERS,
             environment: environment.handle(slot),
+            shadows: NO_SHADOWS,
         }
     }
 }

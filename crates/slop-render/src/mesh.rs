@@ -146,7 +146,8 @@ struct PushConstants {
     material: u32,
     grid: u32,
     environment: u32,
-    _pad: [u32; 2],
+    shadows: u32,
+    _pad: u32,
 }
 
 /// Loads a cooked model and draws it.
@@ -684,6 +685,7 @@ impl MeshRenderer {
                 usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT,
                 // No chain: nothing samples a depth buffer at a distance.
                 mip_levels: 1,
+                array_layers: 1,
             },
         )?);
 
@@ -806,7 +808,8 @@ impl MeshRenderer {
             material: 0,
             grid: view.grid,
             environment: view.environment,
-            _pad: [0; 2],
+            shadows: view.shadows,
+            _pad: 0,
         })
     }
 
@@ -1049,6 +1052,7 @@ fn upload_texture(
             format: vulkan_format(texture.format),
             usage: ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
             mip_levels: texture.mip_levels,
+            array_layers: 1,
         },
     )?;
 

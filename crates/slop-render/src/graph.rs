@@ -71,10 +71,15 @@ use slop_rhi::{
 pub struct ImageId(usize);
 
 /// One image, and what the graph last left it in.
-struct Tracked {
+struct Tracked<'a> {
     name: &'static str,
     image: ImageHandle,
     view: ImageViewHandle,
+    /// Views of individual array layers, when this is an array image.
+    ///
+    /// Empty for an ordinary one, where [`view`](Self::view) already covers the
+    /// only layer there is.
+    layer_views: &'a [ImageViewHandle],
     aspect: ImageAspect,
     extent: Extent2D,
     /// What the last pass to touch it left it in. Starts at whatever the caller
@@ -95,6 +100,41 @@ struct Tracked {
     final_state: Option<ImageState>,
 }
 
+impl Tracked<'_> {
+    /// The view a pass attaching `layer` should bind.
+    ///
+    /// The whole-image view for an ordinary image, where it already covers the
+    /// only layer. Sampling always uses [`view`](Self::view); this is the
+    /// attachment side, which is the only place a layer is named.
+    ///
+    /// # Panics
+    ///
+    /// If `layer` is past the end, or is non-zero on an image with no layer
+    /// views. Both mean a pass named a layer the import does not have, which is
+    /// a programming error rather than a condition.
+    fn attachment_view(&self, layer: u32) -> ImageViewHandle {
+        if self.layer_views.is_empty() {
+            assert_eq!(
+                layer, 0,
+                "pass names layer {layer} of '{}', which was imported with no layer views",
+                self.name
+            );
+
+            return self.view;
+        }
+
+        let index = usize::try_from(layer).expect("a layer index fits in a usize");
+
+        *self.layer_views.get(index).unwrap_or_else(|| {
+            panic!(
+                "pass names layer {layer} of '{}', which has {}",
+                self.name,
+                self.layer_views.len()
+            )
+        })
+    }
+}
+
 /// An image the graph should track, but does not own.
 ///
 /// A struct rather than seven arguments, for `CONVENTIONS.md` §5.1's reason:
@@ -102,14 +142,24 @@ struct Tracked {
 /// It also stops `image` and `view` — two handles of different types that read
 /// the same at a call site — from being swapped silently.
 #[derive(Debug, Clone, Copy)]
-pub struct Imported {
+pub struct Imported<'a> {
     /// For diagnostics, the pass visualiser, and naming an intermediate a golden
     /// test wants to capture.
     pub name: &'static str,
     /// The image itself.
     pub image: ImageHandle,
-    /// A view covering it, which is what an attachment binds.
+    /// A view covering the whole thing, which is what a shader samples.
     pub view: ImageViewHandle,
+    /// Views of individual array layers, in order, or empty for an ordinary
+    /// image.
+    ///
+    /// A pass renders into one layer at a time — the four shadow cascades have
+    /// four different light matrices, so they are four draws either way — while
+    /// the state above is tracked for the image as a **whole**. That is the
+    /// reason this is a list here rather than four separate imports: four
+    /// imports of one image would each barrier it independently, and the second
+    /// transition from `UNDEFINED` would discard what the first pass rendered.
+    pub layer_views: &'a [ImageViewHandle],
     /// Which aspects a barrier over it must name.
     pub aspect: ImageAspect,
     /// Its size, which is also the render area of a pass writing it.
@@ -123,6 +173,26 @@ pub struct Imported {
     /// which one touched this last and can emit the transition without anyone
     /// deciding whose job it was.
     pub final_state: Option<ImageState>,
+}
+
+/// A pass's depth attachment.
+///
+/// A struct rather than a tuple because it grew a fourth field, and
+/// `(id, load, store, layer)` at a call site is four positional values of which
+/// two are the same type.
+#[derive(Debug, Clone, Copy)]
+pub struct DepthTarget {
+    /// The tracked image.
+    pub image: ImageId,
+    /// What to do with its existing contents.
+    pub load: Load,
+    /// Whether the result is kept after the pass.
+    pub store: bool,
+    /// Which array layer to render into.
+    ///
+    /// Zero for an ordinary image. A shadow cascade is one layer of a four-layer
+    /// array, and each is rendered by its own pass with its own light matrix.
+    pub layer: u32,
 }
 
 /// What a pass does to the resources it names.
@@ -140,8 +210,8 @@ pub struct RenderPass<'a> {
     /// `None` with neither is a mistake, and `execute` panics rather than
     /// recording draws that could not land anywhere.
     pub color: Option<(ImageId, Load)>,
-    /// The depth attachment, how to treat it, and whether to keep the result.
-    pub depth: Option<(ImageId, Load, bool)>,
+    /// The depth attachment, if any.
+    pub depth: Option<DepthTarget>,
     /// Resources this pass samples, and the stage that samples them.
     ///
     /// The stage is not decoration: a barrier ordering a write against a
@@ -176,7 +246,7 @@ impl std::fmt::Debug for RenderPass<'_> {
         f.debug_struct("RenderPass")
             .field("name", &self.name)
             .field("color", &self.color.map(|(id, _)| id))
-            .field("depth", &self.depth.map(|(id, _, _)| id))
+            .field("depth", &self.depth.map(|depth| depth.image))
             .field("samples", &self.samples.len())
             .field("reads", &self.reads.len())
             .finish()
@@ -242,7 +312,7 @@ enum Recorded<'a> {
     Render {
         name: &'static str,
         color: Option<(ImageId, Load)>,
-        depth: Option<(ImageId, Load, bool)>,
+        depth: Option<DepthTarget>,
         samples: Vec<(ImageId, Stage)>,
         reads: Vec<(BufferId, Stage)>,
         record: Box<dyn FnOnce(&mut Pass<'_>) + 'a>,
@@ -274,7 +344,7 @@ impl Recorded<'_> {
 /// graph that could be replayed would have to reset every tracked state and the
 /// declarations are cheap to rebuild.
 pub struct Graph<'a> {
-    resources: Vec<Tracked>,
+    resources: Vec<Tracked<'a>>,
     buffers: Vec<TrackedBuffer>,
     passes: Vec<Recorded<'a>>,
 }
@@ -327,11 +397,12 @@ impl<'a> Graph<'a> {
     }
 
     /// Track an image the graph does not own.
-    pub fn import(&mut self, resource: &Imported) -> ImageId {
+    pub fn import(&mut self, resource: &Imported<'a>) -> ImageId {
         self.resources.push(Tracked {
             name: resource.name,
             image: resource.image,
             view: resource.view,
+            layer_views: resource.layer_views,
             aspect: resource.aspect,
             extent: resource.extent,
             state: resource.state,
@@ -423,7 +494,9 @@ impl<'a> Graph<'a> {
                     // transitions is what keeps the emitted order from
                     // depending on how the declaration happened to be written.
                     for (id, stage) in &samples {
-                        self.transition(command, *id, ImageState::shader_read(*stage));
+                        let wanted = self.sampled_state(*id, *stage);
+
+                        self.transition(command, *id, wanted);
                     }
 
                     for (id, stage) in &reads {
@@ -434,8 +507,8 @@ impl<'a> Graph<'a> {
                         self.transition(command, id, ImageState::COLOR_ATTACHMENT);
                     }
 
-                    if let Some((id, _, _)) = depth {
-                        self.transition(command, id, ImageState::DEPTH_ATTACHMENT);
+                    if let Some(target) = depth {
+                        self.transition(command, target.image, ImageState::DEPTH_ATTACHMENT);
                     }
 
                     // The render area comes from whichever attachment there is.
@@ -443,8 +516,9 @@ impl<'a> Graph<'a> {
                     // a source as a colour target's — Vulkan requires the two to
                     // cover the area either way.
                     let Some(extent) = color
-                        .or(depth.map(|(id, load, _)| (id, load)))
-                        .map(|(id, _)| self.resources[id.0].extent)
+                        .map(|(id, _)| id)
+                        .or(depth.map(|target| target.image))
+                        .map(|id| self.resources[id.0].extent)
                     else {
                         // Neither colour nor depth is not a pass, it is a
                         // mistake: nothing it drew could go anywhere. Named
@@ -457,10 +531,10 @@ impl<'a> Graph<'a> {
                         load,
                     });
 
-                    let depth = depth.map(|(id, load, store)| DepthAttachment {
-                        view: self.resources[id.0].view,
-                        load,
-                        store,
+                    let depth = depth.map(|target| DepthAttachment {
+                        view: self.resources[target.image.0].attachment_view(target.layer),
+                        load: target.load,
+                        store: target.store,
                     });
 
                     let mut rendering = command.begin_rendering(&Attachments {
@@ -481,7 +555,9 @@ impl<'a> Graph<'a> {
                     ..
                 } => {
                     for id in &samples {
-                        self.transition(command, *id, ImageState::shader_read(Stage::Compute));
+                        let wanted = self.sampled_state(*id, Stage::Compute);
+
+                        self.transition(command, *id, wanted);
                     }
 
                     for id in &writes_images {
@@ -521,6 +597,24 @@ impl<'a> Graph<'a> {
             if let Some(final_state) = self.buffers[index].final_state {
                 self.transition_buffer(command, BufferId(index), final_state);
             }
+        }
+    }
+
+    /// What state a resource has to be in to be sampled at `stage`.
+    ///
+    /// **Derived from the aspect, not asked of the caller.** A depth image being
+    /// sampled wants `DEPTH_READ_ONLY_OPTIMAL`, not the general shader-read
+    /// layout — and the bindless heap's descriptor for it was registered with
+    /// the same, so a pass transitioning it to the wrong one is a validation
+    /// error at draw time rather than at declaration. The graph already knows
+    /// which aspect each resource has, so nothing is gained by making a caller
+    /// say it again and something is lost when they say it differently.
+    fn sampled_state(&self, id: ImageId, stage: Stage) -> ImageState {
+        match self.resources[id.0].aspect {
+            ImageAspect::Depth | ImageAspect::DepthStencil | ImageAspect::Stencil => {
+                ImageState::depth_read(stage)
+            }
+            ImageAspect::Color => ImageState::shader_read(stage),
         }
     }
 
@@ -589,11 +683,12 @@ mod tests {
     /// state machine it drives rather than through recorded commands. What is
     /// asserted is the decision, which is the part that was previously a
     /// convention.
-    fn tracked(state: ImageState) -> Tracked {
+    fn tracked(state: ImageState) -> Tracked<'static> {
         Tracked {
             name: "test",
             image: ImageHandle::default(),
             view: ImageViewHandle::default(),
+            layer_views: &[],
             aspect: ImageAspect::Color,
             extent: Extent2D {
                 width: 1,
@@ -663,6 +758,7 @@ mod tests {
             name: "target",
             image: ImageHandle::default(),
             view: ImageViewHandle::default(),
+            layer_views: &[],
             aspect: ImageAspect::Color,
             extent: Extent2D {
                 width: 4,

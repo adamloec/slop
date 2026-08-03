@@ -258,6 +258,7 @@ impl Scene {
                 format: depth_format,
                 usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT,
                 mip_levels: 1,
+                array_layers: 1,
             },
         )
         .map_err(|error| error.to_string())?;
@@ -429,6 +430,7 @@ impl Scene {
                 format: self.depth.format(),
                 usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT,
                 mip_levels: 1,
+                array_layers: 1,
             },
         )
         .map_err(|error| error.to_string())?;
@@ -711,6 +713,7 @@ fn upload_texture(
             format: vulkan_format(cooked.format),
             usage: ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
             mip_levels: cooked.mip_levels,
+            array_layers: 1,
         },
     )
     .map_err(|error| error.to_string())?;

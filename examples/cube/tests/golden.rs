@@ -337,6 +337,7 @@ impl Headless {
                 format: FORMAT,
                 usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
                 mip_levels: 1,
+                array_layers: 1,
             },
         )
         .map_err(|error| error.to_string())?;

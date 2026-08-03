@@ -86,6 +86,7 @@ impl HdrTarget {
                 // No chain: nothing samples this at a distance, it is read
                 // one-to-one by the pass that resolves it.
                 mip_levels: 1,
+                array_layers: 1,
             },
         )?;
 

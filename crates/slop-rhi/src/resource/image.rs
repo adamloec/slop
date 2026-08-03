@@ -34,6 +34,18 @@ pub struct ImageConfig<'a> {
     /// one — that shimmer on a distant floor is undersampling, and mips are the
     /// prefiltered answer to it.
     pub mip_levels: u32,
+    /// How many array layers to allocate.
+    ///
+    /// One for an ordinary image. More makes this a **texture array** — several
+    /// same-sized images a shader indexes with a third coordinate, which is what
+    /// `docs/PLAN.md` §9.4's four shadow cascades are. An array rather than four
+    /// separate images because the shader picks a cascade at runtime: one handle
+    /// and a layer index, instead of four handles and a branch.
+    ///
+    /// Not a 3D image, which is a different thing: layers do not filter into one
+    /// another, and a shadow cascade blended with its neighbour would be
+    /// nonsense.
+    pub array_layers: u32,
 }
 
 impl ImageConfig<'_> {
@@ -43,6 +55,11 @@ impl ImageConfig<'_> {
     /// message about the image rather than about the caller.
     fn levels(&self) -> u32 {
         self.mip_levels.max(1)
+    }
+
+    /// Layers, floored at one, for the same reason.
+    fn layers(&self) -> u32 {
+        self.array_layers.max(1)
     }
 }
 
@@ -54,8 +71,16 @@ impl ImageConfig<'_> {
 /// written per-level — will grow an explicit accessor; that is a real case, and
 /// not one M0 has.
 pub struct Image {
-    // Drop order: the view must be destroyed before the image it reads.
+    // Drop order: the views must be destroyed before the image they read.
     view: vk::ImageView,
+    /// One view per layer, for an array image, so a single layer can be an
+    /// attachment while the whole array stays samplable.
+    ///
+    /// **Empty for a single-layer image**, where the whole-image view above is
+    /// already exactly a view of layer zero — not approximately, exactly, so
+    /// [`layer_view`](Image::layer_view) returning it is not a fallback that
+    /// might be wrong.
+    layer_views: Vec<vk::ImageView>,
     handle: vk::Image,
     // `Option` so `Drop` can move the allocation back to the allocator. Always
     // `Some` between construction and drop.
@@ -93,7 +118,7 @@ impl Image {
                 depth: 1,
             })
             .mip_levels(config.levels())
-            .array_layers(1)
+            .array_layers(config.layers())
             .samples(vk::SampleCountFlags::TYPE_1)
             // OPTIMAL, not LINEAR. Linear tiling is mappable and is the reason
             // people reach for it, but support is narrow enough that a format
@@ -142,16 +167,23 @@ impl Image {
             return Err(error.into());
         }
 
+        // The whole image. `TYPE_2D_ARRAY` when there are layers, because that
+        // is what a shader samples with a third coordinate — a `TYPE_2D` view of
+        // a multi-layer image would see only the first.
         let view_info = vk::ImageViewCreateInfo::default()
             .image(handle)
-            .view_type(vk::ImageViewType::TYPE_2D)
+            .view_type(if config.layers() > 1 {
+                vk::ImageViewType::TYPE_2D_ARRAY
+            } else {
+                vk::ImageViewType::TYPE_2D
+            })
             .format(config.format.to_vk())
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: aspect_of(config.format).to_vk(),
                 base_mip_level: 0,
                 level_count: config.levels(),
                 base_array_layer: 0,
-                layer_count: 1,
+                layer_count: config.layers(),
             });
 
         // SAFETY: `handle` has memory bound and `view_info` is fully
@@ -166,8 +198,49 @@ impl Image {
             }
         };
 
+        // One `TYPE_2D` view per layer, so a layer can be a render attachment
+        // while the array view above stays samplable. Skipped entirely for a
+        // single-layer image, where `view` already *is* the view of layer zero.
+        let mut layer_views = Vec::new();
+
+        if config.layers() > 1 {
+            for layer in 0..config.layers() {
+                let layer_info = vk::ImageViewCreateInfo::default()
+                    .image(handle)
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(config.format.to_vk())
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: aspect_of(config.format).to_vk(),
+                        base_mip_level: 0,
+                        level_count: config.levels(),
+                        base_array_layer: layer,
+                        layer_count: 1,
+                    });
+
+                // SAFETY: as above; `handle` has memory bound and `layer_info`
+                // is fully initialized.
+                match unsafe { device.create_image_view(&layer_info, None) } {
+                    Ok(created) => layer_views.push(created),
+                    Err(error) => {
+                        // SAFETY: every view in `layer_views` and `view` was
+                        // created from this device and none has been used.
+                        unsafe {
+                            for created in &layer_views {
+                                device.destroy_image_view(*created, None);
+                            }
+                            device.destroy_image_view(view, None);
+                            device.destroy_image(handle, None);
+                        }
+                        allocator.free(allocation);
+                        return Err(error.into());
+                    }
+                }
+            }
+        }
+
         Ok(Self {
             view,
+            layer_views,
             handle,
             allocation: Some(allocation),
             allocator: Arc::clone(allocator),
@@ -199,6 +272,36 @@ impl Image {
     /// Which aspect this image's format carries, for barriers and copies.
     pub fn aspect(&self) -> ImageAspect {
         aspect_of(self.format)
+    }
+
+    /// How many array layers this was allocated with.
+    pub fn layers(&self) -> u32 {
+        // One, or one view per layer. See `layer_views`.
+        u32::try_from(self.layer_views.len()).unwrap_or(1).max(1)
+    }
+
+    /// A view of one layer, for use as a render attachment.
+    ///
+    /// [`view`](Image::view) is the whole image and is what a shader samples;
+    /// this is a single layer and is what a pass renders into. Rendering into
+    /// the array view instead would need a layered pass, which is a different
+    /// feature and one nothing here wants: the four cascades have four different
+    /// light matrices, so they are four draws either way.
+    ///
+    /// # Panics
+    ///
+    /// If `layer` is past the end. `layer_views` is sized at creation, so this
+    /// is a programming error rather than a condition.
+    pub fn layer_view(&self, layer: u32) -> ImageViewHandle {
+        if self.layer_views.is_empty() {
+            assert_eq!(layer, 0, "a single-layer image has no layer {layer}");
+
+            return ImageViewHandle(self.view);
+        }
+
+        ImageViewHandle(
+            self.layer_views[usize::try_from(layer).expect("a layer index fits in a usize")],
+        )
     }
 }
 
@@ -316,6 +419,10 @@ impl Drop for Image {
         // allocator holds an `Arc` to it. That no GPU work still references
         // them is the caller's obligation.
         unsafe {
+            for layer in &self.layer_views {
+                device.destroy_image_view(*layer, None);
+            }
+
             device.destroy_image_view(self.view, None);
             device.destroy_image(self.handle, None);
         }

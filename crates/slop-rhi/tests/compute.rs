@@ -109,6 +109,7 @@ fn a_compute_shader_writes_every_texel_it_was_dispatched_for() {
             // back out. Neither implies the other.
             usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
             mip_levels: 1,
+            array_layers: 1,
         },
     )
     .expect("a storage image must be creatable");
@@ -270,6 +271,7 @@ fn a_format_that_cannot_be_stored_to_is_refused() {
             format: Format::Bc7Unorm,
             usage: ImageUsage::STORAGE,
             mip_levels: 1,
+            array_layers: 1,
         },
     )
     .expect_err("a block-compressed storage image must be refused");

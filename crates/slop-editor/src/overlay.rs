@@ -580,6 +580,7 @@ fn upload_image(
             // it never samples below level zero — and the font atlas would blur
             // rather than sharpen if it did.
             mip_levels: 1,
+            array_layers: 1,
         },
     )?;
 

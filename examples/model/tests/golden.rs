@@ -273,6 +273,14 @@ fn loading_a_second_time_replaces_rather_than_accumulates() {
 /// Where Sponza's cooked model lives, when it has been fetched.
 const SPONZA: &str = "models/vendor/sponza/Sponza.model";
 
+/// What each cascade's pass is called, matching the windowed viewer.
+const CASCADE_NAMES: [&str; slop_render::CASCADES] = [
+    "shadow cascade 0",
+    "shadow cascade 1",
+    "shadow cascade 2",
+    "shadow cascade 3",
+];
+
 /// How close Sponza's camera sits, as a fraction of what framing it would use.
 ///
 /// **Inside the building, not outside it**, and that is the whole value of this
@@ -378,6 +386,9 @@ struct Headless {
     /// The sun and ambient term, with the values the shader used to hold as
     /// constants — see `DirectionalLight::default`.
     environment: slop_render::Environment,
+    /// The same four cascades the window renders, so the references cover the
+    /// shadow path rather than a simplified stand-in.
+    shadows: slop_render::Shadows,
     placed_lights: Vec<slop_render::PointLight>,
     heap: BindlessHeap,
     readback: Buffer,
@@ -466,6 +477,7 @@ impl Headless {
                 format: FORMAT,
                 usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
                 mip_levels: 1,
+                array_layers: 1,
             },
         )
         .map_err(|error| error.to_string())?;
@@ -493,6 +505,19 @@ impl Headless {
 
         let environment = slop_render::Environment::new(allocator, &mut heap, 1)
             .map_err(|error| error.to_string())?;
+
+        let shadows = slop_render::Shadows::new(
+            device,
+            allocator,
+            &mut heap,
+            slop_render::ShadowConfig {
+                near: radius * 0.02,
+                far: radius * 4.0,
+                ..slop_render::ShadowConfig::default()
+            },
+            1,
+        )
+        .map_err(|error| error.to_string())?;
 
         let cluster_module = ShaderModule::from_bytes(
             device,
@@ -541,6 +566,7 @@ impl Headless {
             lights,
             clusters,
             environment,
+            shadows,
             placed_lights,
             heap,
             readback,
@@ -612,35 +638,8 @@ impl Headless {
         let angle = frame.number as f32 * self.settings.radians_per_frame;
         let aspect = self.target.extent().width as f32 / self.target.extent().height as f32;
 
-        // The same declaration the windowed viewer makes, minus the overlay.
-        // Nothing here names a barrier.
-        let mut graph = slop_render::Graph::new();
-
-        let scene = graph.import(&slop_render::Imported {
-            name: "hdr",
-            image: self.hdr.image(),
-            view: self.hdr.view(),
-            aspect: self.hdr.aspect(),
-            extent: self.hdr.extent(),
-            state: ImageState::UNDEFINED,
-            final_state: None,
-        });
-
-        let screen = graph.import(&slop_render::Imported {
-            name: "readback target",
-            image: self.target.handle(),
-            view: self.target.view(),
-            aspect: self.target.aspect(),
-            extent: self.target.extent(),
-            state: frame.target.from,
-            // Where the window would ask for PRESENT, this asks for
-            // TRANSFER_SRC — and the graph emits it because it knows which pass
-            // touched the image last. That is the arbitration `frame.finish`
-            // used to do by convention, and it is why this test no longer calls
-            // it.
-            final_state: Some(ImageState::TRANSFER_SRC),
-        });
-
+        // Every per-frame write, before the graph exists — the same order the
+        // windowed viewer uses, and for the same reason.
         self.lights
             .write(0, &self.placed_lights)
             .expect("the light rig fits the buffer it was built for");
@@ -665,12 +664,97 @@ impl Headless {
             )
             .expect("the environment must be writable");
 
+        self.shadows
+            .write(
+                0,
+                &slop_render::DirectionalLight::default(),
+                example_model::view_of(self.centre, angle, self.settings).inverse(),
+                cluster_camera.tan_half_fov_y,
+                aspect,
+            )
+            .expect("the cascades must be writable");
+
+        // Before the graph, which borrows them.
+        let cascade_map = self.shadows.map(0);
+        let cascade_views: [slop_rhi::ImageViewHandle; slop_render::CASCADES] =
+            std::array::from_fn(|index| cascade_map.layer_view(index as u32));
+        let cascade_cameras: [slop_render::View; slop_render::CASCADES] =
+            std::array::from_fn(|index| self.shadows.cascade_view(index, &self.environment, 0));
+
         let view = slop_render::View::new(
             camera(aspect, self.centre, angle, self.settings),
             &self.environment,
             &self.clusters,
+            Some(&self.shadows),
             0,
         );
+
+        // The same declaration the windowed viewer makes, minus the overlay.
+        // Nothing here names a barrier.
+        let mut graph = slop_render::Graph::new();
+
+        let scene = graph.import(&slop_render::Imported {
+            name: "hdr",
+            image: self.hdr.image(),
+            view: self.hdr.view(),
+            layer_views: &[],
+            aspect: self.hdr.aspect(),
+            extent: self.hdr.extent(),
+            state: ImageState::UNDEFINED,
+            final_state: None,
+        });
+
+        let screen = graph.import(&slop_render::Imported {
+            name: "readback target",
+            image: self.target.handle(),
+            view: self.target.view(),
+            layer_views: &[],
+            aspect: self.target.aspect(),
+            extent: self.target.extent(),
+            state: frame.target.from,
+            // Where the window would ask for PRESENT, this asks for
+            // TRANSFER_SRC — and the graph emits it because it knows which pass
+            // touched the image last. That is the arbitration `frame.finish`
+            // used to do by convention, and it is why this test no longer calls
+            // it.
+            final_state: Some(ImageState::TRANSFER_SRC),
+        });
+
+        // The cascades, before anything that reads them — four passes into four
+        // layers of one image.
+        let cascades = graph.import(&slop_render::Imported {
+            name: "shadow cascades",
+            image: cascade_map.handle(),
+            view: cascade_map.view(),
+            layer_views: &cascade_views,
+            aspect: cascade_map.aspect(),
+            extent: cascade_map.extent(),
+            state: ImageState::UNDEFINED,
+            final_state: None,
+        });
+
+        for index in 0..slop_render::CASCADES {
+            let meshes = &self.meshes;
+            let heap = &self.heap;
+
+            graph.add(
+                &slop_render::RenderPass {
+                    name: CASCADE_NAMES[index],
+                    color: None,
+                    depth: Some(slop_render::DepthTarget {
+                        image: cascades,
+                        load: slop_rhi::Load::Clear(slop_rhi::ClearValue::Depth(
+                            slop_rhi::DEPTH_CLEAR,
+                        )),
+                        store: true,
+                        layer: index as u32,
+                    }),
+                    samples: &[],
+                    reads: &[],
+                },
+                move |pass| meshes.draw_depth(pass, heap, &cascade_cameras[index]),
+            );
+        }
 
         let [cluster_ranges, cluster_indices] = self.clusters.buffers(0);
 
@@ -710,6 +794,7 @@ impl Headless {
                 name: "depth",
                 image,
                 view: depth_view,
+                layer_views: &[],
                 aspect: depth_aspect,
                 extent: self.hdr.extent(),
                 state: ImageState::UNDEFINED,
@@ -732,11 +817,14 @@ impl Headless {
                 &slop_render::RenderPass {
                     name: "depth prepass",
                     color: None,
-                    depth: Some((
-                        depth,
-                        slop_rhi::Load::Clear(slop_rhi::ClearValue::Depth(slop_rhi::DEPTH_CLEAR)),
-                        true,
-                    )),
+                    depth: Some(slop_render::DepthTarget {
+                        image: depth,
+                        load: slop_rhi::Load::Clear(slop_rhi::ClearValue::Depth(
+                            slop_rhi::DEPTH_CLEAR,
+                        )),
+                        store: true,
+                        layer: 0,
+                    }),
                     ..slop_render::RenderPass::default()
                 },
                 |pass| meshes.draw_depth(pass, heap, &view),
@@ -749,12 +837,17 @@ impl Headless {
                         scene,
                         slop_rhi::Load::Clear(slop_rhi::ClearValue::Color([0.02, 0.02, 0.03, 1.0])),
                     )),
-                    depth: Some((depth, slop_rhi::Load::Preserve, false)),
+                    depth: Some(slop_render::DepthTarget {
+                        image: depth,
+                        load: slop_rhi::Load::Preserve,
+                        store: false,
+                        layer: 0,
+                    }),
                     reads: &[
                         (cluster_ranges, slop_rhi::Stage::Fragment),
                         (cluster_indices, slop_rhi::Stage::Fragment),
                     ],
-                    ..slop_render::RenderPass::default()
+                    samples: &[(cascades, slop_rhi::Stage::Fragment)],
                 },
                 |pass| meshes.draw(pass, heap, &view),
             );
