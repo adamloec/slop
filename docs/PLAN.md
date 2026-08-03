@@ -1,8 +1,9 @@
 # Slop Engine — Implementation Plan & Session Handoff
 
 **Status:** M0, M1 and M2 complete. M3 — the renderer, Stage A — is next and has
-not started. §9.2 item E has the ordering: the render graph first, then clustered
-forward+, shadows, IBL, HDR/tonemap and the post stack.
+not started. **§9.4 specifies the target frame, §9.5 the order, §9.6 what done
+means.** The first work is E1: float colour formats and a compute pipeline in
+`slop-rhi`, neither of which exists.
 **Last updated:** 2026-08-03
 
 This document is the working companion to `DESIGN.md`. **`DESIGN.md` is
@@ -140,10 +141,11 @@ configurations, Vulkan validation reporting nothing, and every crate containing
 `unsafe` passing under Miri — `slop-ecs` under both Stacked and Tree Borrows.
 
 Two things this section is not allowed to imply. **A milestone being complete is
-not the codebase being clean:** `CONSIDERATIONS.md` carries a review of the tree
-at this point, and §6.1 below is the register of what is standing in for
-something else. And **Linux has never been run** — every portability claim in
-this repository is untested, standing since M0.
+not the codebase being clean:** `docs/reviews/2026-08-03.md` is a full read of
+the tree at this point — twelve findings, all acted on — and §6.1 below is the
+register of what is standing in for something else. And **Linux has never been
+run** — every portability claim in this repository is untested, standing since
+M0.
 
 ### 3.0 M1 — reflection, the ECS, and serialization
 
@@ -747,7 +749,7 @@ than a register that reads as audited when it is not.
 because the half that remains is the one it names.** `slop-render` batches every
 transfer for one `MeshRenderer::load` into a single command buffer rather than
 submitting and blocking per vertex buffer, per index buffer and per texture —
-which was `CONSIDERATIONS.md` item 2's fifth defect. That is still one blocking
+which was `docs/reviews/2026-08-03.md` item 2's fifth defect. That is still one blocking
 submit at the end, and `examples/cube/src/scene.rs` still submits per resource.
 The async transfer queue with a staging ring is what closes it.
 
@@ -759,14 +761,14 @@ freely, never seams.
 
 **This table used to claim there were no hacks in the tree. That claim is
 withdrawn.** A hack is a shortcut that makes the right thing harder later, and
-the 2026-08-03 review in `CONSIDERATIONS.md` found several — Vulkan types leaking
-through every layer above the RHI, a `MeshRenderer` whose `load` is not safe to
-call twice, and a duplicated uploader in `examples/cube` that has already drifted
-from its counterpart by one barrier. **The register is not the whole debt.** It
-records what was deferred *deliberately, behind a seam*; `CONSIDERATIONS.md`
-records what was found afterwards. The vocabulary here — Replaced, Extended,
-Rebuilt — makes every row read as scheduling, which is exactly how a register
-turns into a story about not having debt. Read both.
+`docs/reviews/2026-08-03.md` found several — Vulkan types leaking through every
+layer above the RHI, a `MeshRenderer` whose `load` was not safe to call twice,
+and a duplicated uploader in `examples/cube` that had already drifted from its
+counterpart by one barrier. **The register is not the whole debt.** It records
+what was deferred *deliberately, behind a seam*; a review records what was found
+afterwards. The vocabulary here — Replaced, Extended, Rebuilt — makes every row
+read as scheduling, which is exactly how a register turns into a story about not
+having debt. Read both.
 
 **All three of those examples have since been fixed**, along with the rest of
 that review's twelve items — the `vk::` leak is at zero references above
@@ -787,12 +789,13 @@ nothing about the tree.
 | Mip generation is a box filter | `slop-cook/src/texture_import.rs` | A Kaiser or Mitchell kernel, per asset | **Replaced.** What hardware would do and what every pipeline starts with. Better kernels trade sharpness against ringing, which is a per-asset judgement — the same missing import settings. | M3 |
 | `Gpu` ties one window to one device | `slop-app/src/gpu.rs` | A device shared by several surfaces | **Extended.** Right for a game, which has one window; wrong for the editor (`DESIGN.md` §2.12), where a detached viewport is a second surface on the *same* device — re-running bring-up would create a second device and make sharing a texture between panels impossible. The split is `Gpu` keeping instance/device/allocator and handing out surfaces, and it is additive: `Gpu::new` stays the one-window path. Not done now because the editor does not exist and a two-window API designed without one is a guess. | M6 |
 | `FrameRenderer` has no automated test | `slop-render` | A smoke test that drives a real window, or a headless path that fakes a swapchain | **Extended.** Everything it does needs a surface, a surface needs a window, and a test harness has no event loop — the cube's golden renders headlessly and so covers `Scene`, not this. The check today is running both examples under `SLOP_FRAMES` with validation on, which is a command someone has to type. **The resize path has no coverage at all**, automated or otherwise, because `SLOP_FRAMES` never resizes the window. | M3 |
-| Scene setup — uploads, pipeline, draw recording | `examples/cube/src/scene.rs` | `slop-render` + `slop-asset` | **Rebuilt.** It proves the pieces fit together; it is not the shape an engine wants. One hard-coded pipeline, a sampler and a heap owned by the scene, and push constants restated from the shader — all of it example-grade on purpose, none of it moves. (`CARGO_MANIFEST_DIR` is no longer among them: `Vfs::discover` walks up for a cooked cache, which works the same in a source tree and beside a shipped binary.) **Exit condition: the material system absorbs this rather than becoming a third copy of it.** `CONSIDERATIONS.md` item 3 is what that guards against — this file's uploader and `slop-render`'s had already disagreed about a staging barrier, and both passed their golden tests, so the suite could not tell a redundant barrier from a missing one. That question is settled and recorded (`MemoryLocation::Upload`), which is the part that could not wait for M3; the duplication itself still can. | M3 |
+| Scene setup — uploads, pipeline, draw recording | `examples/cube/src/scene.rs` | `slop-render` + `slop-asset` | **Rebuilt.** It proves the pieces fit together; it is not the shape an engine wants. One hard-coded pipeline, a sampler and a heap owned by the scene, and push constants restated from the shader — all of it example-grade on purpose, none of it moves. (`CARGO_MANIFEST_DIR` is no longer among them: `Vfs::discover` walks up for a cooked cache, which works the same in a source tree and beside a shipped binary.) **Exit condition: the material system absorbs this rather than becoming a third copy of it.** `docs/reviews/2026-08-03.md` item 3 is what that guards against — this file's uploader and `slop-render`'s had already disagreed about a staging barrier, and both passed their golden tests, so the suite could not tell a redundant barrier from a missing one. That question is settled and recorded (`MemoryLocation::Upload`), which is the part that could not wait for M3; the duplication itself still can. | M3 |
 | `VertexBinding` cannot express a buffer format that differs from the shader's type | `slop-render/src/vertex.rs` | A per-location format override | **Extended.** Reflection is a fact about the shader; the buffer format is a decision about memory. They coincide for every float attribute and diverge for a packed one — egui's four-byte colour read as a `float4`. The overlay states its layout and uses reflection to check the shader, which is correct and is not derivation. | M3 |
 | A glTF-referenced image is cooked separately from the same file under `assets/` | `slop-cli` | One artifact per distinct source image | **Replaced.** `assets/checker.png` cooks to `textures/checker.tex` *and*, because `cube.gltf` references it, to `textures/cube.0.tex`. Correct and wasteful. Deduplicating means keying artifacts by content rather than by name, which is a cache change rather than an importer one. | M2/M3 |
 | A cooked model is a flat list, not a hierarchy | `slop-asset/src/model.rs` | `slop-scene`'s runtime tree, once something articulates | **Joined by.** Right for a static level, which is drawn rather than posed, and wrong the moment a parent joint animates. The tree is a *runtime* structure `slop-scene` owns; this format records where things ended up. | M5 |
 | Materials carry no occlusion or HDR emissive | `slop-asset/src/material.rs` | More slots and a float texture format | **Extended.** Occlusion is a baked term a real-time renderer computes or ignores; float images are refused by name rather than silently narrowed, and arrive with IBL. | M3 |
-| Frame timing is CPU wall-clock, not GPU time | `examples/cube/src/main.rs` | GPU timestamp queries written into the command buffer | **Joined by.** Wall-clock between frames is the honest measure of how fast frames arrive and a poor one for attributing cost to a pass — it includes waiting for the GPU. Attribution needs timestamps, and the render graph is what will know which pass one belongs to. | M3 |
+| Frame timing is CPU wall-clock, not GPU time | `slop-app/src/timing.rs` | GPU timestamp queries written into the command buffer | **Joined by.** Wall-clock between frames is the honest measure of how fast frames arrive and a poor one for attributing cost to a pass — it includes waiting for the GPU. Attribution needs timestamps, and the render graph is what will know which pass one belongs to. §9.6 makes per-pass GPU timings an M3 exit criterion, so this closes at E3. | M3 |
+| The HDR target is `Rgba16Float` | `slop-render`, from E2 | `R11G11B10Float`, at half the bandwidth | **Replaced**, behind an unchanged seam — the format is one constant and the graph declares it. Chosen for correctness first: `R11G11B10` has no alpha, cannot hold negatives, and bands visibly in a TAA history buffer. Whether any of that is visible on real content is a measurement, and the goldens are what will make it. §9.4 has the reasoning. | M3 |
 | The overlay assumes one scale factor for the whole frame | `slop-editor/src/overlay.rs` | Per-viewport scale, once a window can span two monitors at different scalings | **Extended.** `pixels_per_point` arrives per frame and applies to every draw in it, which is right until a window straddles a 100% and a 150% display. | M3 |
 | A partial texture update re-uploads the whole image | `slop-editor/src/overlay.rs` | `vkCmdCopyBufferToImage` into the sub-region | **Replaced.** Wasteful and correct. Font atlases settle within a few frames of startup, so this runs a handful of times and then never again. | M3 |
 | `PushConstants` field *order* is not checked against the shader | `examples/cube/src/scene.rs` | A generic material parameter writer driven by reflected field offsets | **Replaced.** Reflection gives every field's name, offset and size; only the block *size* is compared today. Swapping two same-sized fields would still pass. The writer that fixes it arrives with materials. | M2 |
@@ -920,12 +923,17 @@ one part of §10.2 that genuinely needs M3 is the **render pass visualizer**,
 because there is no graph to visualize; it lands with the graph.
 
 **M3 — Renderer, Stage A.** Clustered forward+, shadows, IBL, HDR/tonemap, post
-stack, render graph. See §9 for the ordering and why the frame loop comes out
-first.
+stack, render graph. **§9.4 has the target frame, §9.5 the order, §9.6 the exit
+criteria** — which replace `DESIGN.md` §6's "it looks good" with something
+checkable, including a frame budget.
+
+The one place §9.5 departs from the ordering above: the HDR target and tonemap
+pass land *before* the render graph, not after. A graph designed against the two
+passes that exist today would be designed against a dependency that is not real.
 
 ---
 
-## 9. M2 remaining and M3 — task breakdown
+## 9. M2 and M3 — task breakdown
 
 In dependency order. Each item says what it unblocks, because the ordering is the
 decision — the list itself is not controversial.
@@ -975,7 +983,7 @@ samplers. Each has its own row in §6.1.
 The golden images are what make a rewrite checkable: every example must render
 identically afterwards, and no reference moves.
 
-### 9.2 The order
+### 9.2 The order — M2
 
 | | Item | Unblocks | Milestone |
 |---|---|---|---|
@@ -983,7 +991,7 @@ identically afterwards, and no reference moves.
 | **B** | Shader reflection — vertex layouts and push constant sizes read from the cooked shader instead of restated in Rust. **Landed**, via `slangc -reflection-json`; §2.11's claim that this needed the Slang library was false and has been corrected. | D | M2 |
 | **C** | Debug UI (§10.2) — immediate mode, egui. **Overlay landed**: it draws, and a headless test proves it changes the image. The entity inspector over `slop-reflect` is what remains; the pass visualizer waits for E. | E | M2 |
 | **D** | Materials — glTF materials, multiple meshes per file, scene hierarchy, mipmaps, then a Sponza-scale scene that loads and draws. **M2's exit criterion.** | E | M2 |
-| **E** | Render graph — passes declaring reads and writes, barriers derived rather than hand-written. Then Stage A proper: clustered forward+, shadows, IBL, HDR/tonemap. | — | M3 |
+| **E** | Render graph — passes declaring reads and writes, barriers derived rather than hand-written. Then Stage A proper: clustered forward+, shadows, IBL, HDR/tonemap. **Broken out in §9.4–§9.6.** | — | M3 |
 
 Async streaming sits beside D and E rather than before them. Sponza is the first
 thing that loads enough at once to say what the streaming API needs, and building
@@ -1016,3 +1024,181 @@ implicit:**
   things.
 - **Linux has never been run.** Every portability claim in this repository is
   currently untested. Standing since M0.
+
+---
+
+### 9.4 The Stage A frame — written down before it is built
+
+**Why this section exists at all.** A render graph manages dependencies between
+passes. There are two passes today — mesh and overlay — and the dependency
+between them is that both write the swapchain image, in order. Designing a graph
+against that is designing against an imagined consumer, which is the mistake
+§4.1-C deliberately avoided for the job system by deferring the work-stealing
+pool until ECS scheduling supplied the real requirements. It did, and the result
+was better for it.
+
+So the frame is specified first, and the graph is designed against **this**.
+
+```mermaid
+flowchart TD
+    shadow("shadow — 4 cascades") --> shadowmap[("shadow array, D32Float")]
+    prepass("depth prepass") --> depth[("depth, D32Float")]
+    depth --> clusters("cluster build — compute")
+    clusters --> lightlist[("cluster light indices")]
+
+    shadowmap --> forward("forward — clustered, PBR, IBL")
+    lightlist --> forward
+    depth --> forward
+    ibl[("IBL — irradiance + prefiltered")] --> forward
+    forward --> hdr[("HDR colour, Rgba16Float")]
+
+    hdr --> taa("TAA resolve")
+    depth --> taa
+    history[("history")] --> taa
+    taa --> resolved[("resolved HDR")]
+    resolved --> history
+
+    resolved --> bloom("bloom — down/upsample chain")
+    depth --> ssao("SSAO")
+    ssao --> occlusion[("occlusion")]
+    occlusion --> forward
+
+    resolved --> tonemap("tonemap")
+    bloom --> tonemap
+    tonemap --> swap[("swapchain, Bgra8Srgb")]
+    swap --> overlay("debug overlay")
+```
+
+Eight passes, four of which read something another wrote. That is a graph's
+worth of dependencies, and none of it exists today.
+
+#### Decisions this section makes
+
+| Question | Decision | Why |
+|---|---|---|
+| HDR format | `Rgba16Float` | Correctness first, one variable at a time. `R11G11B10Float` is half the bandwidth and is what most engines ship, but it has no alpha, cannot hold negatives, and bands visibly in TAA history. Recorded in §6.1 as the optimisation behind the same seam — the goldens are what will say whether it costs anything visible |
+| Depth prepass | Yes | Two payoffs, not one: it removes overdraw from the expensive forward pass, and it gives cluster assignment exact depth bounds instead of conservative ones. Sponza is a high-overdraw scene, which is why it is the test content |
+| Cluster grid | 16 × 9 × 24, exponential Z | The well-trodden configuration. Tile count follows the aspect ratio; exponential slices put resolution where perspective compresses depth |
+| Shadows | 4 cascades, 2048² `D32Float` texture array | An array rather than an atlas: Stage A has one shadow-casting directional light, and an atlas is allocation machinery for a problem that does not exist until many lights cast |
+| Tonemap curve | To be chosen at E7, not now | It is a look decision, it is one function, and picking it early would be picking it blind |
+
+#### Two traps worth naming before they cost a day
+
+- **The depth prepass is not depth-only.** Alpha-masked geometry has to run its
+  fragment shader in the prepass, because the `discard` is what decides whether
+  the fragment exists. Sponza's foliage and chains are entirely alpha-masked. A
+  prepass that skips fragment shading writes depth for every leaf card as a solid
+  rectangle, and the forward pass then depth-tests against a silhouette that is
+  wrong. Two pipelines, selected per material.
+- **SSAO in a forward renderer has no normal buffer.** Deferred renderers get
+  normals free from the G-buffer; this does not. Either the prepass writes a
+  normal target — an extra attachment and extra bandwidth in a pass that exists
+  to be cheap — or SSAO reconstructs normals from depth derivatives, which is
+  free and visibly worse on curved surfaces. **This is the one decision §9.4
+  deliberately does not make**, because it wants measuring on real content
+  rather than arguing. E7 decides it with both implemented behind one switch.
+
+#### Prerequisites that are not on any list
+
+Found by checking what E4 needs rather than assuming, and neither is scheduled:
+
+1. **The RHI has no compute pipeline.** `ComputePipeline` does not exist and
+   there is no `dispatch`. The *feature model* is right — compute queues are
+   acquired up front, storage images are enabled in `device/features.rs`, and the
+   bindless heap has a storage-image binding — which is §1.2 principle 6 working
+   exactly as intended: the seam is there, the implementation is not. But cluster
+   building is a compute pass, so E4 cannot start until this lands.
+2. **There are no float colour formats.** `Format` has `R32Float` through
+   `Rgba32Float` for vertex data and the depth formats, and nothing for an HDR
+   render target. `Rgba16Float` has to be added, and `R11G11B10Float` alongside it
+   if the §6.1 row is to stay cheap.
+
+Both are small. Both are the kind of thing that turns a two-day task into a
+four-day one when discovered mid-task.
+
+---
+
+### 9.5 The order — M3
+
+| | Item | Unblocks | Notes |
+|---|---|---|---|
+| **E1** | Float colour formats, and `ComputePipeline` + `dispatch` in `slop-rhi` | E2, E4 | The §9.4 prerequisites. Independent of each other; the formats are needed first |
+| **E2** | HDR offscreen target and a tonemap pass | E3 | **Before the graph, deliberately** — see below |
+| **E3** | Render graph — passes declare reads and writes, barriers derived | E4–E7 | Designed against §9.4, validated by re-expressing E2's frame through it. `MeshRenderer` decomposes here |
+| **E4** | Clustered forward+ — light list, cluster build, forward pass | E5 | The first compute-feeding-graphics dependency |
+| **E5** | Cascaded shadow maps | E6 | |
+| **E6** | IBL from an HDR environment | E7 | Needs a cooked environment format — new work in `slop-cook` |
+| **E7** | Post stack — SSAO, bloom, TAA | — | TAA last: it needs motion vectors, which need previous-frame transforms |
+
+**Why E2 comes before the graph.** Everything currently renders straight into an
+sRGB swapchain image. Stage A requires rendering into a float target and
+resolving through a tonemap pass, and that single change creates **the first
+genuine read-after-write dependency in the engine** — one pass writes an image,
+another reads it. That is the thing a graph exists to manage and the thing that
+does not exist yet.
+
+It also retires the `Frame::finish` convention naturally rather than by
+decree: once tonemap is the only pass writing the swapchain image, "only the
+last writer may transition" stops being a rule anyone can forget. The §6.1 row —
+*"Every renderer must be told whether it is the last to draw"* — closes at E2,
+and E3 is what makes it structural.
+
+The cost of this ordering is that E2's HDR target is hand-managed and then
+re-managed by the graph at E3. That is one image and one barrier of rework, and
+it is the rework that teaches the graph what it is for.
+
+**What lands alongside E3, not after it.** Both have been waiting on a graph to
+name passes:
+
+- **The render pass visualiser** (`DESIGN.md` §10.2), deferred from M2 because
+  there was nothing to visualise.
+- **Golden captures of intermediates** — depth, shadow cascades, the HDR target
+  before tonemapping. `DESIGN.md` §8 item 8 says explicitly that region-of-interest
+  assertions and intermediate capture "need the render graph to name and expose
+  passes. **Revisit at M3.**" A whole-frame comparison of a tonemapped image
+  cannot say *which* pass regressed, and by E7 there are eight of them.
+
+**A verification consequence of TAA that is worth stating now.** TAA accumulates
+across frames, so frame *N* depends on frames 1..*N*−1. The existing goldens
+capture frame 40 and compare one image; with a history buffer that image is a
+function of the whole preceding sequence, and a bug in frame 3 surfaces as a
+diffuse failure at frame 40. The jitter sequence itself is fine — Halton driven
+by frame number, which §2.14 already names as the only clock a reproducible
+render may read — but the golden harness will want a way to capture with TAA
+disabled as well as enabled, or a regression becomes very hard to localise.
+
+---
+
+### 9.6 Definition of done — M3
+
+`DESIGN.md` §6 sets M3's exit as *"it looks good."* That is the only milestone
+exit in the plan that cannot be checked, and it is worth replacing before the
+work starts rather than arguing about at the end. M0's exit was a triangle, M1's
+was a byte-identical round-trip, M2's was six listed criteria.
+
+The goldens give regression safety — they say *it did not change*. Nothing in
+them says *it is done*. So:
+
+- [ ] Sponza renders with cascaded shadows, image-based lighting, tonemapped HDR
+      and the full post stack
+- [ ] Every pass in §9.4 is declared to the render graph, and **no barrier is
+      written by hand** in `slop-render` or `slop-editor`
+- [ ] The pass visualiser lists the frame's passes and their resources, read out
+      of the graph rather than from a hardcoded list
+- [ ] Per-pass GPU timings are visible in the debug overlay — which needs
+      timestamp queries, currently a §6.1 row
+- [ ] A stated frame budget is met on the development machine at 1440p, recorded
+      here as a number rather than an impression
+- [ ] Golden images cover at least one intermediate — the shadow cascades or the
+      pre-tonemap HDR target — and not only the composite
+- [ ] `examples/cube/src/scene.rs` is gone, absorbed rather than duplicated
+      (`docs/reviews/2026-08-03.md` item 3's exit condition)
+
+**The frame budget is the criterion that will otherwise be discovered late.**
+Everything else on this list is a feature that is either present or absent.
+Performance is the one that degrades continuously and silently, and the point of
+naming a number before E1 is that clustered forward+ exists specifically to be
+fast — a Stage A that looks right at 40ms has not met its own design brief.
+
+The number itself wants setting at E1, once the hardware is measured rather than
+guessed at.

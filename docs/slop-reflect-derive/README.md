@@ -70,7 +70,7 @@ without asking.
 Since M2 the contract also requires `Send + Sync`. That clause is enforced by
 the supertrait rather than by generated code, so the derive gets it for free: a
 type with a non-`Send` field fails to satisfy `Reflect` at the impl site with an
-ordinary trait error. `CONSIDERATIONS.md` item 6 records why the clause was
+ordinary trait error. `docs/reviews/2026-08-03.md` item 6 records why the clause was
 missing and what it let through — `slop_ecs::Column` asserts `Send` and `Sync`
 unconditionally over type-erased bytes and defers the claim upward, and before
 the bound existed that deferral pointed nowhere.
@@ -79,4 +79,4 @@ the bound existed that deferral pointed nowhere.
 
 - `docs/slop-reflect/README.md` — the trait, `TypeInfo`, and the registry
 - `docs/slop-ecs/README.md` — what trusts these fields, and why being wrong is unsafe
-- `CONSIDERATIONS.md` item 6 — the `Send + Sync` clause
+- `docs/reviews/2026-08-03.md` item 6 — the `Send + Sync` clause

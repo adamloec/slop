@@ -53,7 +53,7 @@ on.
 the file, the stage and the message.
 
 The same choice inside `slop-cook` is a library using `anyhow` and is argued
-separately — see that crate's README §6, and `CONSIDERATIONS.md` item 11 for its
+separately — see that crate's README §6, and `docs/reviews/2026-08-03.md` item 11 for its
 recorded expiry.
 
 ## 5. `--watch` polls, and that is a first cut

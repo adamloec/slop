@@ -321,7 +321,7 @@ used to name `slop-ecs/src/prelude.rs` exporting `Component`, `Entity`, `Query`
 and `World` — a file that does not exist, exporting a `Component` type that
 does not exist either.
 
-That is `CONSIDERATIONS.md` item 8 in a document the item did not audit. It only
+That is `docs/reviews/2026-08-03.md` item 8 in a document the item did not audit. It only
 counted stale paths in `PLAN.md` and `DESIGN.md`, and this is the worse kind:
 not a file that moved, but a convention written in the present tense that no
 crate follows. A rule nothing checks and nothing obeys has stopped being a
@@ -598,11 +598,11 @@ column does, and that is one place rather than two.
 
 **This table said "three places" until M2, and the tree had seven.** The four
 added above were all present and all justified; what was missing was the row.
-`CONSIDERATIONS.md` item 10 recorded a raw `queue_submit2` in an example's test
+`docs/reviews/2026-08-03.md` item 10 recorded a raw `queue_submit2` in an example's test
 as "the only `unsafe` outside §7's three sanctioned homes" — the block was real
 and is now gone, but the claim around it was not, and neither was the rule it
 appealed to. A confinement rule that has quietly stopped listing where the code
-actually is cannot be used to argue anything, which is `CONSIDERATIONS.md` item
+actually is cannot be used to argue anything, which is `docs/reviews/2026-08-03.md` item
 8 applied to this document.
 
 The rule that matters is unchanged: `unsafe` appears where a foreign API or an

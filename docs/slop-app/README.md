@@ -38,7 +38,7 @@ once, here, rather than at every call site.
 correctly produced `FrameRenderer` and `Gpu` — it fired on the frame loop and the
 extraction stopped halfway, taking everything *except* the loop, which is the
 part actually being copied. It is at four copies, one past the trigger.
-`CONSIDERATIONS.md` item 4 records it; this crate is the right home and already
+`docs/reviews/2026-08-03.md` item 4 records it; this crate is the right home and already
 depends on `winit`.
 
 ## 3. The three consumers

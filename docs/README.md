@@ -10,14 +10,25 @@
 | [PLAN.md](PLAN.md) | **When** | Milestones, task breakdown, environment, invariants |
 | [CONVENTIONS.md](CONVENTIONS.md) | **How** code is written | Layout, naming, errors, `unsafe`, testing, logging |
 | [architecture.md](architecture.md) | **How the pieces fit** | Cross-crate diagrams — layering, frame flow, data movement |
-| [../CONSIDERATIONS.md](../CONSIDERATIONS.md) | **What we might change** | Ideas not committed to, and debt found by review |
+| [../CONSIDERATIONS.md](../CONSIDERATIONS.md) | **What we might change** | Technology worth revisiting; not commitments |
+| [reviews/](reviews/) | **What was found, and when** | Completed codebase reviews, kept by date |
 
 Read `DESIGN.md` first and in full before writing any code.
 
 `CONSIDERATIONS.md` sits at the repository root rather than here because it is
-not authoritative for anything — it is the holding pen for technology worth
-revisiting and for problems found in code that already exists. Nothing in it is
-a decision until it moves into `DESIGN.md` or `PLAN.md`.
+not authoritative for anything — it is the holding pen for ideas and technology
+worth revisiting. Nothing in it is a decision until it moves into `DESIGN.md` or
+`PLAN.md`.
+
+**`reviews/` is where a review goes once it is finished**, and the split is worth
+keeping. `CONSIDERATIONS.md` is forward-looking — things that might happen. A
+completed review is a record of what *did*, and it stays readable because other
+documents cite its findings by number. Deleting one costs those citations; the
+2026-08-03 review had fourteen across nine files.
+
+| Review | Tree | Outcome |
+|---|---|---|
+| [2026-08-03](reviews/2026-08-03.md) | `e9fe35f`, at the M2/M3 boundary | Twelve findings, all acted on |
 
 ## Per-crate documentation
 

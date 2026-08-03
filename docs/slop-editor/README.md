@@ -16,7 +16,7 @@ and it cannot fall out of sync with the engine it reports on.
 application — is M6, and §2.12 says it is a host **application** that embeds
 `slop-app` exactly as a game does. §10.1 and §10.2 are described in `DESIGN.md`
 as sharing "almost nothing architecturally", and they are currently shipped in
-one crate under the editor's name. `CONSIDERATIONS.md` item 5 records this and
+one crate under the editor's name. `docs/reviews/2026-08-03.md` item 5 records this and
 recommends renaming this crate to `slop-debug`, leaving `slop-editor` free for
 what §2.12 says it is.
 
@@ -30,7 +30,7 @@ what §2.12 says it is.
 | Entity inspector over `slop-reflect` | Landed | M2 |
 | Render pass visualiser | Planned — needs a graph to visualise | M3 |
 | `inspector` behind a cargo feature, off by default | Landed — see §2.1 | M2 |
-| Rename to `slop-debug` | Planned — `CONSIDERATIONS.md` item 5 | — |
+| Rename to `slop-debug` | Planned — `docs/reviews/2026-08-03.md` item 5 | — |
 | §10.1's scene editor, as a binary | Planned | M6 |
 
 ### 2.1 Features
@@ -46,7 +46,7 @@ needing an ECS or a reflection system.
 The effect is measurable rather than tidy-minded: `examples/triangle` and
 `examples/cube` now link neither crate, while `examples/model` — the one that
 edits components live — turns the feature on. That is the same complaint this
-crate's existence answers, which `CONSIDERATIONS.md` item 5 found reproduced one
+crate's existence answers, which `docs/reviews/2026-08-03.md` item 5 found reproduced one
 layer up: a frame-timing overlay on a triangle should not pull in an ECS to draw
 one.
 

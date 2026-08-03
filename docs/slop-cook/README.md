@@ -103,7 +103,7 @@ flat enum discards.
 editor showing a missing-texture failure differently from a malformed-file one.
 `anyhow::Error` cannot be matched on, so that distinction cannot be built on top
 of what is here; the error type has to change first. `PLAN.md` §6.1 carries the
-row, and `CONSIDERATIONS.md` item 11 records that the deviation is sound today
+row, and `docs/reviews/2026-08-03.md` item 11 records that the deviation is sound today
 and has an expiry.
 
 ## 6. Invariants

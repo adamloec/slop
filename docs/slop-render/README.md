@@ -35,7 +35,7 @@ materials, Sponza — needed a frame loop that was not copy-pasted.
 | `Overlay` — the debug UI's Vulkan backend | Moved to `slop-editor` — see §8 | M2 |
 | Render graph — passes declaring reads and writes | Planned | M3 |
 | Clustered forward+, shadows, IBL, HDR/tonemap | Planned | M3 |
-| `MeshRenderer` decomposition — it is a god object today | Planned — `CONSIDERATIONS.md` item 2 | M3 |
+| `MeshRenderer` decomposition — it is a god object today | Planned — `docs/reviews/2026-08-03.md` item 2 | M3 |
 | Automated coverage of the loop itself | **Absent** — see §6 | M3 |
 
 ## 3. Key types
