@@ -34,7 +34,10 @@ use std::sync::Arc;
 
 use ash::vk;
 
-use crate::{BindlessHeap, Buffer, CommandBuffer, Device, GraphicsPipeline, PipelineLayout};
+use crate::{
+    BindlessHeap, Buffer, CommandBuffer, Device, Extent2D, GraphicsPipeline, ImageViewHandle,
+    PipelineLayout, Rect2D,
+};
 
 /// What happens to an attachment's existing contents when a pass begins.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -59,7 +62,7 @@ pub enum ClearValue {
 #[derive(Debug, Clone, Copy)]
 pub struct ColorAttachment {
     /// The view being rendered into.
-    pub view: vk::ImageView,
+    pub view: ImageViewHandle,
     /// What to do with its existing contents.
     pub load: Load,
 }
@@ -68,7 +71,7 @@ pub struct ColorAttachment {
 #[derive(Debug, Clone, Copy)]
 pub struct DepthAttachment {
     /// The view being tested and written.
-    pub view: vk::ImageView,
+    pub view: ImageViewHandle,
     /// What to do with its existing contents.
     pub load: Load,
     /// Whether the result is kept after the pass.
@@ -91,7 +94,7 @@ pub struct Attachments {
     /// draw time rather than at pipeline creation.
     pub depth: Option<DepthAttachment>,
     /// The area being drawn, which is also the initial viewport and scissor.
-    pub extent: vk::Extent2D,
+    pub extent: Extent2D,
 }
 
 /// A render pass in progress.
@@ -135,7 +138,7 @@ impl CommandBuffer {
         let mut info = vk::RenderingInfo::default()
             .render_area(vk::Rect2D {
                 offset: vk::Offset2D { x: 0, y: 0 },
-                extent: attachments.extent,
+                extent: attachments.extent.to_vk(),
             })
             .layer_count(1)
             .color_attachments(&color);
@@ -216,12 +219,12 @@ impl Pass<'_> {
     ///
     /// Clamped to nothing: a scissor outside the framebuffer is a validation
     /// error rather than a clamp, and the caller knows its own bounds.
-    pub fn set_scissor(&self, scissor: vk::Rect2D) {
+    pub fn set_scissor(&self, scissor: Rect2D) {
         // SAFETY: the buffer is recording and `scissors` outlives the call.
         unsafe {
             self.device
                 .raw()
-                .cmd_set_scissor(self.command.handle(), 0, &[scissor]);
+                .cmd_set_scissor(self.command.handle(), 0, &[scissor.to_vk()]);
         }
     }
 
@@ -233,7 +236,7 @@ impl Pass<'_> {
             self.device.raw().cmd_bind_vertex_buffers(
                 self.command.handle(),
                 0,
-                &[buffer.handle()],
+                &[buffer.handle().0],
                 &[0],
             );
         }
@@ -250,7 +253,7 @@ impl Pass<'_> {
         unsafe {
             self.device.raw().cmd_bind_index_buffer(
                 self.command.handle(),
-                buffer.handle(),
+                buffer.handle().0,
                 0,
                 vk::IndexType::UINT32,
             );
@@ -331,22 +334,22 @@ impl std::fmt::Debug for Pass<'_> {
 }
 
 /// A scissor covering the whole extent.
-fn full(extent: vk::Extent2D) -> vk::Rect2D {
+fn full(extent: Extent2D) -> vk::Rect2D {
     vk::Rect2D {
         offset: vk::Offset2D { x: 0, y: 0 },
-        extent,
+        extent: extent.to_vk(),
     }
 }
 
 /// One attachment's rendering info.
 fn rendering_attachment(
-    view: vk::ImageView,
+    view: ImageViewHandle,
     layout: vk::ImageLayout,
     load: Load,
     store: bool,
 ) -> vk::RenderingAttachmentInfo<'static> {
     let info = vk::RenderingAttachmentInfo::default()
-        .image_view(view)
+        .image_view(view.0)
         .image_layout(layout)
         .store_op(if store {
             vk::AttachmentStoreOp::STORE
@@ -381,7 +384,7 @@ mod tests {
     #[test]
     fn a_cleared_attachment_carries_its_value() {
         let info = rendering_attachment(
-            vk::ImageView::null(),
+            ImageViewHandle(vk::ImageView::null()),
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
             Load::Clear(ClearValue::Color([0.25, 0.5, 0.75, 1.0])),
             true,
@@ -402,7 +405,7 @@ mod tests {
         // The overlay depends on this: it composites over a scene already in the
         // attachment, and clearing would erase the frame it draws on top of.
         let info = rendering_attachment(
-            vk::ImageView::null(),
+            ImageViewHandle(vk::ImageView::null()),
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
             Load::Preserve,
             true,
@@ -416,7 +419,7 @@ mod tests {
         // Depth is scratch for one pass; storing it costs bandwidth for
         // something nothing reads.
         let info = rendering_attachment(
-            vk::ImageView::null(),
+            ImageViewHandle(vk::ImageView::null()),
             vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
             Load::Clear(ClearValue::Depth(crate::DEPTH_CLEAR)),
             false,
@@ -427,14 +430,11 @@ mod tests {
 
     #[test]
     fn the_default_scissor_covers_the_whole_target() {
-        let extent = vk::Extent2D {
-            width: 1920,
-            height: 1080,
-        };
+        let extent = Extent2D::new(1920, 1080);
         let scissor = full(extent);
 
         assert_eq!(scissor.offset.x, 0);
         assert_eq!(scissor.offset.y, 0);
-        assert_eq!(scissor.extent, extent);
+        assert_eq!(scissor.extent, extent.to_vk());
     }
 }

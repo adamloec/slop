@@ -11,8 +11,9 @@ use std::time::Duration;
 
 use slop_core::diagnostics::tracing::error;
 use slop_rhi::{
-    AcquireOutcome, BinarySemaphore, CommandBuffer, CommandPool, Device, ImageState, PresentMode,
-    PresentOutcome, Surface, Swapchain, SwapchainConfig, TimelineSemaphore, vk,
+    AcquireOutcome, BinarySemaphore, CommandBuffer, CommandPool, Device, Extent2D, Format,
+    ImageAspect, ImageHandle, ImageState, ImageViewHandle, PresentMode, PresentOutcome,
+    QueueHandle, Surface, Swapchain, SwapchainConfig, TimelineSemaphore, WaitStage,
 };
 
 use crate::RenderError;
@@ -57,11 +58,11 @@ impl Default for FrameRendererConfig {
 #[derive(Debug, Clone, Copy)]
 pub struct Target {
     /// The colour image being rendered into.
-    pub image: vk::Image,
+    pub image: ImageHandle,
     /// A view of it.
-    pub view: vk::ImageView,
+    pub view: ImageViewHandle,
     /// Its size in pixels.
-    pub extent: vk::Extent2D,
+    pub extent: Extent2D,
     /// The state the image is in on entry.
     pub from: ImageState,
     /// The state the image must be left in.
@@ -113,7 +114,7 @@ impl Frame<'_> {
     pub fn finish(&self) {
         self.command.transition_image(
             self.target.image,
-            vk::ImageAspectFlags::COLOR,
+            ImageAspect::Color,
             ImageState::COLOR_ATTACHMENT,
             self.target.to,
         );
@@ -164,12 +165,12 @@ pub struct FrameRenderer {
     render_finished: Vec<BinarySemaphore>,
     timeline: TimelineSemaphore,
     swapchain: Swapchain,
-    present_queue: vk::Queue,
+    present_queue: QueueHandle,
     /// Resolved once at construction rather than per submit — see
     /// `RenderError::NoPresentQueue` on why the fallback that used to be here
     /// was wrong. Now unused directly: `Device::submit_graphics` picks it.
     #[expect(dead_code, reason = "kept so the resolution stays explicit")]
-    graphics_queue: vk::Queue,
+    graphics_queue: QueueHandle,
     acquire_timeout: Duration,
     slot_index: usize,
     frame_number: u64,
@@ -189,7 +190,7 @@ impl FrameRenderer {
     pub fn new(
         device: &Arc<Device>,
         surface: &Surface,
-        size: vk::Extent2D,
+        size: Extent2D,
         config: &FrameRendererConfig,
     ) -> Result<Self, RenderError> {
         if config.frames_in_flight == 0 {
@@ -246,12 +247,12 @@ impl FrameRenderer {
     }
 
     /// The size frames are currently being drawn at.
-    pub fn extent(&self) -> vk::Extent2D {
+    pub fn extent(&self) -> Extent2D {
         self.swapchain.extent()
     }
 
     /// The colour format a pipeline must be built against.
-    pub fn format(&self) -> vk::Format {
+    pub fn format(&self) -> Format {
         self.swapchain.format()
     }
 
@@ -290,8 +291,8 @@ impl FrameRenderer {
     pub fn prepare(
         &mut self,
         surface: &Surface,
-        size: vk::Extent2D,
-    ) -> Result<Option<vk::Extent2D>, RenderError> {
+        size: Extent2D,
+    ) -> Result<Option<Extent2D>, RenderError> {
         if !self.stale {
             return Ok(None);
         }
@@ -407,7 +408,7 @@ impl FrameRenderer {
                 // At the colour-attachment stage rather than the top of the
                 // pipe: vertex work has no reason to wait for an image it never
                 // touches.
-                vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                WaitStage::ColorAttachmentOutput,
             )],
             signal: &[self.render_finished[image].handle()],
             signal_timeline: &[(self.timeline.handle(), signalled)],

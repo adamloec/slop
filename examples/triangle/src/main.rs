@@ -39,8 +39,8 @@ use slop_editor::DebugUi;
 use slop_render::{Frame, FrameRenderer, FrameRendererConfig, Target};
 use slop_rhi::{
     Attachments, BindlessHeap, BindlessHeapConfig, Blend, ClearValue, ColorAttachment, Device,
-    GraphicsPipeline, GraphicsPipelineConfig, ImageState, Load, PipelineLayout, ShaderModule,
-    ShaderStage, vk,
+    GraphicsPipeline, GraphicsPipelineConfig, ImageAspect, ImageState, Load, PipelineLayout,
+    ShaderModule, ShaderStage,
 };
 
 fn main() {
@@ -328,7 +328,7 @@ fn record(pipeline: &GraphicsPipeline, frame: &Frame<'_>) {
     // that is comes from the target rather than being assumed here.
     frame.command.transition_image(
         image,
-        vk::ImageAspectFlags::COLOR,
+        ImageAspect::Color,
         from,
         ImageState::COLOR_ATTACHMENT,
     );

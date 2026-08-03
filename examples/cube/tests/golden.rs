@@ -30,8 +30,9 @@ use example_cube::Scene;
 use slop_editor::{Overlay, egui};
 use slop_render::Target;
 use slop_rhi::{
-    Allocator, Buffer, BufferConfig, CommandPool, Device, DeviceSelection, Image, ImageConfig,
-    ImageState, Instance, InstanceConfig, MemoryLocation, RhiError, ShaderModule, vk,
+    Allocator, Buffer, BufferConfig, BufferUsage, CommandPool, Device, DeviceSelection, Extent2D,
+    Format, Image, ImageConfig, ImageState, ImageUsage, Instance, InstanceConfig, MemoryLocation,
+    RhiError, ShaderModule,
 };
 use slop_verify::{Golden, Mode, Rgba8, Tolerance};
 
@@ -41,7 +42,7 @@ const SIZE: u32 = 256;
 
 /// UNORM, so readback bytes are the bytes the shader wrote and nothing in the
 /// comparison depends on a colour space conversion the driver performs.
-const FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
+const FORMAT: Format = Format::Rgba8Unorm;
 
 /// The frame captured.
 ///
@@ -298,7 +299,7 @@ struct Headless {
 
 impl Headless {
     fn new(device: &Arc<Device>, allocator: &Arc<Allocator>) -> Result<Self, String> {
-        let extent = vk::Extent2D {
+        let extent = Extent2D {
             width: SIZE,
             height: SIZE,
         };
@@ -334,7 +335,7 @@ impl Headless {
                 name: "cube golden target",
                 extent,
                 format: FORMAT,
-                usage: vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
+                usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
                 mip_levels: 1,
             },
         )
@@ -345,7 +346,7 @@ impl Headless {
             &BufferConfig {
                 name: "cube golden readback",
                 size: u64::from(SIZE) * u64::from(SIZE) * Rgba8::CHANNELS as u64,
-                usage: vk::BufferUsageFlags::TRANSFER_DST,
+                usage: BufferUsage::TRANSFER_DST,
                 location: MemoryLocation::Readback,
             },
         )
@@ -467,7 +468,6 @@ impl Drop for Headless {
             .expect("the device must go idle before teardown");
     }
 }
-
 
 /// The approved reference, committed to the repository.
 fn reference_path() -> PathBuf {

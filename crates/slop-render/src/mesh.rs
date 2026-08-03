@@ -35,11 +35,11 @@ use slop_core::FxHashMap;
 use slop_core::diagnostics::tracing::warn;
 use slop_math::Mat4;
 use slop_rhi::{
-    Allocator, Attachments, BindlessHeap, Blend, Buffer, BufferConfig, BufferState, ClearValue,
-    ColorAttachment, DepthAttachment, Device, GraphicsPipeline, GraphicsPipelineConfig, Image,
-    ImageConfig, ImageState, Load, MemoryLocation, PipelineLayout, PipelineLayoutConfig,
-    SampledImage, Sampler, SamplerConfig, ShaderModule, ShaderStage, StorageBuffer, TextureSampler,
-    vk,
+    Allocator, Attachments, BindlessHeap, Blend, Buffer, BufferConfig, BufferState, BufferUsage,
+    ClearValue, ColorAttachment, DepthAttachment, Device, Extent2D, Format, GraphicsPipeline,
+    GraphicsPipelineConfig, Image, ImageAspect, ImageConfig, ImageState, ImageUsage, Load,
+    MemoryLocation, PipelineLayout, PipelineLayoutConfig, SampledImage, Sampler, SamplerConfig,
+    ShaderModule, ShaderStage, StorageBuffer, TextureSampler,
 };
 
 use crate::{RenderError, VertexBinding};
@@ -124,7 +124,7 @@ pub struct MeshRenderer {
     /// Owned rather than borrowed: its format is what the pipeline was built
     /// against, so nothing else can supply one that agrees by accident.
     depth: Option<Image>,
-    depth_format: vk::Format,
+    depth_format: Format,
     push_constant_bytes: u32,
     device: Arc<Device>,
 }
@@ -142,8 +142,8 @@ impl MeshRenderer {
         heap: &mut BindlessHeap,
         module: &ShaderModule,
         reflection: &Reflection,
-        color_format: vk::Format,
-        depth_format: vk::Format,
+        color_format: Format,
+        depth_format: Format,
     ) -> Result<Self, RenderError> {
         let vertices = VertexBinding::interleaved(reflection)?;
         let push_constant_bytes = reflection.push_constant_bytes;
@@ -360,8 +360,7 @@ impl MeshRenderer {
             };
 
             let image = upload_texture(&self.device, allocator, &texture)?;
-            let Some(handle) =
-                heap.insert_sampled_image(image.view(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            let Some(handle) = heap.insert_sampled_image(image.view(), ImageState::SHADER_READ)
             else {
                 warn!(material = name, "the bindless heap is full");
                 continue;
@@ -397,7 +396,7 @@ impl MeshRenderer {
             &BufferConfig {
                 name: "model materials",
                 size: bytes.len() as u64,
-                usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+                usage: BufferUsage::STORAGE,
                 // Host-visible rather than staged: this is written once at load
                 // and read every frame, and a scene's materials are kilobytes.
                 // Staging would cost a copy to save reads that are already
@@ -446,7 +445,7 @@ impl MeshRenderer {
     pub fn resize(
         &mut self,
         allocator: &Arc<Allocator>,
-        extent: vk::Extent2D,
+        extent: Extent2D,
     ) -> Result<(), RenderError> {
         if self.depth.is_some() {
             self.device.wait_idle()?;
@@ -458,7 +457,7 @@ impl MeshRenderer {
                 name: "model depth",
                 extent,
                 format: self.depth_format,
-                usage: vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+                usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT,
                 // No chain: nothing samples a depth buffer at a distance.
                 mip_levels: 1,
             },
@@ -483,7 +482,7 @@ impl MeshRenderer {
 
         frame.command.transition_image(
             frame.target.image,
-            vk::ImageAspectFlags::COLOR,
+            ImageAspect::Color,
             frame.target.from,
             ImageState::COLOR_ATTACHMENT,
         );
@@ -602,7 +601,7 @@ fn upload_mesh(
         allocator,
         "model vertices",
         bytemuck::cast_slice(&mesh.vertices),
-        vk::BufferUsageFlags::VERTEX_BUFFER,
+        BufferUsage::VERTEX,
         BufferState::VERTEX_INPUT,
     )?;
     let indices = upload_buffer(
@@ -610,7 +609,7 @@ fn upload_mesh(
         allocator,
         "model indices",
         bytemuck::cast_slice(&mesh.indices),
-        vk::BufferUsageFlags::INDEX_BUFFER,
+        BufferUsage::INDEX,
         BufferState::INDEX_INPUT,
     )?;
 
@@ -628,7 +627,7 @@ fn upload_buffer(
     allocator: &Arc<Allocator>,
     name: &str,
     bytes: &[u8],
-    usage: vk::BufferUsageFlags,
+    usage: BufferUsage,
     state: BufferState,
 ) -> Result<Buffer, RenderError> {
     let mut staging = Buffer::new(
@@ -636,7 +635,7 @@ fn upload_buffer(
         &BufferConfig {
             name: "model staging",
             size: bytes.len() as u64,
-            usage: vk::BufferUsageFlags::TRANSFER_SRC,
+            usage: BufferUsage::TRANSFER_SRC,
             location: MemoryLocation::Upload,
         },
     )?;
@@ -648,7 +647,7 @@ fn upload_buffer(
         &BufferConfig {
             name,
             size: bytes.len() as u64,
-            usage: usage | vk::BufferUsageFlags::TRANSFER_DST,
+            usage: usage | BufferUsage::TRANSFER_DST,
             location: MemoryLocation::DeviceOnly,
         },
     )?;
@@ -672,7 +671,7 @@ fn upload_texture(
         &BufferConfig {
             name: "model texture staging",
             size: texture.pixels.len() as u64,
-            usage: vk::BufferUsageFlags::TRANSFER_SRC,
+            usage: BufferUsage::TRANSFER_SRC,
             location: MemoryLocation::Upload,
         },
     )?;
@@ -683,12 +682,12 @@ fn upload_texture(
         allocator,
         &ImageConfig {
             name: "model texture",
-            extent: vk::Extent2D {
+            extent: Extent2D {
                 width: texture.width,
                 height: texture.height,
             },
             format: vulkan_format(texture.format),
-            usage: vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
+            usage: ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
             mip_levels: texture.mip_levels,
         },
     )?;
@@ -710,7 +709,7 @@ fn upload_texture(
                 level.offset as u64,
                 image.handle(),
                 image.aspect(),
-                vk::Extent2D {
+                Extent2D {
                     width: level.width,
                     height: level.height,
                 },
@@ -734,10 +733,10 @@ fn upload_texture(
 /// the same reason: the shader reads the bytes that were uploaded. Applying the
 /// sRGB transfer where a material says to is `TextureSlot::is_srgb`'s job and
 /// arrives with real shading at M3 — `docs/PLAN.md` §6.1 records it.
-fn vulkan_format(format: slop_asset::Format) -> vk::Format {
+fn vulkan_format(format: slop_asset::Format) -> Format {
     match format {
-        slop_asset::Format::Rgba8 => vk::Format::R8G8B8A8_UNORM,
-        slop_asset::Format::Bc7 => vk::Format::BC7_UNORM_BLOCK,
+        slop_asset::Format::Rgba8 => Format::Rgba8Unorm,
+        slop_asset::Format::Bc7 => Format::Bc7Unorm,
     }
 }
 

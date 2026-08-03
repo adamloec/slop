@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use ash::vk;
-use slop_rhi::{Device, DeviceSelection, Instance, InstanceConfig, RhiError};
+use slop_rhi::{Device, DeviceSelection, Instance, InstanceConfig, QueueHandle, RhiError};
 
 /// `None` when the machine genuinely has no Vulkan loader.
 fn instance() -> Option<Arc<Instance>> {
@@ -58,7 +58,11 @@ fn every_queue_is_live() {
         ("compute", queues.compute),
         ("transfer", queues.transfer),
     ] {
-        assert_ne!(queue, vk::Queue::null(), "{name} queue must not be null");
+        assert_ne!(
+            queue,
+            QueueHandle::default(),
+            "{name} queue must not be null"
+        );
     }
 
     // Headless, so nothing was asked to present.

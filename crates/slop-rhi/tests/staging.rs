@@ -14,8 +14,9 @@ mod support;
 use std::sync::Arc;
 
 use slop_rhi::{
-    Allocator, Buffer, BufferConfig, BufferState, CommandPool, DEPTH_CLEAR, Image, ImageConfig,
-    ImageState, MemoryLocation, vk,
+    Allocator, Buffer, BufferConfig, BufferState, BufferUsage, CommandPool, DEPTH_CLEAR, Extent2D,
+    Format, Image, ImageAspect, ImageConfig, ImageState, ImageUsage, MemoryLocation, Offset2D,
+    Rect2D, vk,
 };
 
 /// Upload a byte pattern to device-local memory and read it back.
@@ -34,7 +35,7 @@ fn data_survives_a_round_trip_through_device_local_memory() {
         &allocator,
         "staging upload",
         payload.len() as u64,
-        vk::BufferUsageFlags::TRANSFER_SRC,
+        BufferUsage::TRANSFER_SRC,
         MemoryLocation::Upload,
     );
     staging
@@ -46,7 +47,7 @@ fn data_survives_a_round_trip_through_device_local_memory() {
         &allocator,
         "device local",
         payload.len() as u64,
-        vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::TRANSFER_SRC,
+        BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
         MemoryLocation::DeviceOnly,
     );
 
@@ -54,7 +55,7 @@ fn data_survives_a_round_trip_through_device_local_memory() {
         &allocator,
         "readback",
         payload.len() as u64,
-        vk::BufferUsageFlags::TRANSFER_DST,
+        BufferUsage::TRANSFER_DST,
         MemoryLocation::Readback,
     );
 
@@ -107,7 +108,7 @@ fn device_local_memory_cannot_be_mapped() {
         &allocator,
         "device local",
         256,
-        vk::BufferUsageFlags::TRANSFER_DST,
+        BufferUsage::TRANSFER_DST,
         MemoryLocation::DeviceOnly,
     );
 
@@ -145,7 +146,7 @@ fn a_texture_uploads_and_reads_back_unchanged() {
         &allocator,
         "texture upload",
         bytes,
-        vk::BufferUsageFlags::TRANSFER_SRC,
+        BufferUsage::TRANSFER_SRC,
         MemoryLocation::Upload,
     );
     staging
@@ -157,12 +158,12 @@ fn a_texture_uploads_and_reads_back_unchanged() {
         &allocator,
         &ImageConfig {
             name: "uploaded texture",
-            extent: vk::Extent2D {
+            extent: Extent2D {
                 width: SIZE,
                 height: SIZE,
             },
-            format: vk::Format::R8G8B8A8_UNORM,
-            usage: vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::TRANSFER_SRC,
+            format: Format::Rgba8Unorm,
+            usage: ImageUsage::TRANSFER_DST | ImageUsage::TRANSFER_SRC,
             mip_levels: 1,
         },
     )
@@ -172,7 +173,7 @@ fn a_texture_uploads_and_reads_back_unchanged() {
         &allocator,
         "texture readback",
         bytes,
-        vk::BufferUsageFlags::TRANSFER_DST,
+        BufferUsage::TRANSFER_DST,
         MemoryLocation::Readback,
     );
 
@@ -225,12 +226,12 @@ fn the_device_offers_a_float_depth_format() {
 
     assert_eq!(
         format,
-        vk::Format::D32_SFLOAT,
+        Format::D32Float,
         "any desktop GPU should offer D32_SFLOAT"
     );
     assert_eq!(
         slop_rhi::aspect_of(format),
-        vk::ImageAspectFlags::DEPTH,
+        ImageAspect::Depth,
         "a pure depth format must not claim a stencil aspect"
     );
 }
@@ -240,21 +241,15 @@ fn the_depth_aspect_follows_the_format() {
     // A barrier naming the wrong aspect transitions nothing and reports
     // nothing, so deriving it from the format is the only safe option — and
     // depth-stencil formats need *both* bits or the transition is incomplete.
+    assert_eq!(slop_rhi::aspect_of(Format::Rgba8Unorm), ImageAspect::Color);
+    assert_eq!(slop_rhi::aspect_of(Format::D32Float), ImageAspect::Depth);
     assert_eq!(
-        slop_rhi::aspect_of(vk::Format::R8G8B8A8_UNORM),
-        vk::ImageAspectFlags::COLOR
+        slop_rhi::aspect_of(Format::D32FloatS8Uint),
+        ImageAspect::DepthStencil
     );
     assert_eq!(
-        slop_rhi::aspect_of(vk::Format::D32_SFLOAT),
-        vk::ImageAspectFlags::DEPTH
-    );
-    assert_eq!(
-        slop_rhi::aspect_of(vk::Format::D32_SFLOAT_S8_UINT),
-        vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
-    );
-    assert_eq!(
-        slop_rhi::aspect_of(vk::Format::D24_UNORM_S8_UINT),
-        vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
+        slop_rhi::aspect_of(Format::D24UnormS8Uint),
+        ImageAspect::DepthStencil
     );
 }
 
@@ -276,13 +271,12 @@ fn a_depth_image_clears_to_the_far_plane_at_zero() {
         &allocator,
         &ImageConfig {
             name: "depth clear probe",
-            extent: vk::Extent2D {
+            extent: Extent2D {
                 width: SIZE,
                 height: SIZE,
             },
             format,
-            usage: vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
-                | vk::ImageUsageFlags::TRANSFER_SRC,
+            usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::TRANSFER_SRC,
             mip_levels: 1,
         },
     )
@@ -292,7 +286,7 @@ fn a_depth_image_clears_to_the_far_plane_at_zero() {
         &allocator,
         "depth readback",
         u64::from(SIZE * SIZE * 4),
-        vk::BufferUsageFlags::TRANSFER_DST,
+        BufferUsage::TRANSFER_DST,
         MemoryLocation::Readback,
     );
 
@@ -309,7 +303,7 @@ fn a_depth_image_clears_to_the_far_plane_at_zero() {
 
     // An empty render pass whose only job is the clear.
     let attachment = vk::RenderingAttachmentInfo::default()
-        .image_view(depth.view())
+        .image_view(depth.view().raw())
         .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
         .load_op(vk::AttachmentLoadOp::CLEAR)
         .store_op(vk::AttachmentStoreOp::STORE)
@@ -321,10 +315,13 @@ fn a_depth_image_clears_to_the_far_plane_at_zero() {
         });
 
     let rendering = vk::RenderingInfo::default()
-        .render_area(vk::Rect2D {
-            offset: vk::Offset2D { x: 0, y: 0 },
-            extent: depth.extent(),
-        })
+        .render_area(
+            Rect2D {
+                offset: Offset2D { x: 0, y: 0 },
+                extent: depth.extent(),
+            }
+            .to_vk(),
+        )
         .layer_count(1)
         .depth_attachment(&attachment);
 
@@ -385,7 +382,7 @@ fn buffer(
     allocator: &Arc<Allocator>,
     name: &str,
     size: u64,
-    usage: vk::BufferUsageFlags,
+    usage: BufferUsage,
     location: MemoryLocation,
 ) -> Buffer {
     Buffer::new(

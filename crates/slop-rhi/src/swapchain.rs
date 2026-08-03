@@ -11,7 +11,10 @@ use std::time::Duration;
 use ash::vk;
 use slop_core::diagnostics::tracing::{debug, info, warn};
 
-use crate::{BinarySemaphore, Device, RhiError, Surface};
+use crate::{
+    BinarySemaphore, Device, Extent2D, Format, ImageHandle, ImageViewHandle, QueueHandle, RhiError,
+    Surface,
+};
 
 /// What acquiring an image produced.
 ///
@@ -94,22 +97,22 @@ pub struct SwapchainConfig {
     /// is 1920×1080 physical, and sizing a swapchain from the logical figure
     /// produces a blurry image or a validation error. Use the window's
     /// `inner_size()`, which is already physical.
-    pub extent: vk::Extent2D,
+    pub extent: Extent2D,
 }
 
 /// The images presented to the display, and their views.
 pub struct Swapchain {
     // Drop order: views are created from the swapchain's images, so they go
     // first; the swapchain then goes before the device that owns it.
-    views: Vec<vk::ImageView>,
+    views: Vec<ImageViewHandle>,
     handle: vk::SwapchainKHR,
     loader: ash::khr::swapchain::Device,
     device: Arc<Device>,
 
-    images: Vec<vk::Image>,
-    format: vk::Format,
+    images: Vec<ImageHandle>,
+    format: Format,
     color_space: vk::ColorSpaceKHR,
-    extent: vk::Extent2D,
+    extent: Extent2D,
     present_mode: vk::PresentModeKHR,
 }
 
@@ -133,7 +136,7 @@ impl Swapchain {
             loader,
             device: Arc::clone(device),
             images: Vec::new(),
-            format: vk::Format::UNDEFINED,
+            format: Format::Undefined,
             color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
             extent: config.extent,
             present_mode: vk::PresentModeKHR::FIFO,
@@ -153,7 +156,7 @@ impl Swapchain {
     /// # Errors
     ///
     /// Fails if the driver rejects creation.
-    pub fn recreate(&mut self, surface: &Surface, extent: vk::Extent2D) -> Result<(), RhiError> {
+    pub fn recreate(&mut self, surface: &Surface, extent: Extent2D) -> Result<(), RhiError> {
         // Outstanding work may still reference the images being replaced. This
         // is the blunt instrument; a per-frame fence is the eventual answer, but
         // resizing is rare enough that correctness wins here.
@@ -190,15 +193,15 @@ impl Swapchain {
         let (format, color_space) = select_format(&surface.formats(physical)?)?;
         let present_mode =
             select_present_mode(&surface.present_modes(physical)?, config.present_mode);
-        let extent = select_extent(&capabilities, config.extent);
+        let extent = Extent2D::from_vk(select_extent(&capabilities, config.extent.to_vk()));
         let image_count = select_image_count(&capabilities);
 
         let create_info = vk::SwapchainCreateInfoKHR::default()
             .surface(surface.handle())
             .min_image_count(image_count)
-            .image_format(format)
+            .image_format(format.to_vk())
             .image_color_space(color_space)
-            .image_extent(extent)
+            .image_extent(extent.to_vk())
             .image_array_layers(1)
             .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
             // EXCLUSIVE is correct even when graphics and present are different
@@ -221,7 +224,7 @@ impl Swapchain {
         let images = unsafe { self.loader.get_swapchain_images(handle) }?;
 
         self.handle = handle;
-        self.images = images;
+        self.images = images.into_iter().map(ImageHandle).collect();
         self.format = format;
         self.color_space = color_space;
         self.extent = extent;
@@ -245,9 +248,9 @@ impl Swapchain {
 
         for &image in &self.images {
             let create_info = vk::ImageViewCreateInfo::default()
-                .image(image)
+                .image(image.0)
                 .view_type(vk::ImageViewType::TYPE_2D)
-                .format(self.format)
+                .format(self.format.to_vk())
                 .subresource_range(vk::ImageSubresourceRange {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
                     base_mip_level: 0,
@@ -260,7 +263,7 @@ impl Swapchain {
             // it was created with.
             let view = unsafe { self.device.raw().create_image_view(&create_info, None) }?;
 
-            self.views.push(view);
+            self.views.push(ImageViewHandle(view));
         }
 
         Ok(())
@@ -270,7 +273,7 @@ impl Swapchain {
         for view in self.views.drain(..) {
             // SAFETY: each view was created by `create_views` from this device
             // and is destroyed exactly once.
-            unsafe { self.device.raw().destroy_image_view(view, None) };
+            unsafe { self.device.raw().destroy_image_view(view.0, None) };
         }
     }
 
@@ -297,17 +300,17 @@ impl Swapchain {
     }
 
     /// The presentable images.
-    pub fn images(&self) -> &[vk::Image] {
+    pub fn images(&self) -> &[ImageHandle] {
         &self.images
     }
 
     /// One view per image, in the same order.
-    pub fn views(&self) -> &[vk::ImageView] {
+    pub fn views(&self) -> &[ImageViewHandle] {
         &self.views
     }
 
     /// The image format, which render passes must match.
-    pub fn format(&self) -> vk::Format {
+    pub fn format(&self) -> Format {
         self.format
     }
 
@@ -317,7 +320,7 @@ impl Swapchain {
     }
 
     /// Size in physical pixels.
-    pub fn extent(&self) -> vk::Extent2D {
+    pub fn extent(&self) -> Extent2D {
         self.extent
     }
 
@@ -352,7 +355,7 @@ impl Swapchain {
         // fence is supplied because the engine does not use them.
         let result = unsafe {
             self.loader
-                .acquire_next_image(self.handle, nanos, signal.handle(), vk::Fence::null())
+                .acquire_next_image(self.handle, nanos, signal.handle().0, vk::Fence::null())
         };
 
         match result {
@@ -375,11 +378,11 @@ impl Swapchain {
     /// reported through [`PresentOutcome`], not as an error.
     pub fn present(
         &self,
-        queue: vk::Queue,
+        queue: QueueHandle,
         index: u32,
         wait: &BinarySemaphore,
     ) -> Result<PresentOutcome, RhiError> {
-        let wait_semaphores = [wait.handle()];
+        let wait_semaphores = [wait.handle().0];
         let swapchains = [self.handle];
         let indices = [index];
 
@@ -391,7 +394,7 @@ impl Swapchain {
         // SAFETY: every borrowed array outlives the call, `index` came from
         // `acquire_next_image` on this swapchain, and `queue` belongs to this
         // device.
-        let result = unsafe { self.loader.queue_present(queue, &present_info) };
+        let result = unsafe { self.loader.queue_present(queue.0, &present_info) };
 
         match result {
             Ok(false) => Ok(PresentOutcome::Presented),
@@ -437,26 +440,38 @@ impl std::fmt::Debug for Swapchain {
 /// misattribute to the lighting.
 fn select_format(
     available: &[vk::SurfaceFormatKHR],
-) -> Result<(vk::Format, vk::ColorSpaceKHR), RhiError> {
-    const PREFERRED: [vk::Format; 2] = [vk::Format::B8G8R8A8_SRGB, vk::Format::R8G8B8A8_SRGB];
+) -> Result<(Format, vk::ColorSpaceKHR), RhiError> {
+    const PREFERRED: [Format; 2] = [Format::Bgra8Srgb, Format::Rgba8Srgb];
 
-    for &format in &PREFERRED {
+    for format in PREFERRED {
         if let Some(found) = available.iter().find(|candidate| {
-            candidate.format == format && candidate.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
+            candidate.format == format.to_vk()
+                && candidate.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
         }) {
-            return Ok((found.format, found.color_space));
+            return Ok((format, found.color_space));
         }
     }
 
-    let fallback = available.first().ok_or(RhiError::NoSurfaceFormats)?;
+    // The fallback is restricted to formats this engine has a name for. An
+    // unnameable one could not be given to a pipeline anyway — `color_format` is
+    // a `Format` — so accepting it here would only move the failure to a worse
+    // place. `NoSurfaceFormats` covers both "the driver offered none" and "the
+    // driver offered none we understand", which is the same problem from the
+    // caller's side.
+    let fallback = available
+        .iter()
+        .find_map(|candidate| {
+            Format::from_vk(candidate.format).map(|format| (format, candidate.color_space))
+        })
+        .ok_or(RhiError::NoSurfaceFormats)?;
 
     warn!(
-        format = ?fallback.format,
+        format = ?fallback.0,
         "no sRGB surface format available; colors will be incorrect unless \
          the shader compensates"
     );
 
-    Ok((fallback.format, fallback.color_space))
+    Ok(fallback)
 }
 
 /// Use the requested mode when supported, falling back to FIFO.
@@ -556,15 +571,15 @@ mod tests {
     fn prefers_bgra_srgb() {
         let available = [
             format(
-                vk::Format::R8G8B8A8_UNORM,
+                Format::Rgba8Unorm.to_vk(),
                 vk::ColorSpaceKHR::SRGB_NONLINEAR,
             ),
-            format(vk::Format::B8G8R8A8_SRGB, vk::ColorSpaceKHR::SRGB_NONLINEAR),
+            format(Format::Bgra8Srgb.to_vk(), vk::ColorSpaceKHR::SRGB_NONLINEAR),
         ];
 
         let (chosen, space) = select_format(&available).expect("formats exist");
 
-        assert_eq!(chosen, vk::Format::B8G8R8A8_SRGB);
+        assert_eq!(chosen, Format::Bgra8Srgb);
         assert_eq!(space, vk::ColorSpaceKHR::SRGB_NONLINEAR);
     }
 
@@ -572,27 +587,27 @@ mod tests {
     fn accepts_rgba_srgb_when_bgra_is_absent() {
         let available = [
             format(
-                vk::Format::R8G8B8A8_UNORM,
+                Format::Rgba8Unorm.to_vk(),
                 vk::ColorSpaceKHR::SRGB_NONLINEAR,
             ),
-            format(vk::Format::R8G8B8A8_SRGB, vk::ColorSpaceKHR::SRGB_NONLINEAR),
+            format(Format::Rgba8Srgb.to_vk(), vk::ColorSpaceKHR::SRGB_NONLINEAR),
         ];
 
         let (chosen, _) = select_format(&available).expect("formats exist");
 
-        assert_eq!(chosen, vk::Format::R8G8B8A8_SRGB);
+        assert_eq!(chosen, Format::Rgba8Srgb);
     }
 
     #[test]
     fn falls_back_to_the_first_format_when_no_srgb_exists() {
         let available = [format(
-            vk::Format::R8G8B8A8_UNORM,
+            Format::Rgba8Unorm.to_vk(),
             vk::ColorSpaceKHR::SRGB_NONLINEAR,
         )];
 
         let (chosen, _) = select_format(&available).expect("formats exist");
 
-        assert_eq!(chosen, vk::Format::R8G8B8A8_UNORM);
+        assert_eq!(chosen, Format::Rgba8Unorm);
     }
 
     #[test]

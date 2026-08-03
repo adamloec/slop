@@ -49,7 +49,7 @@ use ash::vk;
 use slop_core::diagnostics::tracing::{debug, info};
 use slop_core::{Handle, HandleAllocator};
 
-use crate::{Device, RhiError};
+use crate::{BufferHandle, Device, ImageState, ImageViewHandle, RhiError, SamplerHandle};
 
 /// Set index the heap is bound at. Set 0, so that any per-pass or per-frame set
 /// added later takes a higher number and does not disturb it.
@@ -345,8 +345,8 @@ impl BindlessHeap {
     /// is exactly the situation where a crash is least helpful.
     pub fn insert_sampled_image(
         &mut self,
-        view: vk::ImageView,
-        layout: vk::ImageLayout,
+        view: ImageViewHandle,
+        state: ImageState,
     ) -> Option<Handle<SampledImage>> {
         if self.sampled_images.len() >= self.capacity.sampled_images as usize {
             return None;
@@ -354,8 +354,8 @@ impl BindlessHeap {
 
         let handle = self.sampled_images.allocate();
         let image_info = [vk::DescriptorImageInfo::default()
-            .image_view(view)
-            .image_layout(layout)];
+            .image_view(view.0)
+            .image_layout(state.layout)];
 
         self.write(SAMPLED_IMAGE_BINDING, handle.index(), |write| {
             write
@@ -369,13 +369,13 @@ impl BindlessHeap {
     /// Place a sampler in the heap.
     ///
     /// Returns `None` when the heap is full.
-    pub fn insert_sampler(&mut self, sampler: vk::Sampler) -> Option<Handle<Sampler>> {
+    pub fn insert_sampler(&mut self, sampler: SamplerHandle) -> Option<Handle<Sampler>> {
         if self.samplers.len() >= self.capacity.samplers as usize {
             return None;
         }
 
         let handle = self.samplers.allocate();
-        let image_info = [vk::DescriptorImageInfo::default().sampler(sampler)];
+        let image_info = [vk::DescriptorImageInfo::default().sampler(sampler.0)];
 
         self.write(SAMPLER_BINDING, handle.index(), |write| {
             write
@@ -389,14 +389,14 @@ impl BindlessHeap {
     /// Place a storage image in the heap, for compute shaders to write.
     ///
     /// Returns `None` when the heap is full.
-    pub fn insert_storage_image(&mut self, view: vk::ImageView) -> Option<Handle<StorageImage>> {
+    pub fn insert_storage_image(&mut self, view: ImageViewHandle) -> Option<Handle<StorageImage>> {
         if self.storage_images.len() >= self.capacity.storage_images as usize {
             return None;
         }
 
         let handle = self.storage_images.allocate();
         let image_info = [vk::DescriptorImageInfo::default()
-            .image_view(view)
+            .image_view(view.0)
             // The only layout a storage image may be written through.
             .image_layout(vk::ImageLayout::GENERAL)];
 
@@ -419,14 +419,14 @@ impl BindlessHeap {
     /// own declaration says, so the element type is the shader's business and
     /// this only has to know where the bytes are — which is what makes one
     /// binding serve materials, transforms and draw lists alike.
-    pub fn insert_storage_buffer(&mut self, buffer: vk::Buffer) -> Option<Handle<StorageBuffer>> {
+    pub fn insert_storage_buffer(&mut self, buffer: BufferHandle) -> Option<Handle<StorageBuffer>> {
         if self.storage_buffers.len() >= self.capacity.storage_buffers as usize {
             return None;
         }
 
         let handle = self.storage_buffers.allocate();
         let buffer_info = [vk::DescriptorBufferInfo::default()
-            .buffer(buffer)
+            .buffer(buffer.0)
             .offset(0)
             .range(vk::WHOLE_SIZE)];
 

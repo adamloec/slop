@@ -5,8 +5,8 @@ use std::sync::Arc;
 use ash::vk;
 use gpu_allocator::vulkan as ga;
 
-use crate::RhiError;
 use crate::resource::{Allocator, MemoryLocation};
+use crate::{BufferHandle, BufferUsage, RhiError};
 
 /// What a buffer is for.
 ///
@@ -23,7 +23,7 @@ pub struct BufferConfig<'a> {
     /// Size in bytes. Vulkan rejects zero.
     pub size: u64,
     /// How the buffer will be used.
-    pub usage: vk::BufferUsageFlags,
+    pub usage: BufferUsage,
     /// Which memory it should live in.
     pub location: MemoryLocation,
 }
@@ -50,7 +50,7 @@ impl Buffer {
 
         let create_info = vk::BufferCreateInfo::default()
             .size(config.size)
-            .usage(config.usage)
+            .usage(config.usage.to_vk())
             // EXCLUSIVE, always. Sharing across queue families without an
             // ownership transfer costs performance on every access on some
             // hardware, and that transfer is a barrier this crate makes
@@ -104,8 +104,8 @@ impl Buffer {
     }
 
     /// The underlying handle.
-    pub fn handle(&self) -> vk::Buffer {
-        self.handle
+    pub fn handle(&self) -> BufferHandle {
+        BufferHandle(self.handle)
     }
 
     /// Size in bytes, as requested. The allocation backing it may be larger.

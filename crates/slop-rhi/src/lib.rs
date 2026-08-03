@@ -30,6 +30,9 @@ mod command;
 mod descriptor;
 mod device;
 mod error;
+mod format;
+mod geometry;
+mod handle;
 mod instance;
 mod pass;
 mod pipeline;
@@ -39,9 +42,10 @@ mod shader;
 mod surface;
 mod swapchain;
 mod sync;
+mod usage;
 
 pub use command::{
-    BufferState, CommandBuffer, CommandPool, ImageState, Submission, submit_and_wait,
+    BufferState, CommandBuffer, CommandPool, ImageState, Submission, WaitStage, submit_and_wait,
     submit_recorded_and_wait,
 };
 pub use descriptor::{
@@ -54,6 +58,11 @@ pub use device::{
     select,
 };
 pub use error::RhiError;
+pub use format::{Format, ImageAspect, aspect_of};
+pub use geometry::{Extent2D, Offset2D, Rect2D};
+pub use handle::{
+    BufferHandle, ImageHandle, ImageViewHandle, QueueHandle, SamplerHandle, SemaphoreHandle,
+};
 pub use instance::{Instance, InstanceConfig, Validation};
 pub use pass::{Attachments, ClearValue, ColorAttachment, DepthAttachment, Load, Pass};
 pub use pipeline::{
@@ -61,7 +70,7 @@ pub use pipeline::{
     PipelineLayoutConfig, ShaderStage, VertexLayout,
 };
 pub use resource::{
-    Allocator, AllocatorStats, Buffer, BufferConfig, Image, ImageConfig, MemoryLocation, aspect_of,
+    Allocator, AllocatorStats, Buffer, BufferConfig, Image, ImageConfig, MemoryLocation,
     preferred_depth_format,
 };
 pub use sampler::{Filter, SamplerConfig, TextureSampler, Wrap};
@@ -69,10 +78,18 @@ pub use shader::ShaderModule;
 pub use surface::{Surface, required_surface_extensions};
 pub use swapchain::{AcquireOutcome, PresentMode, PresentOutcome, Swapchain, SwapchainConfig};
 pub use sync::{BinarySemaphore, TimelineSemaphore};
+pub use usage::{BufferUsage, ImageUsage};
 
-/// Re-exported so consumers can name Vulkan types — extents, formats, handles —
-/// without their own `ash` dependency, and so the engine cannot end up split
-/// across two versions of it.
+/// Re-exported so an application that genuinely needs to reach past the RHI —
+/// a vendor extension, a debugging tool — can do so without its own `ash`
+/// dependency, and so the engine cannot end up split across two versions of it.
+///
+/// **Not the way to name a format, an extent, or a usage.** Those are
+/// [`Format`], [`Extent2D`], [`BufferUsage`] and [`ImageUsage`], and the reason
+/// is `docs/DESIGN.md` §2.2: this crate was bought on the promise that a second
+/// backend slots in cleanly, which holds only while the layers above name types
+/// defined here. Every consumer above `slop-rhi` once named `vk::` types in its
+/// own public signatures, and closing that is what those four types are for.
 pub use ash::vk;
 
 pub(crate) use instance::REQUIRED_API_VERSION;

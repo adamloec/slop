@@ -137,7 +137,7 @@ fn submit(
 ) {
     let command_infos = [vk::CommandBufferSubmitInfo::default().command_buffer(buffer)];
     let signal_infos = [vk::SemaphoreSubmitInfo::default()
-        .semaphore(timeline.handle())
+        .semaphore(timeline.handle().raw())
         .value(value)
         .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)];
 
@@ -152,7 +152,7 @@ fn submit(
     unsafe {
         device
             .raw()
-            .queue_submit2(device.queues().graphics, &submits, vk::Fence::null())
+            .queue_submit2(device.queues().graphics.raw(), &submits, vk::Fence::null())
     }
     .expect("submission must succeed");
 }

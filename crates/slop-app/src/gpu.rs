@@ -25,7 +25,8 @@
 use std::sync::Arc;
 
 use slop_rhi::{
-    Allocator, Device, DeviceInfo, DeviceSelection, Instance, InstanceConfig, RhiError, Surface, vk,
+    Allocator, Device, DeviceInfo, DeviceSelection, Extent2D, Instance, InstanceConfig, RhiError,
+    Surface,
 };
 use thiserror::Error;
 use winit::event_loop::ActiveEventLoop;
@@ -161,10 +162,10 @@ impl Gpu {
     /// Physical pixels, not logical: the swapchain is sized in pixels, and using
     /// logical ones produces an image that is subtly the wrong size on a scaled
     /// display — the same units mistake that clipped the debug overlay.
-    pub fn extent(&self) -> vk::Extent2D {
+    pub fn extent(&self) -> Extent2D {
         let size = self.window.inner_size();
 
-        vk::Extent2D {
+        Extent2D {
             width: size.width,
             height: size.height,
         }

@@ -135,7 +135,7 @@ debug overlay that shows frame timing and inspects a live entity.
 §9.3 records M2's exit criteria and that they are met. §9.2 item E is what M3
 starts from.
 
-**837 tests.** Clippy and rustdoc clean under `-D warnings` in both feature
+**838 tests.** Clippy and rustdoc clean under `-D warnings` in both feature
 configurations, Vulkan validation reporting nothing, and every crate containing
 `unsafe` passing under Miri — `slop-ecs` under both Stacked and Tree Borrows.
 

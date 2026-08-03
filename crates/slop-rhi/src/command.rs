@@ -18,7 +18,35 @@ use std::sync::Arc;
 
 use ash::vk;
 
-use crate::{Device, RhiError, TimelineSemaphore};
+use crate::{
+    BufferHandle, Device, Extent2D, ImageAspect, ImageHandle, RhiError, SemaphoreHandle,
+    TimelineSemaphore,
+};
+
+/// A pipeline stage a submission may wait at.
+///
+/// Not the full Vulkan set: waiting is a choice with two sensible answers here,
+/// and naming them is what keeps a caller from reaching for `vk::` to express
+/// one. The stage matters — waiting at the top of the pipe stalls vertex work
+/// that has no reason to wait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitStage {
+    /// Wait only when the pipeline reaches colour output. What a swapchain
+    /// acquire wants: nothing before that stage touches the image.
+    ColorAttachmentOutput,
+    /// Wait before anything runs. The conservative answer, and the right one
+    /// when the dependency is not specifically a colour write.
+    AllCommands,
+}
+
+impl WaitStage {
+    pub(crate) fn to_vk(self) -> vk::PipelineStageFlags2 {
+        match self {
+            Self::ColorAttachmentOutput => vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+            Self::AllCommands => vk::PipelineStageFlags2::ALL_COMMANDS,
+        }
+    }
+}
 
 /// A point in an image's lifetime: its layout, and the stage and access that
 /// last touched it or will next touch it.
@@ -359,8 +387,8 @@ impl CommandBuffer {
     /// wrong aspect transitions nothing while reporting nothing.
     pub fn transition_image(
         &self,
-        image: vk::Image,
-        aspect: vk::ImageAspectFlags,
+        image: ImageHandle,
+        aspect: ImageAspect,
         from: ImageState,
         to: ImageState,
     ) {
@@ -377,9 +405,9 @@ impl CommandBuffer {
             // something to smuggle in here.
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .image(image)
+            .image(image.0)
             .subresource_range(vk::ImageSubresourceRange {
-                aspect_mask: aspect,
+                aspect_mask: aspect.to_vk(),
                 base_mip_level: 0,
                 // Every level, not just level zero. A barrier names a
                 // *subresource range*, and layout is tracked per level — so a
@@ -409,7 +437,7 @@ impl CommandBuffer {
     /// Covers the whole buffer. Sub-range barriers exist and are almost never
     /// what is wanted — a buffer written in one pass and read in the next is
     /// read whole.
-    pub fn barrier_buffer(&self, buffer: vk::Buffer, from: BufferState, to: BufferState) {
+    pub fn barrier_buffer(&self, buffer: BufferHandle, from: BufferState, to: BufferState) {
         let barriers = [vk::BufferMemoryBarrier2::default()
             .src_stage_mask(from.stage)
             .src_access_mask(from.access)
@@ -417,7 +445,7 @@ impl CommandBuffer {
             .dst_access_mask(to.access)
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .buffer(buffer)
+            .buffer(buffer.0)
             .offset(0)
             .size(vk::WHOLE_SIZE)];
 
@@ -442,7 +470,7 @@ impl CommandBuffer {
     ///
     /// `size` bytes from the start of each. Both buffers need the matching
     /// `TRANSFER_SRC` and `TRANSFER_DST` usage flags.
-    pub fn copy_buffer(&self, source: vk::Buffer, destination: vk::Buffer, size: u64) {
+    pub fn copy_buffer(&self, source: BufferHandle, destination: BufferHandle, size: u64) {
         let regions = [vk::BufferCopy::default()
             .src_offset(0)
             .dst_offset(0)
@@ -454,7 +482,7 @@ impl CommandBuffer {
         unsafe {
             self.device
                 .raw()
-                .cmd_copy_buffer(self.handle, source, destination, &regions);
+                .cmd_copy_buffer(self.handle, source.0, destination.0, &regions);
         }
     }
 
@@ -468,10 +496,10 @@ impl CommandBuffer {
     /// padding.
     pub fn copy_buffer_to_image(
         &self,
-        buffer: vk::Buffer,
-        image: vk::Image,
-        aspect: vk::ImageAspectFlags,
-        extent: vk::Extent2D,
+        buffer: BufferHandle,
+        image: ImageHandle,
+        aspect: ImageAspect,
+        extent: Extent2D,
     ) {
         self.copy_buffer_to_image_level(buffer, 0, image, aspect, extent, 0);
     }
@@ -488,11 +516,11 @@ impl CommandBuffer {
     /// only a third larger than level zero alone.
     pub fn copy_buffer_to_image_level(
         &self,
-        buffer: vk::Buffer,
+        buffer: BufferHandle,
         buffer_offset: u64,
-        image: vk::Image,
-        aspect: vk::ImageAspectFlags,
-        extent: vk::Extent2D,
+        image: ImageHandle,
+        aspect: ImageAspect,
+        extent: Extent2D,
         level: u32,
     ) {
         let regions = [vk::BufferImageCopy::default()
@@ -500,7 +528,7 @@ impl CommandBuffer {
             .buffer_row_length(0)
             .buffer_image_height(0)
             .image_subresource(vk::ImageSubresourceLayers {
-                aspect_mask: aspect,
+                aspect_mask: aspect.to_vk(),
                 mip_level: level,
                 base_array_layer: 0,
                 layer_count: 1,
@@ -518,8 +546,8 @@ impl CommandBuffer {
         unsafe {
             self.device.raw().cmd_copy_buffer_to_image(
                 self.handle,
-                buffer,
-                image,
+                buffer.0,
+                image.0,
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                 &regions,
             );
@@ -538,7 +566,7 @@ impl CommandBuffer {
     /// The `HOST` pipeline stage exists precisely for this, and is the only
     /// place in the engine it should appear: everything else in a frame is
     /// ordered GPU-side.
-    pub fn make_visible_to_host(&self, buffer: vk::Buffer) {
+    pub fn make_visible_to_host(&self, buffer: BufferHandle) {
         self.barrier_buffer(buffer, BufferState::TRANSFER_DST, BufferState::HOST_READ);
     }
 
@@ -557,7 +585,7 @@ impl CommandBuffer {
     /// destination has no padding between rows and `width * bytes_per_pixel`
     /// is the stride. Anything else would have to be communicated back to the
     /// caller, and there is no reason to want it here.
-    pub fn copy_image_to_buffer(&self, image: vk::Image, buffer: vk::Buffer, extent: vk::Extent2D) {
+    pub fn copy_image_to_buffer(&self, image: ImageHandle, buffer: BufferHandle, extent: Extent2D) {
         let regions = [vk::BufferImageCopy::default()
             .buffer_offset(0)
             .buffer_row_length(0)
@@ -581,9 +609,9 @@ impl CommandBuffer {
         unsafe {
             self.device.raw().cmd_copy_image_to_buffer(
                 self.handle,
-                image,
+                image.0,
                 vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                buffer,
+                buffer.0,
                 &regions,
             );
         }
@@ -682,11 +710,11 @@ pub struct Submission<'a> {
     /// The stage matters: waiting at the top of the pipe stalls vertex work that
     /// has no reason to wait, and the difference is visible in a frame's
     /// occupancy rather than in correctness.
-    pub wait: &'a [(vk::Semaphore, vk::PipelineStageFlags2)],
+    pub wait: &'a [(SemaphoreHandle, WaitStage)],
     /// Binary semaphores signalled when the commands finish.
-    pub signal: &'a [vk::Semaphore],
+    pub signal: &'a [SemaphoreHandle],
     /// Timeline semaphores and the values to signal them to.
-    pub signal_timeline: &'a [(vk::Semaphore, u64)],
+    pub signal_timeline: &'a [(SemaphoreHandle, u64)],
     /// The command buffer to run.
     pub command: &'a CommandBuffer,
 }
@@ -707,8 +735,8 @@ impl Device {
             .iter()
             .map(|(semaphore, stage)| {
                 vk::SemaphoreSubmitInfo::default()
-                    .semaphore(*semaphore)
-                    .stage_mask(*stage)
+                    .semaphore(semaphore.0)
+                    .stage_mask(stage.to_vk())
             })
             .collect();
 
@@ -717,12 +745,12 @@ impl Device {
             .iter()
             .map(|semaphore| {
                 vk::SemaphoreSubmitInfo::default()
-                    .semaphore(*semaphore)
+                    .semaphore(semaphore.0)
                     .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
             })
             .chain(submission.signal_timeline.iter().map(|(semaphore, value)| {
                 vk::SemaphoreSubmitInfo::default()
-                    .semaphore(*semaphore)
+                    .semaphore(semaphore.0)
                     .value(*value)
                     .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
             }))
@@ -741,7 +769,7 @@ impl Device {
         // array outlives the call.
         unsafe {
             self.raw()
-                .queue_submit2(self.queues().graphics, &submits, vk::Fence::null())
+                .queue_submit2(self.queues().graphics.0, &submits, vk::Fence::null())
         }?;
 
         Ok(())

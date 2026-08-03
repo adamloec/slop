@@ -35,7 +35,7 @@ use std::sync::Arc;
 
 use slop_asset::Vfs;
 use slop_render::Frame;
-use slop_rhi::{Allocator, BindlessHeap, Device, ShaderModule, vk};
+use slop_rhi::{Allocator, BindlessHeap, Device, Format, ShaderModule};
 use winit::event::WindowEvent;
 use winit::window::Window;
 
@@ -93,7 +93,7 @@ impl DebugUi {
         device: &Arc<Device>,
         heap: &mut BindlessHeap,
         vfs: &Vfs,
-        color_format: vk::Format,
+        color_format: Format,
     ) -> Result<Self, EditorError> {
         let bytes = vfs.read(SHADER).map_err(|why| EditorError::NotCooked {
             what: String::from(SHADER),

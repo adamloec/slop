@@ -25,7 +25,7 @@ use std::sync::Arc;
 use ash::vk;
 use slop_core::diagnostics::tracing::{debug, info, warn};
 
-use crate::{Instance, RhiError};
+use crate::{Instance, QueueHandle, RhiError};
 
 /// The queues the engine submits through.
 ///
@@ -36,13 +36,13 @@ use crate::{Instance, RhiError};
 #[derive(Debug, Clone, Copy)]
 pub struct Queues {
     /// Rendering work.
-    pub graphics: vk::Queue,
+    pub graphics: QueueHandle,
     /// Compute work, ideally overlapping graphics.
-    pub compute: vk::Queue,
+    pub compute: QueueHandle,
     /// Uploads and downloads, ideally the DMA engine.
-    pub transfer: vk::Queue,
+    pub transfer: QueueHandle,
     /// Presentation. `None` in headless mode.
-    pub present: Option<vk::Queue>,
+    pub present: Option<QueueHandle>,
 }
 
 /// A logical device: the connection to one physical adapter.
@@ -130,12 +130,12 @@ impl Device {
         // family we requested.
         let queues = unsafe {
             Queues {
-                graphics: raw.get_device_queue(families.graphics, 0),
-                compute: raw.get_device_queue(families.compute, 0),
-                transfer: raw.get_device_queue(families.transfer, 0),
+                graphics: QueueHandle(raw.get_device_queue(families.graphics, 0)),
+                compute: QueueHandle(raw.get_device_queue(families.compute, 0)),
+                transfer: QueueHandle(raw.get_device_queue(families.transfer, 0)),
                 present: families
                     .present
-                    .map(|family| raw.get_device_queue(family, 0)),
+                    .map(|family| QueueHandle(raw.get_device_queue(family, 0))),
             }
         };
 

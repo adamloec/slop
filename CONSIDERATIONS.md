@@ -199,15 +199,13 @@ The first three were found on the first read; the last two on re-validation:
   `index_of` hits a bare `continue` — no `warn!`, nothing. Missing *textures* at
   least log (`mesh.rs:357`). For a cooked artifact a dangling mesh reference is a
   cooker bug and should be loud.
-- **`resize()` destroys a possibly-in-flight image.** `mesh.rs:437` assigns
-  `self.depth = Some(Image::new(..))`, which drops the old `Image` and calls
-  `vkDestroyImage`. That is safe **only** because `FrameRenderer::prepare` →
-  `Swapchain::recreate` (`swapchain.rs:160`) calls `wait_idle` immediately
-  before. Nothing in `resize`'s documentation states that dependency — it says
-  only "must be called before the first frame and after every resize." Correct
-  today by coincidence of call order, with no diagnostic if that order changes.
-  **Fix this one first**, because it is the only item here that is currently
-  right for a reason nothing records.
+- ~~**`resize()` destroys a possibly-in-flight image.**~~ **Fixed in `3b79591`.**
+  `mesh.rs` assigned `self.depth = Some(Image::new(..))`, dropping the old
+  `Image` and calling `vkDestroyImage`. That was safe only because the single
+  caller reached it through `FrameRenderer::prepare` → `Swapchain::recreate`,
+  which waits for the device. Nothing said so. `resize` now waits itself when it
+  is replacing an existing image, which costs nothing on the windowed path where
+  the device is already idle.
 - **A full device stall per resource at load.** `upload_buffer` (`mesh.rs:638`)
   and `upload_texture` (`mesh.rs:678`) each call `slop_rhi::submit_and_wait` —
   a queue submit and a `wait_idle` per vertex buffer, per index buffer and per
@@ -381,6 +379,31 @@ Counted on re-validation: **10 stale paths in `PLAN.md`, 1 in `DESIGN.md`.**
 
 A register that cannot name the file has stopped being a control.
 
+**Fixed 2026-08-03**, along with a wider documentation pass that found the drift
+was not confined to paths:
+
+- `PLAN.md`'s header and §3 still said M2 was half done, with a test count 40
+  behind. §8 and §9.3 already said it was complete.
+- `architecture.md`'s crate-layering diagram — the one document whose entire job
+  is showing the dependency graph — had **six wrong edges**. `slop-cli -> slop-app`
+  and `slop-editor -> slop-app` do not exist; `slop-asset -> slop-reflect` and
+  `slop-core -> slop-math` never did; `slop-render -.-> slop-verify` is not a
+  dev-dependency of that crate. `slop-cook` was absent entirely and `slop-editor`
+  was drawn as unbuilt.
+- `docs/README.md` had three stray table rows above its own title, and listed
+  neither `slop-render`, `slop-cook` nor `slop-editor`.
+- The root `README.md` said "M0 — foundation" and listed four crates of thirteen.
+- `docs/slop-render/README.md` still documented `Overlay`, including a full
+  section of design notes, three commits after it moved to `slop-editor`.
+- `PLAN.md` §6.1 still opened by claiming there were no hacks in the tree —
+  which this review's own commit message said it had stopped doing, while only
+  touching this file.
+
+That last one is the pattern in miniature: the intent to retire a claim was
+recorded here and never applied there. **The general lesson is not "check paths."
+It is that a crate boundary moving invalidates prose in every document that
+names the old shape, and nothing mechanical catches it.**
+
 **Verdict:** the docs are an asset and the reasoning in them is the most valuable
 thing in the repository — this is not an argument for fewer of them. It is an
 argument that path references in `PLAN.md` §6.1 and `DESIGN.md` are load-bearing
@@ -421,20 +444,29 @@ itself, which is the whole reason `slop-cook` was extracted.
 The general point is the one to keep: `RenderError` is the pattern, and it was
 already right when `EditorError` was written.
 
-## 10. An `unsafe` raw Vulkan submit in an example's test
+## 10. An `unsafe` raw Vulkan submit in an example's test — **fixed in `fb47d24`**
 
-`examples/cube/tests/golden.rs:473-491` hand-rolls `queue_submit2` —
+`examples/cube/tests/golden.rs` hand-rolled `queue_submit2` —
 `vk::SubmitInfo2`, `vk::CommandBufferSubmitInfo`, `vk::SemaphoreSubmitInfo`, a
-raw `vk::Fence::null()` and an `unsafe` block — while `examples/cube/src/
-scene.rs:657`, the same crate, calls `slop_rhi::submit_and_wait`.
+raw `vk::Fence::null()` and an `unsafe` block — while `examples/cube/src/scene.rs`,
+the same crate, called `slop_rhi::submit_and_wait`.
 
-Two things at once. It is **the only `unsafe` outside `CONVENTIONS.md` §7's three
-sanctioned homes**, which is a rule the tree otherwise keeps perfectly. And it
-duplicates a function the crate already links — `slop-rhi/tests/support/mod.rs:75`
-is a third copy of the same helper.
+Two things at once. It was **the only `unsafe` outside `CONVENTIONS.md` §7's
+three sanctioned homes**, a rule the tree otherwise keeps perfectly. And it
+duplicated a function the crate already links.
 
-**Verdict:** delete it and call the RHI's. Ten minutes, and it restores §7 to
-being true rather than nearly true.
+**Resolved**, and more thoroughly than this item asked for. The right primitive
+turned out to be the one underneath: `submit_recorded_and_wait` takes an
+already-recorded buffer and blocks, and `submit_and_wait` records into a fresh
+pool and delegates to it. That collapsed **four** copies, not the two named here
+— `slop-rhi/tests/support/mod.rs` was the third and `examples/model/tests/golden.rs`
+was a fourth this review missed. The raw `queue_submit2` call now exists once in
+the workspace, and `examples/` contains no `unsafe` at all.
+
+Worth recording as a correction to how this review counted: it found duplicate
+*call sites* by grepping for `unsafe` and for the helper's name, which finds
+copies that look alike and misses one that had been reshaped. The fourth copy
+was inside a test harness that had split the submit differently.
 
 ## 11. `slop-cook`'s `anyhow` deviation is argued, but has no recorded expiry
 
@@ -453,15 +485,20 @@ has to change.
 Add a `PLAN.md` §6.1 row so the decision is re-read when the editor arrives
 rather than inherited, which is the difference between a judgement and a default.
 
-## 12. `docs/` has a README per crate for 9 of 13
+## 12. `docs/` has a README per crate for 9 of 13 — **fixed 2026-08-03**
 
 `docs/` mirrors the crate list with a per-crate README. Missing:
 `slop-cli`, `slop-cook`, `slop-editor`, `slop-reflect-derive` — precisely the
 four crates created most recently.
 
 The same root cause as item 8, in a different medium: crate boundaries moved and
-the documentation layout did not follow. Cheap to notice, cheap to fix, and the
-one of these findings that gets worse purely with time rather than with code.
+the documentation layout did not follow.
+
+**Resolved.** `slop-cook` and `slop-editor` now have documents. `slop-cli` and
+`slop-reflect-derive` deliberately do not, each with a stated reason in
+`docs/README.md`: the CLI is a thin front end whose behaviour is documented in
+`slop-cook`, and a proc-macro crate is an artifact of a Rust restriction rather
+than a design boundary, so it is covered by `slop-reflect`.
 
 ---
 
@@ -471,28 +508,29 @@ Revised after re-validation. The shape is unchanged; what moved is that item 1 i
 smaller than it looked, item 2 grew a defect that should go first, and item 5
 split into a cheap half and a slow half.
 
-1. **`MeshRenderer::resize`'s in-flight destroy (item 2, defect 4).** Promoted to
-   the top for one reason: it is the only finding here that is currently correct
-   by coincidence rather than by construction. Everything else is a cost; this is
-   a hazard with no diagnostic.
-2. **The `vk::` leak (item 1).** Four newtypes — `Format`, `Extent2D`,
+**Done as of 2026-08-03:** item 2 defect 4 (`3b79591`), item 10 (`fb47d24`),
+item 12 and the documentation half of item 8.
+
+1. **The `vk::` leak (item 1).** Four newtypes — `Format`, `Extent2D`,
    `BufferUsageFlags`, `ImageUsageFlags` — cover 90 of 113 sites. Cheap today,
    structural after M3.
-3. **`MeshRenderer`'s remaining defects (item 2).** Small fixes; each is also a
-   signal about the decomposition M3 needs.
-4. **`Reflect`'s missing bound (item 6).** One line now, an audit later. Cheaper
+2. **`MeshRenderer`'s remaining defects (item 2).** Two-phase `Option` init,
+   `load` not being safe to call twice, the silent `continue`, and the per-resource
+   device stall. Each is also a signal about the decomposition M3 needs.
+3. **`Reflect`'s missing bound (item 6).** One line now, an audit later. Cheaper
    than it reads, because `Reflect` is *already* an `unsafe trait` — the safety
    contract exists and is simply missing this clause.
-5. **The quick sweep: items 5 (feature gate only), 10, 12.** A feature gate, a
-   deleted `unsafe` block, four READMEs. An hour together, and each removes a
-   thing that only gets more expensive to notice.
-6. **App-shell extraction (item 4) and the `slop-editor` rename (item 5).** An
+4. **`slop-editor`'s `inspector` feature gate (item 5, cheap half).** Two lines,
+   and it drops `slop-ecs` and `slop-reflect` from every consumer that only
+   wants a frame timer.
+5. **App-shell extraction (item 4) and the `slop-editor` rename (item 5).** An
    afternoon each, and both cheaper the sooner they happen.
-7. **Error shapes (item 9)** alongside whichever of item 2 lands first, since
+6. **Error shapes (item 9)** alongside whichever of item 2 lands first, since
    both are error-shape work in the same two crates.
-8. **`scene.rs` (item 3)** resolves with the material system, if that work takes
+7. **`scene.rs` (item 3)** resolves with the material system, if that work takes
    absorbing it as an exit condition — and reconciles the staging barrier rather
    than picking a copy.
-9. **`PLAN.md` §6.1 rows (items 8, 11).** The stale paths, and `slop-cook`'s
-   `anyhow` expiry. Bookkeeping, but it is the bookkeeping that keeps the
-   register a control.
+8. **The rest of `PLAN.md` §6.1 (items 8, 11).** The register's M1- and M2-tagged
+   rows still need auditing row by row, and `slop-cook`'s `anyhow` expiry wants a
+   row of its own. Bookkeeping, but it is the bookkeeping that keeps the register
+   a control.

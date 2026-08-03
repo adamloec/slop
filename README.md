@@ -12,7 +12,7 @@ A Sponza-scale glTF scene loads through the cook pipeline and renders with its
 own materials, mip chains and normal maps. Underneath it: an archetype ECS with
 a work-stealing scheduler and world serialization, runtime reflection with a
 derive macro, a content pipeline that cooks glTF, PNG and Slang keyed on content
-hash, and a debug overlay that inspects a live entity. 837 tests.
+hash, and a debug overlay that inspects a live entity. 838 tests.
 
 What is *not* there is a render graph, real shading, shadows or post-processing.
 That is M3.

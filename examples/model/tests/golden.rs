@@ -42,9 +42,9 @@ use example_model::{OrbitCamera, bounds, camera};
 use slop_math::Vec3;
 use slop_render::{MeshRenderer, Target};
 use slop_rhi::{
-    Allocator, BindlessHeap, BindlessHeapConfig, Buffer, BufferConfig, CommandPool, Device,
-    DeviceSelection, Image, ImageConfig, ImageState, Instance, InstanceConfig, MemoryLocation,
-    RhiError, ShaderModule, TimelineSemaphore, vk,
+    Allocator, BindlessHeap, BindlessHeapConfig, Buffer, BufferConfig, BufferUsage, CommandPool,
+    Device, DeviceSelection, Extent2D, Format, Image, ImageConfig, ImageState, ImageUsage,
+    Instance, InstanceConfig, MemoryLocation, RhiError, ShaderModule, TimelineSemaphore,
 };
 use slop_verify::{Golden, Mode, Rgba8, Tolerance};
 
@@ -54,7 +54,7 @@ const SIZE: u32 = 256;
 
 /// UNORM, so readback bytes are the bytes the shader wrote and nothing in the
 /// comparison depends on a colour space conversion the driver performs.
-const FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
+const FORMAT: Format = Format::Rgba8Unorm;
 
 /// The frame captured.
 ///
@@ -321,7 +321,7 @@ impl Headless {
         vfs: &slop_asset::Vfs,
         model: &str,
     ) -> Result<Self, String> {
-        let extent = vk::Extent2D {
+        let extent = Extent2D {
             width: SIZE,
             height: SIZE,
         };
@@ -365,7 +365,7 @@ impl Headless {
                 name: "model golden target",
                 extent,
                 format: FORMAT,
-                usage: vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
+                usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
                 mip_levels: 1,
             },
         )
@@ -376,7 +376,7 @@ impl Headless {
             &BufferConfig {
                 name: "model golden readback",
                 size: u64::from(SIZE) * u64::from(SIZE) * Rgba8::CHANNELS as u64,
-                usage: vk::BufferUsageFlags::TRANSFER_DST,
+                usage: BufferUsage::TRANSFER_DST,
                 location: MemoryLocation::Readback,
             },
         )

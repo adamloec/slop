@@ -40,10 +40,10 @@ use std::sync::Arc;
 
 use slop_asset::Reflection;
 use slop_rhi::{
-    Attachments, Blend, Buffer, BufferConfig, ColorAttachment, Device, GraphicsPipeline,
-    GraphicsPipelineConfig, Image, ImageConfig, ImageState, Load, MemoryLocation, PipelineLayout,
-    PipelineLayoutConfig, SampledImage, Sampler, SamplerConfig, ShaderModule, ShaderStage,
-    TextureSampler, VertexLayout, vk,
+    Attachments, Blend, Buffer, BufferConfig, BufferUsage, ColorAttachment, Device, Extent2D,
+    Format, GraphicsPipeline, GraphicsPipelineConfig, Image, ImageConfig, ImageState, ImageUsage,
+    Load, MemoryLocation, Offset2D, PipelineLayout, PipelineLayoutConfig, Rect2D, SampledImage,
+    Sampler, SamplerConfig, ShaderModule, ShaderStage, TextureSampler, VertexLayout,
 };
 
 use crate::EditorError;
@@ -57,10 +57,10 @@ const VERTEX_STRIDE: u32 = 20;
 /// `R8G8B8A8_UNORM` and is read as a `float4`. Reflection describes the shader
 /// side and cannot see that. The two are checked against each other in
 /// [`Overlay::new`].
-const ATTRIBUTES: [(vk::Format, u32); 3] = [
-    (vk::Format::R32G32_SFLOAT, 0),
-    (vk::Format::R32G32_SFLOAT, 8),
-    (vk::Format::R8G8B8A8_UNORM, 16),
+const ATTRIBUTES: [(Format, u32); 3] = [
+    (Format::Rg32Float, 0),
+    (Format::Rg32Float, 8),
+    (Format::Rgba8Unorm, 16),
 ];
 
 /// Per-draw constants, matching `PushConstants` in `shaders/passes/overlay.slang`.
@@ -124,7 +124,7 @@ impl Overlay {
         heap: &mut slop_rhi::BindlessHeap,
         module: &ShaderModule,
         reflection: &Reflection,
-        color_format: vk::Format,
+        color_format: Format,
     ) -> Result<Self, EditorError> {
         check_layout(reflection)?;
 
@@ -274,7 +274,7 @@ impl Overlay {
 
         let image = upload_image(&self.device, allocator, width, height, &pixels)?;
         let slot = heap
-            .insert_sampled_image(image.view(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .insert_sampled_image(image.view(), ImageState::SHADER_READ)
             .ok_or(EditorError::Layout {
                 what: "the bindless heap had no room for an overlay texture",
             })?;
@@ -435,7 +435,7 @@ struct Draw {
     index_count: u32,
     base_vertex: u32,
     texture: u32,
-    scissor: vk::Rect2D,
+    scissor: Rect2D,
 }
 
 /// Per-slot vertex and index buffers, grown as needed.
@@ -468,14 +468,14 @@ impl MeshBuffers {
             allocator,
             "overlay vertices",
             vertices.len(),
-            vk::BufferUsageFlags::VERTEX_BUFFER,
+            BufferUsage::VERTEX,
         )?;
         grow(
             &mut self.indices,
             allocator,
             "overlay indices",
             index_bytes.len(),
-            vk::BufferUsageFlags::INDEX_BUFFER,
+            BufferUsage::INDEX,
         )?;
 
         if let Some(buffer) = &mut self.vertices {
@@ -498,7 +498,7 @@ fn grow(
     allocator: &Arc<slop_rhi::Allocator>,
     name: &str,
     needed: usize,
-    usage: vk::BufferUsageFlags,
+    usage: BufferUsage,
 ) -> Result<(), EditorError> {
     if slot
         .as_ref()
@@ -526,7 +526,7 @@ fn grow(
 ///
 /// Clamped to the target: egui can emit a rectangle extending past the edge, and
 /// a scissor outside the framebuffer is a validation error rather than a clamp.
-fn scissor(clip: egui::Rect, extent: vk::Extent2D, pixels_per_point: f32) -> vk::Rect2D {
+fn scissor(clip: egui::Rect, extent: Extent2D, pixels_per_point: f32) -> Rect2D {
     let min_x = (clip.min.x * pixels_per_point).round().max(0.0) as u32;
     let min_y = (clip.min.y * pixels_per_point).round().max(0.0) as u32;
     let max_x = (clip.max.x * pixels_per_point).round().max(0.0) as u32;
@@ -535,12 +535,12 @@ fn scissor(clip: egui::Rect, extent: vk::Extent2D, pixels_per_point: f32) -> vk:
     let min_x = min_x.min(extent.width);
     let min_y = min_y.min(extent.height);
 
-    vk::Rect2D {
-        offset: vk::Offset2D {
+    Rect2D {
+        offset: Offset2D {
             x: min_x as i32,
             y: min_y as i32,
         },
-        extent: vk::Extent2D {
+        extent: Extent2D {
             width: max_x.min(extent.width) - min_x,
             height: max_y.min(extent.height) - min_y,
         },
@@ -560,7 +560,7 @@ fn upload_image(
         &BufferConfig {
             name: "overlay texture staging",
             size: pixels.len() as u64,
-            usage: vk::BufferUsageFlags::TRANSFER_SRC,
+            usage: BufferUsage::TRANSFER_SRC,
             location: MemoryLocation::Upload,
         },
     )?;
@@ -571,11 +571,11 @@ fn upload_image(
         allocator,
         &ImageConfig {
             name: "overlay texture",
-            extent: vk::Extent2D { width, height },
+            extent: Extent2D { width, height },
             // UNORM: egui's colours are already in the space its blending
             // expects, and an sRGB view would convert them a second time.
-            format: vk::Format::R8G8B8A8_UNORM,
-            usage: vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
+            format: Format::Rgba8Unorm,
+            usage: ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
             // No chain. A UI is drawn at one texel per pixel by construction, so
             // it never samples below level zero — and the font atlas would blur
             // rather than sharpen if it did.
@@ -594,7 +594,7 @@ fn upload_image(
             staging.handle(),
             image.handle(),
             image.aspect(),
-            vk::Extent2D { width, height },
+            Extent2D { width, height },
         );
         command.transition_image(
             image.handle(),
@@ -707,7 +707,7 @@ mod tests {
         // The case reflection cannot see, asserted so that deriving the layout
         // from reflection later — which would produce R32G32B32A32_SFLOAT —
         // fails here first.
-        assert_eq!(ATTRIBUTES[2].0, vk::Format::R8G8B8A8_UNORM);
+        assert_eq!(ATTRIBUTES[2].0, Format::Rgba8Unorm);
         assert_eq!(
             overlay_shader().vertex_inputs[2].format,
             VertexFormat::Float32x4

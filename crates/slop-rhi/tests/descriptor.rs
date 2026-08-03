@@ -13,7 +13,8 @@ mod support;
 use std::sync::Arc;
 
 use slop_rhi::{
-    BindlessHeap, BindlessHeapConfig, Image, ImageConfig, PipelineLayout, PipelineLayoutConfig, vk,
+    BindlessHeap, BindlessHeapConfig, Extent2D, Format, Image, ImageConfig, ImageState, ImageUsage,
+    PipelineLayout, PipelineLayoutConfig, vk,
 };
 
 #[test]
@@ -89,7 +90,7 @@ fn inserting_a_texture_returns_a_slot_a_shader_could_index() {
     let texture = texture(&allocator);
 
     let handle = heap
-        .insert_sampled_image(texture.view(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+        .insert_sampled_image(texture.view(), ImageState::SHADER_READ)
         .expect("an empty heap must have room");
 
     // The index is what reaches the GPU; the generation stays on the CPU.
@@ -114,7 +115,7 @@ fn slots_are_reused_after_removal_and_stale_handles_stop_resolving() {
     let texture = texture(&allocator);
 
     let first = heap
-        .insert_sampled_image(texture.view(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+        .insert_sampled_image(texture.view(), ImageState::SHADER_READ)
         .expect("room");
 
     assert!(heap.remove_sampled_image(first));
@@ -128,7 +129,7 @@ fn slots_are_reused_after_removal_and_stale_handles_stop_resolving() {
     );
 
     let second = heap
-        .insert_sampled_image(texture.view(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+        .insert_sampled_image(texture.view(), ImageState::SHADER_READ)
         .expect("room");
 
     assert_eq!(second.index(), first.index(), "the slot should be reused");
@@ -167,14 +168,14 @@ fn a_full_heap_returns_none_rather_than_panicking() {
 
     for slot in 0..capacity {
         assert!(
-            heap.insert_sampled_image(texture.view(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            heap.insert_sampled_image(texture.view(), ImageState::SHADER_READ)
                 .is_some(),
             "slot {slot} should fit"
         );
     }
 
     assert!(
-        heap.insert_sampled_image(texture.view(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+        heap.insert_sampled_image(texture.view(), ImageState::SHADER_READ)
             .is_none(),
         "the heap is full and must say so"
     );
@@ -197,7 +198,7 @@ fn many_textures_can_be_written_while_the_set_is_live() {
     let texture = texture(&allocator);
 
     for _ in 0..512 {
-        heap.insert_sampled_image(texture.view(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+        heap.insert_sampled_image(texture.view(), ImageState::SHADER_READ)
             .expect("room");
     }
 
@@ -268,12 +269,12 @@ fn texture(allocator: &Arc<slop_rhi::Allocator>) -> Image {
         allocator,
         &ImageConfig {
             name: "descriptor test texture",
-            extent: vk::Extent2D {
+            extent: Extent2D {
                 width: 4,
                 height: 4,
             },
-            format: vk::Format::R8G8B8A8_UNORM,
-            usage: vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
+            format: Format::Rgba8Unorm,
+            usage: ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
             mip_levels: 1,
         },
     )

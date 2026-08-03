@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use ash::vk;
 
-use crate::{Device, RhiError};
+use crate::{Device, RhiError, SamplerHandle};
 
 /// How a sampler reads between texels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -114,8 +114,8 @@ impl TextureSampler {
     }
 
     /// The underlying handle, for placing in the bindless heap.
-    pub fn handle(&self) -> vk::Sampler {
-        self.handle
+    pub fn handle(&self) -> SamplerHandle {
+        SamplerHandle(self.handle)
     }
 }
 

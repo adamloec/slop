@@ -6,7 +6,7 @@
 
 use slop_asset::Reflection;
 use slop_asset::shader::VertexFormat;
-use slop_rhi::{VertexLayout, vk};
+use slop_rhi::{Format, VertexLayout};
 
 use crate::RenderError;
 
@@ -17,7 +17,7 @@ use crate::RenderError;
 /// to hold what it views.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VertexBinding {
-    attributes: Vec<(vk::Format, u32)>,
+    attributes: Vec<(Format, u32)>,
     stride: u32,
 }
 
@@ -81,12 +81,12 @@ impl VertexBinding {
 }
 
 /// The Vulkan format for one reflected input type.
-const fn vulkan_format(format: VertexFormat) -> vk::Format {
+const fn vulkan_format(format: VertexFormat) -> Format {
     match format {
-        VertexFormat::Float32 => vk::Format::R32_SFLOAT,
-        VertexFormat::Float32x2 => vk::Format::R32G32_SFLOAT,
-        VertexFormat::Float32x3 => vk::Format::R32G32B32_SFLOAT,
-        VertexFormat::Float32x4 => vk::Format::R32G32B32A32_SFLOAT,
+        VertexFormat::Float32 => Format::R32Float,
+        VertexFormat::Float32x2 => Format::Rg32Float,
+        VertexFormat::Float32x3 => Format::Rgb32Float,
+        VertexFormat::Float32x4 => Format::Rgba32Float,
     }
 }
 
@@ -127,9 +127,9 @@ mod tests {
         assert_eq!(
             layout.attributes,
             &[
-                (vk::Format::R32G32B32_SFLOAT, 0),
-                (vk::Format::R32G32B32_SFLOAT, 12),
-                (vk::Format::R32G32_SFLOAT, 24),
+                (Format::Rgb32Float, 0),
+                (Format::Rgb32Float, 12),
+                (Format::Rg32Float, 24),
             ]
         );
     }
@@ -175,10 +175,10 @@ mod tests {
         // Component count is what a wrong mapping gets wrong, and the symptom is
         // a shader reading a garbage channel rather than an error.
         for (format, expected) in [
-            (VertexFormat::Float32, vk::Format::R32_SFLOAT),
-            (VertexFormat::Float32x2, vk::Format::R32G32_SFLOAT),
-            (VertexFormat::Float32x3, vk::Format::R32G32B32_SFLOAT),
-            (VertexFormat::Float32x4, vk::Format::R32G32B32A32_SFLOAT),
+            (VertexFormat::Float32, Format::R32Float),
+            (VertexFormat::Float32x2, Format::Rg32Float),
+            (VertexFormat::Float32x3, Format::Rgb32Float),
+            (VertexFormat::Float32x4, Format::Rgba32Float),
         ] {
             assert_eq!(vulkan_format(format), expected, "{format:?}");
         }

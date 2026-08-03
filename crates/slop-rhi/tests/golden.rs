@@ -41,8 +41,9 @@ use std::sync::Arc;
 
 use slop_asset::Vfs;
 use slop_rhi::{
-    Allocator, Buffer, BufferConfig, CommandPool, Device, GraphicsPipeline, GraphicsPipelineConfig,
-    Image, ImageConfig, ImageState, MemoryLocation, PipelineLayout, ShaderModule, ShaderStage, vk,
+    Allocator, Buffer, BufferConfig, BufferUsage, CommandPool, Device, Extent2D, Format,
+    GraphicsPipeline, GraphicsPipelineConfig, Image, ImageConfig, ImageState, ImageUsage,
+    MemoryLocation, Offset2D, PipelineLayout, Rect2D, ShaderModule, ShaderStage, vk,
 };
 use slop_verify::{Golden, Mode, Rgba8, Tolerance};
 
@@ -53,7 +54,7 @@ const SIZE: u32 = 256;
 
 /// No automatic sRGB encode on write, so readback bytes are shader output. See
 /// the module docs.
-const FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
+const FORMAT: Format = Format::Rgba8Unorm;
 
 /// Enough to exercise reset and reuse; more would only cost time.
 const FRAMES: u32 = 3;
@@ -258,7 +259,7 @@ impl Headless {
         let extent = self.target.extent();
 
         let attachments = [vk::RenderingAttachmentInfo::default()
-            .image_view(self.target.view())
+            .image_view(self.target.view().raw())
             .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
             .load_op(vk::AttachmentLoadOp::CLEAR)
             .store_op(vk::AttachmentStoreOp::STORE)
@@ -271,10 +272,13 @@ impl Headless {
             })];
 
         let rendering = vk::RenderingInfo::default()
-            .render_area(vk::Rect2D {
-                offset: vk::Offset2D { x: 0, y: 0 },
-                extent,
-            })
+            .render_area(
+                Rect2D {
+                    offset: Offset2D { x: 0, y: 0 },
+                    extent,
+                }
+                .to_vk(),
+            )
             .layer_count(1)
             .color_attachments(&attachments);
 
@@ -286,10 +290,11 @@ impl Headless {
             min_depth: 0.0,
             max_depth: 1.0,
         }];
-        let scissors = [vk::Rect2D {
-            offset: vk::Offset2D { x: 0, y: 0 },
+        let scissors = [Rect2D {
+            offset: Offset2D { x: 0, y: 0 },
             extent,
-        }];
+        }
+        .to_vk()];
 
         let raw = self.device.raw();
 
@@ -330,14 +335,14 @@ fn colour_target(allocator: &Arc<Allocator>) -> Image {
         allocator,
         &ImageConfig {
             name: "golden colour target",
-            extent: vk::Extent2D {
+            extent: Extent2D {
                 width: SIZE,
                 height: SIZE,
             },
             format: FORMAT,
             // TRANSFER_SRC is what makes it readable; without it the copy is a
             // validation error rather than a wrong result.
-            usage: vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
+            usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
             mip_levels: 1,
         },
     )
@@ -351,7 +356,7 @@ fn readback_buffer(allocator: &Arc<Allocator>) -> Buffer {
         &BufferConfig {
             name: "golden readback",
             size: u64::from(SIZE) * u64::from(SIZE) * Rgba8::CHANNELS as u64,
-            usage: vk::BufferUsageFlags::TRANSFER_DST,
+            usage: BufferUsage::TRANSFER_DST,
             location: MemoryLocation::Readback,
         },
     )

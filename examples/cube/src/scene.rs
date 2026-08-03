@@ -9,10 +9,10 @@ use slop_math::{Mat4, Quat, Vec3};
 use slop_render::VertexBinding;
 use slop_rhi::{
     Allocator, Attachments, BindlessHeap, BindlessHeapConfig, Blend, Buffer, BufferConfig,
-    BufferState, ClearValue, ColorAttachment, DEPTH_CLEAR, DepthAttachment, Device,
-    GraphicsPipeline, GraphicsPipelineConfig, Image, ImageConfig, ImageState, Load, MemoryLocation,
-    PipelineLayout, PipelineLayoutConfig, SampledImage, Sampler, SamplerConfig, ShaderModule,
-    ShaderStage, TextureSampler, vk,
+    BufferState, BufferUsage, ClearValue, ColorAttachment, DEPTH_CLEAR, DepthAttachment, Device,
+    Extent2D, Format, GraphicsPipeline, GraphicsPipelineConfig, Image, ImageAspect, ImageConfig,
+    ImageState, ImageUsage, Load, MemoryLocation, PipelineLayout, PipelineLayoutConfig,
+    SampledImage, Sampler, SamplerConfig, ShaderModule, ShaderStage, TextureSampler,
 };
 
 /// Per-draw data, matching `PushConstants` in `shaders/passes/cube.slang`.
@@ -119,8 +119,8 @@ impl Scene {
     pub fn new(
         device: &Arc<Device>,
         allocator: &Arc<Allocator>,
-        extent: vk::Extent2D,
-        color_format: vk::Format,
+        extent: Extent2D,
+        color_format: Format,
     ) -> Result<Self, String> {
         let module = load_shader(device)?;
 
@@ -217,7 +217,7 @@ impl Scene {
             allocator,
             "cube vertices",
             bytemuck::cast_slice(&cooked.vertices),
-            vk::BufferUsageFlags::VERTEX_BUFFER,
+            BufferUsage::VERTEX,
             BufferState::VERTEX_INPUT,
         )?;
         let indices = upload_buffer(
@@ -225,7 +225,7 @@ impl Scene {
             allocator,
             "cube indices",
             bytemuck::cast_slice(&cooked.indices),
-            vk::BufferUsageFlags::INDEX_BUFFER,
+            BufferUsage::INDEX,
             BufferState::INDEX_INPUT,
         )?;
         let index_count = u32::try_from(cooked.indices.len())
@@ -256,14 +256,14 @@ impl Scene {
                 name: "cube depth",
                 extent,
                 format: depth_format,
-                usage: vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+                usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT,
                 mip_levels: 1,
             },
         )
         .map_err(|error| error.to_string())?;
 
         let texture_slot = heap
-            .insert_sampled_image(texture.view(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .insert_sampled_image(texture.view(), ImageState::SHADER_READ)
             .ok_or_else(|| String::from("the bindless heap had no room for one texture"))?;
         let sampler_slot = heap
             .insert_sampler(sampler.handle())
@@ -371,7 +371,7 @@ impl Scene {
                 &self.allocator,
                 "cube vertices",
                 bytemuck::cast_slice(&cooked.vertices),
-                vk::BufferUsageFlags::VERTEX_BUFFER,
+                BufferUsage::VERTEX,
                 BufferState::VERTEX_INPUT,
             )?;
             self.indices = upload_buffer(
@@ -379,7 +379,7 @@ impl Scene {
                 &self.allocator,
                 "cube indices",
                 bytemuck::cast_slice(&cooked.indices),
-                vk::BufferUsageFlags::INDEX_BUFFER,
+                BufferUsage::INDEX,
                 BufferState::INDEX_INPUT,
             )?;
             self.index_count = u32::try_from(cooked.indices.len())
@@ -400,7 +400,7 @@ impl Scene {
             self.heap.remove_sampled_image(self.texture_slot);
             self.texture_slot = self
                 .heap
-                .insert_sampled_image(texture.view(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .insert_sampled_image(texture.view(), ImageState::SHADER_READ)
                 .ok_or_else(|| String::from("the bindless heap had no room for one texture"))?;
             self.texture = texture;
 
@@ -416,11 +416,7 @@ impl Scene {
     /// # Errors
     ///
     /// Fails if the image cannot be allocated.
-    pub fn resize(
-        &mut self,
-        allocator: &Arc<Allocator>,
-        extent: vk::Extent2D,
-    ) -> Result<(), String> {
+    pub fn resize(&mut self, allocator: &Arc<Allocator>, extent: Extent2D) -> Result<(), String> {
         // Waiting first because the old depth image is about to be dropped and
         // frames referencing it may still be in flight.
         self.device.wait_idle().map_err(|error| error.to_string())?;
@@ -431,7 +427,7 @@ impl Scene {
                 name: "cube depth",
                 extent,
                 format: self.depth.format(),
-                usage: vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+                usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT,
                 mip_levels: 1,
             },
         )
@@ -496,7 +492,7 @@ impl Scene {
 
         command.transition_image(
             target.image,
-            vk::ImageAspectFlags::COLOR,
+            ImageAspect::Color,
             target.from,
             ImageState::COLOR_ATTACHMENT,
         );
@@ -622,7 +618,7 @@ fn upload_buffer(
     allocator: &Arc<Allocator>,
     name: &str,
     data: &[u8],
-    usage: vk::BufferUsageFlags,
+    usage: BufferUsage,
     final_state: BufferState,
 ) -> Result<Buffer, String> {
     let size = data.len() as u64;
@@ -632,7 +628,7 @@ fn upload_buffer(
         &BufferConfig {
             name: "upload staging",
             size,
-            usage: vk::BufferUsageFlags::TRANSFER_SRC,
+            usage: BufferUsage::TRANSFER_SRC,
             location: MemoryLocation::Upload,
         },
     )
@@ -648,7 +644,7 @@ fn upload_buffer(
         &BufferConfig {
             name,
             size,
-            usage: usage | vk::BufferUsageFlags::TRANSFER_DST,
+            usage: usage | BufferUsage::TRANSFER_DST,
             location: MemoryLocation::DeviceOnly,
         },
     )
@@ -681,7 +677,7 @@ fn upload_texture(
         &BufferConfig {
             name: "texture staging",
             size: pixels.len() as u64,
-            usage: vk::BufferUsageFlags::TRANSFER_SRC,
+            usage: BufferUsage::TRANSFER_SRC,
             location: MemoryLocation::Upload,
         },
     )
@@ -696,7 +692,7 @@ fn upload_texture(
         allocator,
         &ImageConfig {
             name: "cube albedo",
-            extent: vk::Extent2D {
+            extent: Extent2D {
                 width: cooked.width,
                 height: cooked.height,
             },
@@ -704,7 +700,7 @@ fn upload_texture(
             // uploaded. The golden image then compares shader output rather
             // than the result of a colour space conversion.
             format: vulkan_format(cooked.format),
-            usage: vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
+            usage: ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
             mip_levels: cooked.mip_levels,
         },
     )
@@ -725,7 +721,7 @@ fn upload_texture(
                 level.offset as u64,
                 texture.handle(),
                 texture.aspect(),
-                vk::Extent2D {
+                Extent2D {
                     width: level.width,
                     height: level.height,
                 },
@@ -755,10 +751,10 @@ fn upload_texture(
 /// the GPU exactly the bytes on disk, and the texture units decompress at sample
 /// time. That is the whole point — the saving is in VRAM and bandwidth, not just
 /// on disk.
-fn vulkan_format(format: slop_asset::Format) -> vk::Format {
+fn vulkan_format(format: slop_asset::Format) -> Format {
     match format {
-        slop_asset::Format::Rgba8 => vk::Format::R8G8B8A8_UNORM,
-        slop_asset::Format::Bc7 => vk::Format::BC7_UNORM_BLOCK,
+        slop_asset::Format::Rgba8 => Format::Rgba8Unorm,
+        slop_asset::Format::Bc7 => Format::Bc7Unorm,
     }
 }
 

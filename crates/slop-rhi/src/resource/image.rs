@@ -5,8 +5,10 @@ use std::sync::Arc;
 use ash::vk;
 use gpu_allocator::vulkan as ga;
 
-use crate::RhiError;
 use crate::resource::{Allocator, MemoryLocation};
+use crate::{
+    Extent2D, Format, ImageAspect, ImageHandle, ImageUsage, ImageViewHandle, RhiError, aspect_of,
+};
 
 /// What an image is, and what it is for.
 ///
@@ -19,11 +21,11 @@ pub struct ImageConfig<'a> {
     /// A name for validation messages and allocator reports.
     pub name: &'a str,
     /// Size in pixels.
-    pub extent: vk::Extent2D,
+    pub extent: Extent2D,
     /// Pixel format.
-    pub format: vk::Format,
+    pub format: Format,
     /// How the image will be used.
-    pub usage: vk::ImageUsageFlags,
+    pub usage: ImageUsage,
     /// How many mip levels to allocate, including level zero.
     ///
     /// One means no mips, which is right for a render target or a depth buffer:
@@ -59,8 +61,8 @@ pub struct Image {
     // `Some` between construction and drop.
     allocation: Option<ga::Allocation>,
     allocator: Arc<Allocator>,
-    extent: vk::Extent2D,
-    format: vk::Format,
+    extent: Extent2D,
+    format: Format,
 }
 
 impl Image {
@@ -82,7 +84,7 @@ impl Image {
 
         let create_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
-            .format(config.format)
+            .format(config.format.to_vk())
             .extent(vk::Extent3D {
                 width: config.extent.width,
                 height: config.extent.height,
@@ -96,7 +98,7 @@ impl Image {
             // working on one vendor and not another is normal, and sampling
             // from it is slow. The staging copy is the portable path.
             .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(config.usage)
+            .usage(config.usage.to_vk())
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             // Contents start undefined, which is what every barrier in this
             // crate transitions *from* on first use.
@@ -141,9 +143,9 @@ impl Image {
         let view_info = vk::ImageViewCreateInfo::default()
             .image(handle)
             .view_type(vk::ImageViewType::TYPE_2D)
-            .format(config.format)
+            .format(config.format.to_vk())
             .subresource_range(vk::ImageSubresourceRange {
-                aspect_mask: aspect_of(config.format),
+                aspect_mask: aspect_of(config.format).to_vk(),
                 base_mip_level: 0,
                 level_count: config.levels(),
                 base_array_layer: 0,
@@ -173,52 +175,28 @@ impl Image {
     }
 
     /// The underlying handle, for barriers and copies.
-    pub fn handle(&self) -> vk::Image {
-        self.handle
+    pub fn handle(&self) -> ImageHandle {
+        ImageHandle(self.handle)
     }
 
     /// A view covering the whole image, for attachments and descriptors.
-    pub fn view(&self) -> vk::ImageView {
-        self.view
+    pub fn view(&self) -> ImageViewHandle {
+        ImageViewHandle(self.view)
     }
 
     /// Size in pixels.
-    pub fn extent(&self) -> vk::Extent2D {
+    pub fn extent(&self) -> Extent2D {
         self.extent
     }
 
     /// Pixel format.
-    pub fn format(&self) -> vk::Format {
+    pub fn format(&self) -> Format {
         self.format
     }
 
     /// Which aspect this image's format carries, for barriers and copies.
-    pub fn aspect(&self) -> vk::ImageAspectFlags {
+    pub fn aspect(&self) -> ImageAspect {
         aspect_of(self.format)
-    }
-}
-
-/// The aspect mask a format implies.
-///
-/// Derived rather than asked for. An aspect that disagrees with the format is
-/// rejected by validation with a message about the subresource range, several
-/// steps from the call that chose it — and there is exactly one right answer per
-/// format, so asking the caller only creates the opportunity to be wrong.
-pub fn aspect_of(format: vk::Format) -> vk::ImageAspectFlags {
-    match format {
-        // Depth only.
-        vk::Format::D16_UNORM | vk::Format::X8_D24_UNORM_PACK32 | vk::Format::D32_SFLOAT => {
-            vk::ImageAspectFlags::DEPTH
-        }
-        // Depth and stencil together. Both aspects must appear in a barrier
-        // covering such an image, or the transition is incomplete.
-        vk::Format::D16_UNORM_S8_UINT
-        | vk::Format::D24_UNORM_S8_UINT
-        | vk::Format::D32_SFLOAT_S8_UINT => {
-            vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
-        }
-        vk::Format::S8_UINT => vk::ImageAspectFlags::STENCIL,
-        _ => vk::ImageAspectFlags::COLOR,
     }
 }
 
@@ -240,13 +218,13 @@ pub fn aspect_of(format: vk::Format) -> vk::ImageAspectFlags {
 /// Panics if the device supports no depth format at all as a depth attachment.
 /// Vulkan requires `D16_UNORM` of every implementation, so this is unreachable
 /// on a conformant driver and would mean the device is lying about its formats.
-pub fn preferred_depth_format(device: &Arc<crate::Device>) -> vk::Format {
-    const CANDIDATES: [vk::Format; 4] = [
-        vk::Format::D32_SFLOAT,
-        vk::Format::D32_SFLOAT_S8_UINT,
-        vk::Format::D24_UNORM_S8_UINT,
+pub fn preferred_depth_format(device: &Arc<crate::Device>) -> Format {
+    const CANDIDATES: [Format; 4] = [
+        Format::D32Float,
+        Format::D32FloatS8Uint,
+        Format::D24UnormS8Uint,
         // Required of every conformant implementation, so this is the floor.
-        vk::Format::D16_UNORM,
+        Format::D16Unorm,
     ];
 
     for format in CANDIDATES {
@@ -255,7 +233,7 @@ pub fn preferred_depth_format(device: &Arc<crate::Device>) -> vk::Format {
             device
                 .instance()
                 .raw()
-                .get_physical_device_format_properties(device.physical_device(), format)
+                .get_physical_device_format_properties(device.physical_device(), format.to_vk())
         };
 
         if properties

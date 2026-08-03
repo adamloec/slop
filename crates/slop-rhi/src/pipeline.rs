@@ -21,7 +21,7 @@ use ash::vk;
 
 use crate::BindlessHeap;
 
-use crate::{Device, RhiError, ShaderModule};
+use crate::{Device, Format, RhiError, ShaderModule};
 
 /// Front faces wind counter-clockwise.
 ///
@@ -73,7 +73,7 @@ pub struct GraphicsPipelineConfig<'a> {
     /// Format of the single colour attachment this pipeline renders into.
     ///
     /// Must match the swapchain's, or the driver rejects the draw.
-    pub color_format: vk::Format,
+    pub color_format: Format,
     /// Format of the depth attachment, or `None` for a pipeline that neither
     /// tests nor writes depth.
     ///
@@ -86,7 +86,7 @@ pub struct GraphicsPipelineConfig<'a> {
     /// without write, or a different comparison, is a different pipeline, and
     /// inventing the configuration surface before a pass needs it would be
     /// designing against imagined requirements (`docs/PLAN.md` §4.1-D).
-    pub depth_format: Option<vk::Format>,
+    pub depth_format: Option<Format>,
     /// Layout of the vertex buffer bound at binding 0, or `None` for a shader
     /// generating its own positions from `SV_VertexID`.
     pub vertex_layout: Option<VertexLayout<'a>>,
@@ -159,7 +159,7 @@ pub struct VertexLayout<'a> {
     /// offsets below describe a layout the compiler did not produce.
     pub stride: u32,
     /// Each attribute's format and byte offset, in shader location order.
-    pub attributes: &'a [(vk::Format, u32)],
+    pub attributes: &'a [(Format, u32)],
 }
 
 /// What a pipeline's shaders can reach.
@@ -325,7 +325,7 @@ impl GraphicsPipeline {
                             // location order. One list to keep in step instead
                             // of two.
                             .location(u32::try_from(location).unwrap_or(0))
-                            .format(format)
+                            .format(format.to_vk())
                             .offset(offset)
                     })
                     .collect()
@@ -378,10 +378,14 @@ impl GraphicsPipeline {
             .depth_bounds_test_enable(false)
             .stencil_test_enable(false);
 
-        let color_formats = [config.color_format];
+        let color_formats = [config.color_format.to_vk()];
         let mut rendering = vk::PipelineRenderingCreateInfo::default()
             .color_attachment_formats(&color_formats)
-            .depth_attachment_format(config.depth_format.unwrap_or(vk::Format::UNDEFINED));
+            .depth_attachment_format(
+                config
+                    .depth_format
+                    .map_or(vk::Format::UNDEFINED, Format::to_vk),
+            );
 
         let create_info = vk::GraphicsPipelineCreateInfo::default()
             .stages(&stages)

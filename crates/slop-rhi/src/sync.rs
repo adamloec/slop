@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use ash::vk;
 
-use crate::{Device, RhiError};
+use crate::{Device, RhiError, SemaphoreHandle};
 
 /// Wait forever. `u64::MAX` nanoseconds is roughly 584 years, which Vulkan
 /// treats as "no timeout".
@@ -68,8 +68,8 @@ impl TimelineSemaphore {
     }
 
     /// The underlying handle, for submission structures.
-    pub fn handle(&self) -> vk::Semaphore {
-        self.handle
+    pub fn handle(&self) -> SemaphoreHandle {
+        SemaphoreHandle(self.handle)
     }
 
     /// The current counter value.
@@ -201,8 +201,8 @@ impl BinarySemaphore {
     }
 
     /// The underlying handle, for acquire and present structures.
-    pub fn handle(&self) -> vk::Semaphore {
-        self.handle
+    pub fn handle(&self) -> SemaphoreHandle {
+        SemaphoreHandle(self.handle)
     }
 }
 
