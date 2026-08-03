@@ -45,7 +45,7 @@ use slop_asset::texture::{Format, Texture};
 use slop_asset::{Cache, CacheKey};
 use slop_core::diagnostics::tracing::{debug, info, warn};
 
-use crate::cook::Summary;
+use crate::shader_import::Summary;
 
 /// Bump to invalidate every cooked texture.
 ///

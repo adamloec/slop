@@ -219,6 +219,13 @@ source asset  →  import  →  cook  →  runtime format  →  mmap
 Cache keyed on content hash + importer version. Retrofitting this means redoing
 every asset type, so it lands with the first asset.
 
+**"Never parse at runtime" is enforced by the dependency graph, not by
+discipline.** The importers live in `slop-cook`, which is the only crate that
+depends on `gltf`, `png`, `intel_tex_2` or the Slang compiler. A game links
+`slop-asset` for the read path and never links `slop-cook`, so a shipped binary
+*cannot* contain a glTF parser — there is no edge to it. `slop-cli` and the
+editor are both front ends over the same library.
+
 ### 2.9 The renderer consumes an immutable snapshot, never live world state
 
 Each simulation tick produces a self-contained packet — a *render snapshot* —
@@ -543,8 +550,9 @@ slop-audio      mixer, spatialization, DSP graph on cpal
 slop-abi        WIT interface definitions — the platform contract
 slop-host       wasmtime host, module lifecycle, bulk data marshalling
 slop-app        main loop, module/plugin wiring, configuration
-slop-editor     egui-based tooling
-slop-cli        build, cook, run, inspect, test
+slop-editor     egui-based tooling — the debug overlay, its renderer, the inspector
+slop-cook       source→cooked importers; glTF, PNG, Slang. Never linked by a game.
+slop-cli        build, cook, run, inspect, test — a front end over slop-cook
 slop-verify     golden images, comparison, approval — §5; dev-dependency only
 ```
 

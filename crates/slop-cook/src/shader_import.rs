@@ -70,11 +70,11 @@ const SHADER_INCLUDE_DIRECTORY: &str = "lib";
 
 /// What a cook run did.
 #[derive(Debug, Default, PartialEq, Eq)]
-pub(crate) struct Summary {
+pub struct Summary {
     /// Artifacts compiled this run.
-    pub(crate) cooked: usize,
+    pub cooked: usize,
     /// Artifacts already up to date.
-    pub(crate) skipped: usize,
+    pub skipped: usize,
 }
 
 /// Cook every shader under `root/shaders` into `root/.slop/cache/shaders`.

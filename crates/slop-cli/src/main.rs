@@ -12,14 +12,10 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-mod cook;
 mod fetch;
-mod gltf_import;
-mod reflection;
-mod texture_import;
 
 /// Slop engine tooling.
 #[derive(Debug, Parser)]
@@ -90,8 +86,8 @@ fn main() -> Result<()> {
 
     match Cli::parse().command {
         Command::Cook { root, force, watch } => {
-            let cooked = cook_once(&root, force)?;
-            println!("cooked {}, up to date {}", cooked.0, cooked.1);
+            let summary = slop_cook::all(&root, force)?;
+            println!("cooked {}, up to date {}", summary.cooked, summary.skipped);
 
             if watch {
                 return watch_and_cook(&root);
@@ -105,20 +101,6 @@ fn main() -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Cook everything once, returning how much was done and how much was skipped.
-fn cook_once(root: &Path, force: bool) -> Result<(usize, usize)> {
-    let context = || format!("cooking assets under {}", root.display());
-
-    let shaders = cook::shaders(root, force).with_context(context)?;
-    let meshes = gltf_import::meshes(root, force).with_context(context)?;
-    let textures = texture_import::textures(root, force).with_context(context)?;
-
-    Ok((
-        shaders.cooked + meshes.cooked + textures.cooked,
-        shaders.skipped + meshes.skipped + textures.skipped,
-    ))
 }
 
 /// Recook on a timer until interrupted.
@@ -141,9 +123,9 @@ fn watch_and_cook(root: &Path) -> Result<()> {
     loop {
         std::thread::sleep(WATCH_INTERVAL);
 
-        match cook_once(root, false) {
-            Ok((0, _)) => {}
-            Ok((cooked, _)) => println!("recooked {cooked}"),
+        match slop_cook::all(root, false) {
+            Ok(summary) if summary.cooked == 0 => {}
+            Ok(summary) => println!("recooked {}", summary.cooked),
             // `{error:#}` renders the whole `anyhow` context chain on one line,
             // which for a shader error is the file, the stage and the message.
             Err(error) => eprintln!("cook failed: {error:#}"),

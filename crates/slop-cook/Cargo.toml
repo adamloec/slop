@@ -1,0 +1,25 @@
+[package]
+name = "slop-cook"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# `anyhow` in a library, against CONVENTIONS 6 -- see the crate docs, which
+# argue it from the rule's own reason rather than claiming an exemption.
+anyhow = { workspace = true }
+# Source-asset parsers and encoders. **Nothing that links these ships**: a game
+# links slop-asset for the read path and never this crate, which is what makes
+# DESIGN 2.8's "shipping builds never parse a glTF" structural rather than a
+# habit. Keeping them out of a shipped binary is slop-asset invariant 7.
+gltf = { workspace = true }
+intel_tex_2 = { workspace = true }
+png = { workspace = true }
+serde_json = { workspace = true }
+slop-asset = { workspace = true }
+slop-core = { workspace = true }
+
+[lints]
+workspace = true

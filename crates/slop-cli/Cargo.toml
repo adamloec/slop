@@ -14,11 +14,9 @@ path = "src/main.rs"
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true }
-gltf = { workspace = true }
-intel_tex_2 = { workspace = true }
-png = { workspace = true }
-serde_json = { workspace = true }
-slop-asset = { workspace = true }
+# The cooking itself. This crate is the command-line front end over it; the
+# editor will be another front end over the same library.
+slop-cook = { workspace = true }
 slop-core = { workspace = true, features = ["subscriber"] }
 
 [lints]

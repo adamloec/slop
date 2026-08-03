@@ -2117,6 +2117,15 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
+ "slop-cook",
+ "slop-core",
+]
+
+[[package]]
+name = "slop-cook"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
  "gltf",
  "intel_tex_2",
  "png",
