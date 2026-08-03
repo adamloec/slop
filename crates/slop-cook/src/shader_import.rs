@@ -52,7 +52,7 @@ use slop_core::diagnostics::tracing::{debug, info, warn};
 /// Any change to how cooking works — different compiler flags, a different
 /// output layout, a bug fix in this file — must bump this, or existing caches
 /// keep serving artifacts produced by the old rules.
-const COOKER_VERSION: u32 = 3;
+const COOKER_VERSION: u32 = 4;
 
 /// Extension of the shader sources this cooks.
 const SHADER_SOURCE_EXTENSION: &str = "slang";
@@ -232,6 +232,19 @@ fn compile(
         // directories.
         .arg("-I")
         .arg(source_root)
+        // **Keep the entry point's name from the source.**
+        //
+        // Without this, Slang emits a SPIR-V entry point called `main` whenever
+        // a file declares exactly one — and keeps the real names when it
+        // declares several. So `model.slang`'s `vertexMain` and `fragmentMain`
+        // survive, and a compute shader alone in its file silently becomes
+        // `main`. The rule is invisible in the source and the failure arrives at
+        // pipeline creation as "entry point not found", naming the function that
+        // is right there in the file.
+        //
+        // Found by the first compute shader, which was the first file in the
+        // tree with a single entry point.
+        .arg("-fvk-use-entrypoint-name")
         .arg("-reflection-json")
         .arg(&reflection)
         .arg("-o")

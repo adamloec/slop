@@ -106,6 +106,22 @@ impl ImageUsage {
     pub const COLOR_ATTACHMENT: Self = Self(1 << 3);
     /// Rendered into as depth, stencil, or both.
     pub const DEPTH_STENCIL_ATTACHMENT: Self = Self(1 << 4);
+    /// Read or written by a shader as an unfiltered image, through the heap's
+    /// storage-image binding.
+    ///
+    /// Distinct from [`SAMPLED`](Self::SAMPLED), and an image that is both must
+    /// say so: sampling reads through a sampler with filtering and mip
+    /// selection, while a storage image is addressed by integer texel and can be
+    /// *written*. A compute pass producing an image needs this one; a fragment
+    /// shader reading it afterwards needs the other.
+    ///
+    /// Support is materially narrower than for sampled or attachment use —
+    /// `R11G11B10Float` is a near-universal colour attachment and not a
+    /// guaranteed storage image — which is what [`required_format_features`]
+    /// exists to catch.
+    ///
+    /// [`required_format_features`]: Self::required_format_features
+    pub const STORAGE: Self = Self(1 << 5);
 
     /// Whether every flag in `other` is set here.
     #[must_use]
@@ -138,6 +154,9 @@ impl ImageUsage {
         }
         if self.contains(Self::DEPTH_STENCIL_ATTACHMENT) {
             flags |= vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT;
+        }
+        if self.contains(Self::STORAGE) {
+            flags |= vk::ImageUsageFlags::STORAGE;
         }
 
         flags
@@ -175,6 +194,9 @@ impl ImageUsage {
         }
         if self.contains(Self::DEPTH_STENCIL_ATTACHMENT) {
             features |= vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT;
+        }
+        if self.contains(Self::STORAGE) {
+            features |= vk::FormatFeatureFlags::STORAGE_IMAGE;
         }
 
         features
@@ -238,12 +260,13 @@ mod tests {
 
     #[test]
     fn every_image_flag_maps_to_a_distinct_vulkan_flag() {
-        const ALL: [ImageUsage; 5] = [
+        const ALL: [ImageUsage; 6] = [
             ImageUsage::TRANSFER_SRC,
             ImageUsage::TRANSFER_DST,
             ImageUsage::SAMPLED,
             ImageUsage::COLOR_ATTACHMENT,
             ImageUsage::DEPTH_STENCIL_ATTACHMENT,
+            ImageUsage::STORAGE,
         ];
 
         for (index, one) in ALL.iter().enumerate() {
@@ -260,12 +283,13 @@ mod tests {
     /// driver rejection on somebody else's GPU.
     #[test]
     fn every_image_usage_requires_some_format_feature() {
-        const ALL: [ImageUsage; 5] = [
+        const ALL: [ImageUsage; 6] = [
             ImageUsage::TRANSFER_SRC,
             ImageUsage::TRANSFER_DST,
             ImageUsage::SAMPLED,
             ImageUsage::COLOR_ATTACHMENT,
             ImageUsage::DEPTH_STENCIL_ATTACHMENT,
+            ImageUsage::STORAGE,
         ];
 
         for usage in ALL {

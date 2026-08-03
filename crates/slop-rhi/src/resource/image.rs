@@ -254,7 +254,7 @@ fn check_format_support(
     // One usage at a time rather than one combined mask, so the error names the
     // use that is unsupported instead of reporting the whole set and leaving the
     // caller to bisect it.
-    const USES: [(ImageUsage, &str); 5] = [
+    const USES: [(ImageUsage, &str); 6] = [
         (ImageUsage::TRANSFER_SRC, "transfer source"),
         (ImageUsage::TRANSFER_DST, "transfer destination"),
         (ImageUsage::SAMPLED, "sampling"),
@@ -263,6 +263,7 @@ fn check_format_support(
             ImageUsage::DEPTH_STENCIL_ATTACHMENT,
             "depth-stencil attachment",
         ),
+        (ImageUsage::STORAGE, "storage image"),
     ];
 
     for (one, missing) in USES {

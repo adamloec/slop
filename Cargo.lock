@@ -2214,6 +2214,7 @@ version = "0.0.0"
 dependencies = [
  "ash",
  "ash-window",
+ "bytemuck",
  "gpu-allocator",
  "raw-window-handle",
  "slop-asset",

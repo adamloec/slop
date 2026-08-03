@@ -21,6 +21,10 @@ workspace = true
 
 [dev-dependencies]
 ash.workspace = true
+# Test-only: push-constant blocks in the compute test. `#[derive(Pod)]` refuses
+# to compile a struct with padding, which is the check a hand-rolled byte cast
+# does not have — see the workspace manifest's entry for why that matters.
+bytemuck = { workspace = true }
 # Test-only: the golden and shader tests load cooked SPIR-V. The RHI itself
 # takes bytes and knows nothing about where assets live.
 slop-asset = { workspace = true }

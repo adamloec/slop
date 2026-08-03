@@ -147,6 +147,39 @@ impl ImageState {
         stage: vk::PipelineStageFlags2::FRAGMENT_SHADER,
         access: vk::AccessFlags2::SHADER_SAMPLED_READ,
     };
+
+    /// Being written by a compute shader through the heap's storage-image
+    /// binding.
+    ///
+    /// `GENERAL` is not a choice: it is the only layout a storage image may be
+    /// written through, which is why this state has no optimal-layout cousin.
+    ///
+    /// **Read and write, both.** A compute pass that only writes still declares
+    /// the read: shaders that sample their own output between dispatches are
+    /// ordinary — a bloom chain does exactly that — and a write-only state would
+    /// order those wrongly while looking correct.
+    ///
+    /// # This state names its stage, and that is a problem this constant cannot fix
+    ///
+    /// Every state here pairs an access with a *pipeline stage*, and the stage is
+    /// baked in: [`SHADER_READ`](Self::SHADER_READ) means "read by a **fragment**
+    /// shader" and cannot express the same read from compute. That was correct
+    /// while graphics was the only consumer and stops being correct here.
+    ///
+    /// The right answer is for a state to carry access intent while the caller
+    /// supplies the stage — and the caller that should supply it is the render
+    /// graph, which knows what stage each pass runs at. Designing that now,
+    /// against one compute pass that does not exist yet, is what `docs/PLAN.md`
+    /// §9.4 was written to avoid. So the constants double for the moment;
+    /// `docs/PLAN.md` §6.1 carries the row, and E3 collapses it.
+    pub const STORAGE_WRITE: Self = Self {
+        layout: vk::ImageLayout::GENERAL,
+        stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
+        access: vk::AccessFlags2::from_raw(
+            vk::AccessFlags2::SHADER_STORAGE_READ.as_raw()
+                | vk::AccessFlags2::SHADER_STORAGE_WRITE.as_raw(),
+        ),
+    };
 }
 
 /// A point in a buffer's lifetime.

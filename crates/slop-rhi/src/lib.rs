@@ -27,6 +27,7 @@
 //! `clippy::undocumented_unsafe_blocks`.
 
 mod command;
+mod compute;
 mod descriptor;
 mod device;
 mod error;
@@ -55,6 +56,7 @@ pub use command::{
     BufferState, CommandBuffer, CommandPool, ImageState, Submission, WaitStage, submit_and_wait,
     submit_recorded_and_wait,
 };
+pub use compute::{Compute, ComputePipeline, workgroups};
 pub use descriptor::{
     BindlessHeap, BindlessHeapConfig, HEAP_SET, SAMPLED_IMAGE_BINDING, SAMPLER_BINDING,
     STORAGE_BUFFER_BINDING, STORAGE_IMAGE_BINDING, SampledImage, Sampler, StorageBuffer,

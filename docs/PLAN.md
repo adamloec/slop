@@ -795,6 +795,8 @@ nothing about the tree.
 | A cooked model is a flat list, not a hierarchy | `slop-asset/src/model.rs` | `slop-scene`'s runtime tree, once something articulates | **Joined by.** Right for a static level, which is drawn rather than posed, and wrong the moment a parent joint animates. The tree is a *runtime* structure `slop-scene` owns; this format records where things ended up. | M5 |
 | Materials carry no occlusion or HDR emissive | `slop-asset/src/material.rs` | More slots and a float texture format | **Extended.** Occlusion is a baked term a real-time renderer computes or ignores; float images are refused by name rather than silently narrowed, and arrive with IBL. | M3 |
 | Frame timing is CPU wall-clock, not GPU time | `slop-app/src/timing.rs` | GPU timestamp queries written into the command buffer | **Joined by.** Wall-clock between frames is the honest measure of how fast frames arrive and a poor one for attributing cost to a pass — it includes waiting for the GPU. Attribution needs timestamps, and the render graph is what will know which pass one belongs to. §9.6 makes per-pass GPU timings an M3 exit criterion, so this closes at E3. | M3 |
+| `ImageState` and `BufferState` bake the pipeline stage into each constant | `slop-rhi/src/command.rs` | A state carrying access intent, with the render graph supplying the stage | **Replaced.** `SHADER_READ` means "read by a **fragment** shader" and cannot express the same read from compute, so E1b added `STORAGE_WRITE` beside it rather than generalising. The constants double for now. The graph knows what stage each pass runs at and is the right thing to supply it; designing that against one compute pass that does not exist yet is what §9.4 exists to avoid. | M3, at E3 |
+| The compute workgroup size is stated in the shader and again in the caller | `shaders/passes/fill.slang`, callers of `workgroups` | Workgroup size read out of cooked reflection | **Replaced.** `[numthreads(8, 8, 1)]` and the divisor passed to `workgroups` must agree and nothing checks it; disagreeing dispatches too little work, which reads as a cropped result. `slangc -reflection-json` reports thread-group size, so the cooker can carry it the same way it carries push-constant bytes. | M3 |
 | The HDR target is `Rgba16Float` | `slop-render`, from E2 | `R11G11B10Float`, at half the bandwidth | **Replaced**, behind an unchanged seam — the format is one constant and the graph declares it. Chosen for correctness first: `R11G11B10` has no alpha, cannot hold negatives, and bands visibly in a TAA history buffer. Whether any of that is visible on real content is a measurement, and the goldens are what will make it. Both formats exist as of E1a and a test asserts the cheaper one is a usable sampled colour attachment, so the swap stays a one-line change rather than an investigation. §9.4 has the reasoning. | M3 |
 | The overlay assumes one scale factor for the whole frame | `slop-editor/src/overlay.rs` | Per-viewport scale, once a window can span two monitors at different scalings | **Extended.** `pixels_per_point` arrives per frame and applies to every draw in it, which is right until a window straddles a 100% and a 150% display. | M3 |
 | A partial texture update re-uploads the whole image | `slop-editor/src/overlay.rs` | `vkCmdCopyBufferToImage` into the sub-region | **Replaced.** Wasteful and correct. Font atlases settle within a few frames of startup, so this runs a handful of times and then never again. | M3 |
@@ -1102,19 +1104,34 @@ worth of dependencies, and none of it exists today.
 
 Found by checking what E4 needs rather than assuming, and neither is scheduled:
 
-1. **The RHI has no compute pipeline.** `ComputePipeline` does not exist and
-   there is no `dispatch`. The *feature model* is right — compute queues are
-   acquired up front, storage images are enabled in `device/features.rs`, and the
-   bindless heap has a storage-image binding — which is §1.2 principle 6 working
-   exactly as intended: the seam is there, the implementation is not. But cluster
-   building is a compute pass, so E4 cannot start until this lands.
-2. **There are no float colour formats.** `Format` has `R32Float` through
-   `Rgba32Float` for vertex data and the depth formats, and nothing for an HDR
-   render target. `Rgba16Float` has to be added, and `R11G11B10Float` alongside it
-   if the §6.1 row is to stay cheap.
+1. ~~**The RHI has no compute pipeline.**~~ **Landed at E1b.** The *feature model*
+   was right all along — compute queues acquired up front, storage images enabled
+   in `device/features.rs`, a storage-image binding in the heap — which is §1.2
+   principle 6 working exactly as intended: the seam was there and the
+   implementation was not.
+2. ~~**There are no float colour formats.**~~ **Landed at E1a.** `Rgba16Float` and
+   `R11G11B10Float`, with a device-support check that turned out to be the only
+   thing rejecting an impossible format rather than a nicer message in front of a
+   driver that would have.
+3. ~~**`ImageUsage` has no `STORAGE`.**~~ **Landed at E1b**, and it was not on this
+   list when the list was written. Found the same way as the other two — by
+   building the thing that needed it — which is the argument for E1 existing as a
+   task rather than being absorbed into E2.
 
-Both are small. Both are the kind of thing that turns a two-day task into a
-four-day one when discovered mid-task.
+**Two more, still open, and both belong to E4:**
+
+4. **The bindless heap has no writable buffer view.** `shaders/lib/bindless.slang`
+   declares `ByteAddressBuffer g_buffers[]` — read-only. Storage *images* are
+   already writable (`RWTexture2D`), which is what E1b's test used, so this was
+   invisible until now. §9.4's cluster build writes a light-index **buffer**, so
+   it needs an `RWByteAddressBuffer` view aliased onto the same binding and a
+   `storeToBuffer` helper beside `loadFromBuffer`. Aliasing a descriptor binding
+   with a compatible type is legal; nothing about it is hard, and it is exactly
+   the sort of thing that costs a day when met mid-task.
+5. **`BufferState` has no compute states.** The image side gained
+   `ImageState::STORAGE_WRITE` at E1b because the test could not exist without
+   it. The buffer side has no equivalent, and the cluster build needs
+   compute-write followed by fragment-read across a buffer.
 
 ---
 
@@ -1122,7 +1139,7 @@ four-day one when discovered mid-task.
 
 | | Item | Unblocks | Notes |
 |---|---|---|---|
-| **E1** | Float colour formats, and `ComputePipeline` + `dispatch` in `slop-rhi` | E2, E4 | The §9.4 prerequisites. Independent of each other; the formats are needed first |
+| **E1** | Float colour formats, and `ComputePipeline` + `dispatch` in `slop-rhi` | E2, E4 | The §9.4 prerequisites. **Landed.** Grew a third missing piece — `ImageUsage` had no `STORAGE`, so no image could declare itself writable by compute despite the heap having the slot and the device enabling the feature |
 | **E2** | HDR offscreen target and a tonemap pass | E3 | **Before the graph, deliberately** — see below |
 | **E3** | Render graph — passes declare reads and writes, barriers derived | E4–E7 | Designed against §9.4, validated by re-expressing E2's frame through it. `MeshRenderer` decomposes here |
 | **E4** | Clustered forward+ — light list, cluster build, forward pass | E5 | The first compute-feeding-graphics dependency |
