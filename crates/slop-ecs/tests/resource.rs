@@ -11,10 +11,8 @@
 //!   that needed new scheduler code — it needed `Access` to have a kind, which
 //!   is why this could not wait until after the scheduler hardened.
 
-use std::cell::RefCell;
-use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use slop_core::JobSystem;
 use slop_ecs::{
@@ -58,12 +56,12 @@ struct Unknown {
 /// Counts its own destructor.
 #[derive(Debug, Clone)]
 struct Tracked {
-    drops: Rc<RefCell<u32>>,
+    drops: Arc<AtomicU32>,
 }
 
 impl Drop for Tracked {
     fn drop(&mut self) {
-        *self.drops.borrow_mut() += 1;
+        self.drops.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -145,60 +143,60 @@ fn an_unregistered_resource_is_refused() {
 
 #[test]
 fn inserting_twice_replaces_and_drops_the_old_value() {
-    let drops = Rc::new(RefCell::new(0));
+    let drops = Arc::new(AtomicU32::new(0));
     let mut world = world();
 
     world
         .insert_resource(Tracked {
-            drops: Rc::clone(&drops),
+            drops: Arc::clone(&drops),
         })
         .expect("registered");
-    assert_eq!(*drops.borrow(), 0);
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
 
     world
         .insert_resource(Tracked {
-            drops: Rc::clone(&drops),
+            drops: Arc::clone(&drops),
         })
         .expect("registered");
 
-    assert_eq!(*drops.borrow(), 1, "the first value was destroyed");
+    assert_eq!(drops.load(Ordering::Relaxed), 1, "the first value was destroyed");
     assert_eq!(world.resource_count(), 1, "and there is still only one");
     world.assert_consistent();
 }
 
 #[test]
 fn removing_a_resource_drops_it_exactly_once() {
-    let drops = Rc::new(RefCell::new(0));
+    let drops = Arc::new(AtomicU32::new(0));
     let mut world = world();
 
     world
         .insert_resource(Tracked {
-            drops: Rc::clone(&drops),
+            drops: Arc::clone(&drops),
         })
         .expect("registered");
 
     assert!(world.remove_resource::<Tracked>());
-    assert_eq!(*drops.borrow(), 1);
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
     assert!(!world.remove_resource::<Tracked>(), "already gone");
-    assert_eq!(*drops.borrow(), 1, "and not dropped twice");
+    assert_eq!(drops.load(Ordering::Relaxed), 1, "and not dropped twice");
     world.assert_consistent();
 }
 
 #[test]
 fn dropping_the_world_drops_its_resources() {
-    let drops = Rc::new(RefCell::new(0));
+    let drops = Arc::new(AtomicU32::new(0));
 
     {
         let mut world = world();
         world
             .insert_resource(Tracked {
-                drops: Rc::clone(&drops),
+                drops: Arc::clone(&drops),
             })
             .expect("registered");
-        assert_eq!(*drops.borrow(), 0);
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
     }
 
-    assert_eq!(*drops.borrow(), 1);
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
 }
 
 #[test]

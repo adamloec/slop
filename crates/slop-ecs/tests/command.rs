@@ -12,8 +12,8 @@
 //!   against a list built during application, and getting that wrong reads as one
 //!   entity acquiring another's components.
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use slop_ecs::{CommandBuffer, EcsError, Entity, Target, World};
 use slop_reflect::{Reflect, Transfer, TypeInfo, TypeKind};
@@ -69,23 +69,23 @@ struct Unknown {
 /// Counts its own destructor. Not `Copy`, not blittable, and the only way to
 /// tell a leak from a double free without a sanitizer.
 ///
-/// Hand-written rather than derived because `Rc<RefCell<u32>>` is not itself
+/// Hand-written rather than derived because `Arc<AtomicU32>` is not itself
 /// `Reflect` — the derive insists every field be describable, which is the point
-/// of it, and an `Rc` is exactly the sort of thing an editor cannot show and a
+/// of it, and an `Arc` is exactly the sort of thing an editor cannot show and a
 /// serializer cannot write.
 #[derive(Debug, Clone)]
 struct Tracked {
-    drops: Rc<RefCell<u32>>,
+    drops: Arc<AtomicU32>,
 }
 
 impl Drop for Tracked {
     fn drop(&mut self) {
-        *self.drops.borrow_mut() += 1;
+        self.drops.fetch_add(1, Ordering::Relaxed);
     }
 }
 
 // SAFETY: the path is unique to this test, `Transfer::Owning` is correct
-// because an `Rc` pointer means nothing outside this address space, and the
+// because a pointer means nothing outside this address space, and the
 // destructor installed below is `Tracked`'s own.
 unsafe impl Reflect for Tracked {
     const PATH: &'static str = "slop_ecs::tests::command::Tracked";
@@ -403,7 +403,7 @@ fn a_command_targeting_a_despawned_entity_is_skipped() {
 
 #[test]
 fn a_component_bound_for_a_dead_entity_is_destroyed_not_leaked() {
-    let drops = Rc::new(RefCell::new(0));
+    let drops = Arc::new(AtomicU32::new(0));
 
     let mut world = world();
     let entity = world.spawn();
@@ -412,7 +412,7 @@ fn a_component_bound_for_a_dead_entity_is_destroyed_not_leaked() {
     commands.insert(
         entity,
         Tracked {
-            drops: Rc::clone(&drops),
+            drops: Arc::clone(&drops),
         },
     );
 
@@ -422,7 +422,7 @@ fn a_component_bound_for_a_dead_entity_is_destroyed_not_leaked() {
         .expect("a dead target is routine");
 
     assert_eq!(
-        *drops.borrow(),
+        drops.load(Ordering::Relaxed),
         1,
         "exactly one destructor, not zero or two"
     );
@@ -430,7 +430,7 @@ fn a_component_bound_for_a_dead_entity_is_destroyed_not_leaked() {
 
 #[test]
 fn an_unregistered_component_is_reported_and_destroyed() {
-    let drops = Rc::new(RefCell::new(0));
+    let drops = Arc::new(AtomicU32::new(0));
 
     let mut world = world();
     let entity = world.spawn();
@@ -440,7 +440,7 @@ fn an_unregistered_component_is_reported_and_destroyed() {
     commands.insert(
         entity,
         Tracked {
-            drops: Rc::clone(&drops),
+            drops: Arc::clone(&drops),
         },
     );
     commands.insert(entity, Health { value: 5 });
@@ -460,7 +460,7 @@ fn an_unregistered_component_is_reported_and_destroyed() {
         Some(&Health { value: 5 }),
         "the commands after the failure still applied"
     );
-    assert_eq!(*drops.borrow(), 0, "the registered component was taken");
+    assert_eq!(drops.load(Ordering::Relaxed), 0, "the registered component was taken");
     world.assert_consistent();
 }
 
@@ -512,7 +512,7 @@ fn applying_empties_the_buffer() {
 
 #[test]
 fn a_buffer_dropped_unapplied_destroys_what_it_staged() {
-    let drops = Rc::new(RefCell::new(0));
+    let drops = Arc::new(AtomicU32::new(0));
 
     {
         let mut commands = CommandBuffer::new();
@@ -522,20 +522,20 @@ fn a_buffer_dropped_unapplied_destroys_what_it_staged() {
             commands.insert(
                 entity,
                 Tracked {
-                    drops: Rc::clone(&drops),
+                    drops: Arc::clone(&drops),
                 },
             );
         }
 
-        assert_eq!(*drops.borrow(), 0, "still staged");
+        assert_eq!(drops.load(Ordering::Relaxed), 0, "still staged");
     }
 
-    assert_eq!(*drops.borrow(), 3);
+    assert_eq!(drops.load(Ordering::Relaxed), 3);
 }
 
 #[test]
 fn clearing_destroys_what_was_staged_and_leaves_the_buffer_reusable() {
-    let drops = Rc::new(RefCell::new(0));
+    let drops = Arc::new(AtomicU32::new(0));
 
     let mut world = world();
     let mut commands = CommandBuffer::new();
@@ -544,13 +544,13 @@ fn clearing_destroys_what_was_staged_and_leaves_the_buffer_reusable() {
     commands.insert(
         entity,
         Tracked {
-            drops: Rc::clone(&drops),
+            drops: Arc::clone(&drops),
         },
     );
 
     commands.clear();
 
-    assert_eq!(*drops.borrow(), 1);
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
     assert!(commands.is_empty());
 
     let reused = commands.spawn();
@@ -558,13 +558,13 @@ fn clearing_destroys_what_was_staged_and_leaves_the_buffer_reusable() {
     world.apply(&mut commands).expect("Health is registered");
 
     assert_eq!(world.len(), 1);
-    assert_eq!(*drops.borrow(), 1, "clearing did not disturb the count");
+    assert_eq!(drops.load(Ordering::Relaxed), 1, "clearing did not disturb the count");
     world.assert_consistent();
 }
 
 #[test]
 fn an_applied_component_is_destroyed_by_the_world_not_the_buffer() {
-    let drops = Rc::new(RefCell::new(0));
+    let drops = Arc::new(AtomicU32::new(0));
 
     let mut world = world();
     let mut commands = CommandBuffer::new();
@@ -573,18 +573,18 @@ fn an_applied_component_is_destroyed_by_the_world_not_the_buffer() {
     commands.insert(
         entity,
         Tracked {
-            drops: Rc::clone(&drops),
+            drops: Arc::clone(&drops),
         },
     );
 
     world.apply(&mut commands).expect("Tracked is registered");
-    assert_eq!(*drops.borrow(), 0, "the world owns it now");
+    assert_eq!(drops.load(Ordering::Relaxed), 0, "the world owns it now");
 
     drop(commands);
-    assert_eq!(*drops.borrow(), 0, "the buffer must not double free");
+    assert_eq!(drops.load(Ordering::Relaxed), 0, "the buffer must not double free");
 
     drop(world);
-    assert_eq!(*drops.borrow(), 1);
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
 }
 
 #[test]

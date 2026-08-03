@@ -17,8 +17,8 @@
 //!   written the fields before it — those may own allocations nobody can now
 //!   reach.
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use slop_ecs::{EcsError, Entity, ValueError, World};
 use slop_reflect::{Reflect, Struct, TypeInfo, TypeRegistry, Value, from_text, to_text};
@@ -88,16 +88,16 @@ struct Widths {
 /// rather than something only a sanitizer sees.
 #[derive(Debug, Clone)]
 struct Tracked {
-    drops: Rc<RefCell<u32>>,
+    drops: Arc<AtomicU32>,
 }
 
 impl Drop for Tracked {
     fn drop(&mut self) {
-        *self.drops.borrow_mut() += 1;
+        self.drops.fetch_add(1, Ordering::Relaxed);
     }
 }
 
-// SAFETY: the path is unique to this test, `Owning` is correct because an `Rc`
+// SAFETY: the path is unique to this test, `Owning` is correct because a pointer
 // means nothing outside this address space, and the destructor is `Tracked`'s.
 unsafe impl Reflect for Tracked {
     const PATH: &'static str = "slop_ecs::tests::serialize::Tracked";
@@ -240,7 +240,7 @@ fn a_zero_sized_component_round_trips_without_scratch_space() {
 
 #[test]
 fn an_owning_component_round_trips_and_is_dropped_exactly_once() {
-    let drops = Rc::new(RefCell::new(0));
+    let drops = Arc::new(AtomicU32::new(0));
 
     {
         let mut world = world();
@@ -286,14 +286,14 @@ fn an_owning_component_round_trips_and_is_dropped_exactly_once() {
         .insert(
             entity,
             Tracked {
-                drops: Rc::clone(&drops),
+                drops: Arc::clone(&drops),
             },
         )
         .expect("registered");
 
-    assert_eq!(*drops.borrow(), 0);
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
     drop(world);
-    assert_eq!(*drops.borrow(), 1, "one component, one destructor");
+    assert_eq!(drops.load(Ordering::Relaxed), 1, "one component, one destructor");
 }
 
 #[test]
@@ -446,7 +446,7 @@ fn an_opaque_component_cannot_be_read() {
         .insert(
             entity,
             Tracked {
-                drops: Rc::new(RefCell::new(0)),
+                drops: Arc::new(AtomicU32::new(0)),
             },
         )
         .expect("registered");
@@ -514,7 +514,7 @@ fn a_value_missing_a_field_is_rejected_before_anything_is_written() {
     // The reason writing is validated in full first. `Named`'s first field owns
     // a heap allocation; if the write started and then failed on the second
     // field, that allocation would be stranded with nothing able to reach it.
-    let drops = Rc::new(RefCell::new(0));
+    let drops = Arc::new(AtomicU32::new(0));
     let mut world = world();
     let entity = world.spawn();
 
@@ -532,7 +532,7 @@ fn a_value_missing_a_field_is_rejected_before_anything_is_written() {
         EcsError::Value(ValueError::MissingField { .. })
     ));
     assert!(!world.has::<Named>(entity), "nothing was inserted");
-    assert_eq!(*drops.borrow(), 0);
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
     world.assert_consistent();
 }
 

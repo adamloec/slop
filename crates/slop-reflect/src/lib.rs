@@ -88,6 +88,27 @@ pub use slop_reflect_derive::Reflect;
 /// Rust types; a type declared by a guest module has no Rust type and therefore
 /// no impl, and supplies its [`TypeInfo`] as data instead.
 ///
+/// # Thread safety
+///
+/// `Send + Sync` is a supertrait rather than a bound applied where components
+/// are stored, because the obligation belongs to the type and not to any one
+/// container. `slop_ecs::Column` asserts both unconditionally — it holds
+/// type-erased bytes and has no Rust type to ask — and defers the claim to
+/// "the level above". This is that level.
+///
+/// Without the bound the deferral pointed nowhere: a hand-written impl over a
+/// type holding an `Rc`, satisfying the layout contract below exactly, could be
+/// inserted into a `World` and read by two systems in one batch, racing the
+/// non-atomic refcount across `docs/DESIGN.md` §2.5's worker threads from
+/// entirely safe caller code. An implementor who meets the stated contract must
+/// not be able to produce UB, which is what made that an unsound contract rather
+/// than a missing check.
+///
+/// Nothing in-tree ever tripped it, because every type reachable through
+/// `#[derive(Reflect)]` happens to be `Send + Sync` already — which is exactly
+/// why it was worth closing before §2.3's guest path makes runtime registration
+/// the common case.
+///
 /// # Safety
 ///
 /// Implementors must return a [`TypeInfo`] whose layout is `Layout::new::<Self>()`
@@ -95,7 +116,7 @@ pub use slop_reflect_derive::Reflect;
 /// columns by that layout and frees elements through that function, so a wrong
 /// answer here is memory-unsafe. This is why hand-written impls should be rare —
 /// the derive macro cannot get it wrong.
-pub unsafe trait Reflect: 'static {
+pub unsafe trait Reflect: Send + Sync + 'static {
     /// This type's canonical path — see [`TypePath`].
     ///
     /// An associated constant rather than something read out of

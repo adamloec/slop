@@ -97,9 +97,16 @@ pub struct Column {
 // SAFETY: a `Column` owns its allocation exclusively and hands out raw pointers
 // only through methods that borrow it. Whether the component type is itself
 // `Send`/`Sync` is not knowable here — a runtime-declared type has no Rust type
-// to ask — so this is asserted at the level above: `docs/DESIGN.md` §2.3 makes
-// component data plain data, and §2.5's scheduler hands disjoint archetypes to
-// disjoint threads without ever sharing a column.
+// to ask — so this rests on the level above, which now enforces it: `Reflect`
+// is `Send + Sync`, so every host-native component reaching a column is both,
+// and `docs/DESIGN.md` §2.3 makes runtime-declared component data plain data.
+// §2.5's scheduler additionally hands disjoint archetypes to disjoint threads
+// without ever sharing a column.
+//
+// That bound is recent. Before it the deferral pointed nowhere and this was
+// unsound rather than merely undocumented — a hand-written `Reflect` impl over
+// a type holding an `Rc` satisfied every stated obligation and still raced its
+// refcount across workers from safe caller code.
 unsafe impl Send for Column {}
 // SAFETY: as above, and note what the `Cell` in `changed` widens this to: a
 // shared reference now permits writing a stamp, so `Sync` asserts that no two
@@ -108,6 +115,19 @@ unsafe impl Send for Column {}
 // `&mut World`, and §2.5's scheduler hands disjoint archetypes to disjoint
 // threads without ever sharing a column.
 unsafe impl Sync for Column {}
+
+/// `Reflect`'s `Send + Sync` bound is what the `unsafe impl`s above rest on, so
+/// this asserts it rather than leaving it to a comment. A future edit that
+/// relaxed the supertrait would compile everywhere else in the workspace and
+/// silently reopen the hole; it fails here instead.
+const _: () = {
+    const fn require<T: Send + Sync>() {}
+    const fn assert_every_component_is_thread_safe<T: slop_reflect::Reflect>() {
+        require::<T>();
+    }
+
+    assert_every_component_is_thread_safe::<u32>();
+};
 
 impl Column {
     /// An empty column for the type `info` describes.
@@ -619,7 +639,7 @@ impl std::fmt::Debug for Column {
 mod tests {
     use super::*;
     use slop_reflect::{Reflect, TypeKind};
-    use std::rc::Rc;
+    use std::sync::Arc;
 
     /// How many elements a volume test uses.
     ///
@@ -757,11 +777,11 @@ mod tests {
         // The archetype migration path. If this dropped, a component moving
         // between archetypes would be destroyed and the destination would hold
         // a use-after-free.
-        let witness = Rc::new(());
+        let witness = Arc::new(());
         let mut column = column_of::<Witness>();
-        push(&mut column, Witness(Rc::clone(&witness)));
+        push(&mut column, Witness(Arc::clone(&witness)));
 
-        assert_eq!(Rc::strong_count(&witness), 2);
+        assert_eq!(Arc::strong_count(&witness), 2);
 
         let mut moved = std::mem::MaybeUninit::<Witness>::uninit();
         // SAFETY: `moved` is properly aligned space for one `Witness`, and the
@@ -771,7 +791,7 @@ mod tests {
         assert!(removed.is_some(), "the element's stamps come back with it");
         assert_eq!(column.len(), 0);
         assert_eq!(
-            Rc::strong_count(&witness),
+            Arc::strong_count(&witness),
             2,
             "the value must have been moved, not dropped"
         );
@@ -780,27 +800,27 @@ mod tests {
         let moved = unsafe { moved.assume_init() };
         drop(moved);
 
-        assert_eq!(Rc::strong_count(&witness), 1);
+        assert_eq!(Arc::strong_count(&witness), 1);
     }
 
     #[test]
     fn dropping_a_column_runs_every_destructor() {
         // The leak check. A column of a type with a destructor must run every
         // one of them, including after growth has relocated the elements.
-        let witness = Rc::new(());
+        let witness = Arc::new(());
 
         {
             let mut column = column_of::<Witness>();
             let count = many(100);
             for _ in 0..count {
-                push(&mut column, Witness(Rc::clone(&witness)));
+                push(&mut column, Witness(Arc::clone(&witness)));
             }
 
-            assert_eq!(Rc::strong_count(&witness), count + 1);
+            assert_eq!(Arc::strong_count(&witness), count + 1);
         }
 
         assert_eq!(
-            Rc::strong_count(&witness),
+            Arc::strong_count(&witness),
             1,
             "every element should have been dropped"
         );
@@ -808,34 +828,34 @@ mod tests {
 
     #[test]
     fn swap_remove_drops_the_element_it_removes() {
-        let witness = Rc::new(());
+        let witness = Arc::new(());
         let mut column = column_of::<Witness>();
 
         for _ in 0..3 {
-            push(&mut column, Witness(Rc::clone(&witness)));
+            push(&mut column, Witness(Arc::clone(&witness)));
         }
-        assert_eq!(Rc::strong_count(&witness), 4);
+        assert_eq!(Arc::strong_count(&witness), 4);
 
         column.swap_remove(0);
 
-        assert_eq!(Rc::strong_count(&witness), 3, "exactly one was dropped");
+        assert_eq!(Arc::strong_count(&witness), 3, "exactly one was dropped");
     }
 
     #[test]
     fn clear_drops_everything_and_keeps_the_column_usable() {
-        let witness = Rc::new(());
+        let witness = Arc::new(());
         let mut column = column_of::<Witness>();
 
         for _ in 0..8 {
-            push(&mut column, Witness(Rc::clone(&witness)));
+            push(&mut column, Witness(Arc::clone(&witness)));
         }
 
         column.clear();
 
-        assert_eq!(Rc::strong_count(&witness), 1);
+        assert_eq!(Arc::strong_count(&witness), 1);
         assert!(column.is_empty());
 
-        push(&mut column, Witness(Rc::clone(&witness)));
+        push(&mut column, Witness(Arc::clone(&witness)));
         assert_eq!(column.len(), 1);
     }
 
@@ -937,11 +957,11 @@ mod tests {
     }
 
     /// Holds a clone so tests can observe drops without a global counter.
-    struct Witness(#[expect(dead_code, reason = "held to keep the Rc alive")] Rc<()>);
+    struct Witness(#[expect(dead_code, reason = "held to keep the Arc alive")] Arc<()>);
 
     // SAFETY: the layout is `Witness`'s own and the destructor drops a
     // `Witness` in place. Hand-written rather than derived because the derive
-    // requires every field to be `Reflect`, and `Rc<()>` deliberately is not.
+    // requires every field to be `Reflect`, and `Arc<()>` deliberately is not.
     unsafe impl Reflect for Witness {
         const PATH: &'static str = "test::Witness";
         const TRANSFER: Transfer = Transfer::Owning;
