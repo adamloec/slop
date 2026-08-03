@@ -371,6 +371,10 @@ struct Headless {
     /// One slot: the harness submits and waits per frame, so nothing is ever in
     /// flight beside it.
     lights: slop_render::Lights,
+    /// The same clustered path the window uses, not a simplified stand-in —
+    /// otherwise the references stop covering the pass that decides which lights
+    /// reach a fragment at all.
+    clusters: slop_render::Clusters,
     placed_lights: Vec<slop_render::PointLight>,
     heap: BindlessHeap,
     readback: Buffer,
@@ -484,6 +488,35 @@ impl Headless {
             .map_err(|error| error.to_string())?;
         let placed_lights = example_model::lights(centre, radius);
 
+        let cluster_module = ShaderModule::from_bytes(
+            device,
+            &vfs.read("shaders/passes/cluster_build.spv")
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let cluster_reflection = slop_asset::Reflection::read(
+            &vfs.read("shaders/passes/cluster_build.refl")
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+
+        // The same grid the window builds, from the same numbers.
+        let clusters = slop_render::Clusters::new(
+            device,
+            allocator,
+            &mut heap,
+            &cluster_module,
+            &cluster_reflection,
+            slop_render::ClusterGrid {
+                near: radius * 0.01,
+                far: radius * 8.0,
+                ..slop_render::ClusterGrid::default()
+            },
+            1,
+        )
+        .map_err(|error| error.to_string())?;
+
         // The camera *maths* is what is under test and is shared with the
         // windowed viewer. The camera *settings* are data, and Sponza's are
         // chosen to look at something worth comparing — see `SPONZA_CLOSENESS`.
@@ -500,6 +533,7 @@ impl Headless {
             hdr,
             tonemap,
             lights,
+            clusters,
             placed_lights,
             heap,
             readback,
@@ -604,11 +638,52 @@ impl Headless {
             .write(0, &self.placed_lights)
             .expect("the light rig fits the buffer it was built for");
 
+        let cluster_camera = example_model::cluster_camera(
+            aspect,
+            self.centre,
+            angle,
+            self.settings,
+            (SIZE as f32, SIZE as f32),
+        );
+
+        self.clusters
+            .write(0, &cluster_camera, &self.lights)
+            .expect("the cluster grid must be writable");
+
         let view = slop_render::View::new(
             camera(aspect, self.centre, angle, self.settings),
-            &self.lights,
+            &self.clusters,
             0,
         );
+
+        let [cluster_ranges, cluster_indices] = self.clusters.buffers(0);
+
+        let cluster_ranges = graph.import_buffer(&slop_render::ImportedBuffer {
+            name: "cluster ranges",
+            buffer: cluster_ranges,
+            state: slop_rhi::BufferState::storage_write(slop_rhi::Stage::Compute),
+            final_state: None,
+        });
+
+        let cluster_indices = graph.import_buffer(&slop_render::ImportedBuffer {
+            name: "cluster light indices",
+            buffer: cluster_indices,
+            state: slop_rhi::BufferState::storage_write(slop_rhi::Stage::Compute),
+            final_state: None,
+        });
+
+        let clusters = &self.clusters;
+        let cluster_heap = &self.heap;
+
+        graph.add_compute(
+            &slop_render::ComputePass {
+                name: "cluster build",
+                writes: &[cluster_ranges, cluster_indices],
+                ..slop_render::ComputePass::default()
+            },
+            move |command| clusters.build(command, cluster_heap, 0),
+        );
+
         let meshes = &self.meshes;
         let tonemap = &self.tonemap;
         let heap = &self.heap;
@@ -659,6 +734,10 @@ impl Headless {
                         slop_rhi::Load::Clear(slop_rhi::ClearValue::Color([0.02, 0.02, 0.03, 1.0])),
                     )),
                     depth: Some((depth, slop_rhi::Load::Preserve, false)),
+                    reads: &[
+                        (cluster_ranges, slop_rhi::Stage::Fragment),
+                        (cluster_indices, slop_rhi::Stage::Fragment),
+                    ],
                     ..slop_render::RenderPass::default()
                 },
                 |pass| meshes.draw(pass, heap, &view),

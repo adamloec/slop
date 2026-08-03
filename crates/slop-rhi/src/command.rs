@@ -382,12 +382,28 @@ impl BufferState {
         access: vk::AccessFlags2::INDEX_READ,
     };
 
-    /// Read by a shader — including through a device address, which is how
-    /// `docs/DESIGN.md` §2.2's GPU-driven passes reach most buffers.
-    pub const SHADER_READ: Self = Self {
-        stage: vk::PipelineStageFlags2::ALL_COMMANDS,
-        access: vk::AccessFlags2::SHADER_READ,
-    };
+    /// Read by a shader at an unknown stage — including through a device
+    /// address, which is how `docs/DESIGN.md` §2.2's GPU-driven passes reach
+    /// most buffers.
+    ///
+    /// Defined in terms of [`shader_read`](Self::shader_read) so the two cannot
+    /// drift. Prefer naming the stage where it is known: this one orders against
+    /// work that never touched the buffer, and over-synchronising is invisible
+    /// in every way except speed.
+    pub const SHADER_READ: Self = Self::shader_read(Stage::Any);
+
+    /// A buffer read by a shader, at the stage that reads it.
+    ///
+    /// §9.4's forward pass reads the cluster light list from a *fragment*
+    /// shader, and the cluster build wrote it from compute. Naming both ends is
+    /// what makes that barrier the narrow one it should be.
+    #[must_use]
+    pub const fn shader_read(stage: Stage) -> Self {
+        Self {
+            stage: stage.to_vk(),
+            access: vk::AccessFlags2::SHADER_READ,
+        }
+    }
 
     /// Supplying draw or dispatch parameters to an indirect command.
     pub const INDIRECT: Self = Self {

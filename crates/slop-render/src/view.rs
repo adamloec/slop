@@ -11,50 +11,57 @@
 
 use slop_math::Mat4;
 
-use crate::Lights;
+use crate::Clusters;
 
 /// The camera, and the lights, for one frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct View {
     /// World space to clip space.
     pub view_projection: Mat4,
-    /// Heap index of the light buffer this frame reads.
+    /// Heap index of the cluster grid this frame's draws read.
     ///
-    /// Meaningless when [`light_count`](Self::light_count) is zero, which is
-    /// why [`unlit`](Self::unlit) exists rather than a caller inventing an
-    /// index to mean "none".
-    pub lights: u32,
-    /// How many lights that buffer holds.
-    pub light_count: u32,
+    /// The grid carries the light buffer's index as well as the cell layout, so
+    /// this one number is everything a shading pass needs. That is deliberate:
+    /// the cluster build reads the same buffer, and two passes reading one
+    /// description cannot disagree about where a cell is.
+    ///
+    /// [`NO_CLUSTERS`] means there is no grid, and shading falls back to the
+    /// directional light alone.
+    pub grid: u32,
 }
 
+/// The grid index meaning "there is no cluster grid".
+///
+/// Not zero: zero is a perfectly good heap slot, and a view without clusters
+/// would read whichever buffer happened to land there. The shader tests for it
+/// before reading anything.
+pub const NO_CLUSTERS: u32 = u32::MAX;
+
 impl View {
-    /// A view lit by `lights`, reading the buffer for this frame's slot.
+    /// A view whose lighting comes from `clusters`, for this frame's slot.
     ///
     /// `slot` is [`Frame::slot`](crate::Frame::slot). Taking it here rather than
-    /// letting a caller pass a bare index is the point: the light buffer is a
-    /// ring, and reading the wrong element of it is a corrupted frame rather
+    /// letting a caller pass a bare index is the point: the grid buffers are a
+    /// ring, and reading the wrong element of one is a corrupted frame rather
     /// than an error.
     #[must_use]
-    pub fn new(view_projection: Mat4, lights: &Lights, slot: usize) -> Self {
+    pub fn new(view_projection: Mat4, clusters: &Clusters, slot: usize) -> Self {
         Self {
             view_projection,
-            lights: lights.handle(slot),
-            light_count: lights.count(),
+            grid: clusters.handle(slot),
         }
     }
 
-    /// A view with no point lights at all.
+    /// A view with no clustered lighting at all.
     ///
-    /// What a depth prepass uses — it shades nothing — and what a caller that
-    /// has not placed any lights uses. The directional light in
-    /// `shaders/passes/model.slang` still applies; it is not data yet.
+    /// What a depth prepass uses — it shades nothing — and what a caller with no
+    /// lights uses. The directional light in `shaders/passes/model.slang` still
+    /// applies; it is not data yet.
     #[must_use]
     pub fn unlit(view_projection: Mat4) -> Self {
         Self {
             view_projection,
-            lights: 0,
-            light_count: 0,
+            grid: NO_CLUSTERS,
         }
     }
 }
@@ -64,12 +71,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_unlit_view_reads_no_lights() {
-        // The heap index is not "no buffer" — zero is a real slot. The count is
-        // what stops the loop, which is why it rather than the index is the
-        // thing that means "none".
+    fn an_unlit_view_names_no_grid() {
+        // Zero is a real heap slot, so "none" cannot be spelled that way — an
+        // unlit view would otherwise read whatever buffer landed in slot zero
+        // and interpret it as a cluster grid.
         let view = View::unlit(Mat4::IDENTITY);
 
-        assert_eq!(view.light_count, 0);
+        assert_eq!(view.grid, NO_CLUSTERS);
+        assert_ne!(view.grid, 0);
     }
 }

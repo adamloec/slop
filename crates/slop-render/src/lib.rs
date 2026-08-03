@@ -60,6 +60,7 @@
 //! The two golden images are what say the rewrite is equivalent: both examples
 //! render through this crate and neither reference moved.
 
+mod cluster;
 mod error;
 mod frame;
 mod graph;
@@ -69,6 +70,7 @@ mod mesh;
 mod vertex;
 mod view;
 
+pub use cluster::{ClusterCamera, ClusterGrid, Clusters, sphere_touches_box};
 pub use error::RenderError;
 pub use frame::{Frame, FrameOutcome, FrameRenderer, FrameRendererConfig, Target};
 pub use graph::{BufferId, ComputePass, Graph, ImageId, Imported, ImportedBuffer, RenderPass};
@@ -76,7 +78,7 @@ pub use hdr::{HdrTarget, Tonemap};
 pub use light::{Lights, PointLight};
 pub use mesh::MeshRenderer;
 pub use vertex::VertexBinding;
-pub use view::View;
+pub use view::{NO_CLUSTERS, View};
 
 /// The format the HDR target uses, re-exported so a pipeline drawing into it
 /// declares the same one rather than restating it.

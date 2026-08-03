@@ -35,8 +35,8 @@ use slop_ecs::{Entity, World};
 use slop_editor::{DebugUi, InspectorState};
 use slop_math::Vec3;
 use slop_render::{
-    FrameRenderer, FrameRendererConfig, Graph, HdrTarget, Imported, Lights, MeshRenderer,
-    PointLight, RenderPass, Tonemap, View,
+    ClusterGrid, Clusters, ComputePass, FrameRenderer, FrameRendererConfig, Graph, HdrTarget,
+    Imported, ImportedBuffer, Lights, MeshRenderer, PointLight, RenderPass, Tonemap, View,
 };
 
 /// What the scene pass clears the HDR target to.
@@ -107,6 +107,8 @@ struct Renderer {
     tonemap: Tonemap,
     /// This frame's lights, one buffer per frame in flight.
     lights: Lights,
+    /// The cluster grid, and the compute pass that fills it.
+    clusters: Clusters,
     /// Where they sit — a function of the model's bounds, so it frames whatever
     /// is loaded. Kept rather than rebuilt, since nothing moves them yet.
     placed_lights: Vec<PointLight>,
@@ -216,6 +218,28 @@ impl Renderer {
         .map_err(|error| error.to_string())?;
         let placed_lights = example_model::lights(centre, radius);
 
+        // The clustering range follows the model, as the camera does. A fixed
+        // range would cover a cube a thousand times over and fall short of
+        // Sponza, and a fragment beyond the far end lands in the last slice —
+        // correct, but with every light in the scene listed in one cell.
+        let grid = ClusterGrid {
+            near: radius * 0.01,
+            far: radius * 8.0,
+            ..ClusterGrid::default()
+        };
+
+        let cluster_module = load_shader(gpu.device(), &vfs, "cluster_build")?;
+        let clusters = Clusters::new(
+            gpu.device(),
+            gpu.allocator(),
+            &mut heap,
+            &cluster_module,
+            &load_reflection(&vfs, "cluster_build")?,
+            grid,
+            frames.frames_in_flight(),
+        )
+        .map_err(|error| error.to_string())?;
+
         // One entity, one component. `with_builtins` registers the primitives
         // that `OrbitCamera`'s fields resolve to; the component's own type is
         // registered from its derived `Reflect` impl.
@@ -248,6 +272,7 @@ impl Renderer {
             hdr,
             tonemap,
             lights,
+            clusters,
             placed_lights,
             heap,
             frames,
@@ -310,6 +335,7 @@ impl Renderer {
         let tonemap = &self.tonemap;
         let heap = &self.heap;
         let lights = &mut self.lights;
+        let clusters = &mut self.clusters;
         let placed_lights = &self.placed_lights;
         let ui = &mut self.ui;
         let allocator = self.gpu.allocator();
@@ -366,7 +392,56 @@ impl Renderer {
                     error!(error = %failure, "this frame's lights were not written");
                 }
 
-                let view = View::new(camera(aspect, centre, angle, settings), lights, frame.slot);
+                let cluster_camera = example_model::cluster_camera(
+                    aspect,
+                    centre,
+                    angle,
+                    settings,
+                    (
+                        frame.target.extent.width as f32,
+                        frame.target.extent.height as f32,
+                    ),
+                );
+
+                if let Err(failure) = clusters.write(frame.slot, &cluster_camera, lights) {
+                    error!(error = %failure, "this frame's cluster grid was not written");
+                }
+
+                let view = View::new(
+                    camera(aspect, centre, angle, settings),
+                    clusters,
+                    frame.slot,
+                );
+
+                let [ranges, indices] = clusters.buffers(frame.slot);
+
+                // Written by the pass below and read by the forward pass. The
+                // graph derives the barrier between them from these two
+                // declarations; nothing here says what it should be.
+                let ranges = graph.import_buffer(&ImportedBuffer {
+                    name: "cluster ranges",
+                    buffer: ranges,
+                    // Every cluster is written unconditionally, so whatever the
+                    // previous frame left is worth nothing.
+                    state: slop_rhi::BufferState::storage_write(Stage::Compute),
+                    final_state: None,
+                });
+
+                let indices = graph.import_buffer(&ImportedBuffer {
+                    name: "cluster light indices",
+                    buffer: indices,
+                    state: slop_rhi::BufferState::storage_write(Stage::Compute),
+                    final_state: None,
+                });
+
+                graph.add_compute(
+                    &ComputePass {
+                        name: "cluster build",
+                        writes: &[ranges, indices],
+                        ..ComputePass::default()
+                    },
+                    |command| clusters.build(command, heap, frame.slot),
+                );
 
                 if let Some((image, depth_view, depth_aspect)) = meshes.depth() {
                     let depth = graph.import(&Imported {
@@ -412,6 +487,10 @@ impl Renderer {
                                 // cost bandwidth nothing reads.
                                 false,
                             )),
+                            // What the cluster build wrote. This is the
+                            // declaration the compute-to-fragment barrier comes
+                            // from.
+                            reads: &[(ranges, Stage::Fragment), (indices, Stage::Fragment)],
                             ..RenderPass::default()
                         },
                         |pass| meshes.draw(pass, heap, &view),

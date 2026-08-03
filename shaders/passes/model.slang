@@ -6,6 +6,8 @@
 // pipeline per surface.
 
 #include "lib/bindless.slang"
+#include "lib/cluster.slang"
+#include "lib/light.slang"
 
 // Per-material parameters, matching `MaterialGpu` in
 // `crates/slop-render/src/mesh.rs`.
@@ -37,20 +39,6 @@ static const uint NO_TEXTURE = 0xFFFFFFFF;
 // Alpha modes, matching `slop_asset::AlphaMode`'s discriminants.
 static const uint ALPHA_MODE_MASK_BITS = 3;
 static const uint ALPHA_MODE_MASK = 1;
-
-// One point light, matching `PointLightGpu` in `crates/slop-render/src/light.rs`.
-//
-// The radius sits beside the position rather than beside the intensity so that
-// a cluster-assignment pass reads the sphere it is testing — centre and radius —
-// out of one sixteen-byte row.
-struct PointLightGpu
-{
-    float3 position;
-    float radius;
-
-    float3 color;
-    float intensity;
-};
 
 // Where one placement of one mesh sits, matching `InstanceGpu` in
 // `crates/slop-render/src/mesh.rs`.
@@ -96,9 +84,11 @@ struct PushConstants
     uint materials;
     uint material;
 
-    // Where this frame's lights are, and how many.
-    uint lights;
-    uint lightCount;
+    // The cluster grid, which is also where this frame's lights are. One index
+    // rather than several, so that this shader and `cluster_build.slang` cannot
+    // hold different opinions about the grid — see `lib/cluster.slang`.
+    uint grid;
+    uint _pad;
 };
 
 [[vk::push_constant]] PushConstants g_push;
@@ -297,40 +287,44 @@ float4 fragmentMain(VertexOut input) : SV_Target
 
     float3 lit = AMBIENT + saturate(dot(normal, LIGHT_DIRECTION));
 
-    // Every light, every fragment. **That is what E4 replaces**: the cluster
-    // build assigns lights to cells of a grid and this loop reads only its own
-    // cell, which is the difference between a scene with a dozen lights and one
-    // with thousands. The loop body does not change when that lands — only where
-    // the indices come from — which is why the buffer is here first.
-    for (uint index = 0; index < g_push.lightCount; ++index)
+    // Matching `slop_render::NO_CLUSTERS`. Not zero, because zero is a real heap
+    // slot and a view without a grid would read whatever landed there.
+    if (g_push.grid == 0xFFFFFFFF)
     {
-        PointLightGpu light =
-            loadFromBuffer<PointLightGpu>(BufferHandle(g_push.lights), index);
+        return float4(albedo.rgb * lit, albedo.a);
+    }
+
+    ClusterGridGpu grid = loadFromBuffer<ClusterGridGpu>(BufferHandle(g_push.grid), 0);
+
+    // Which cell this fragment is in. The depth is the positive distance in
+    // front of the camera, which the projection put in `w` — and a fragment
+    // shader's `SV_Position.w` holds its reciprocal, so this is one divide
+    // rather than a view matrix this shader would otherwise have to carry.
+    float depth = 1.0 / input.position.w;
+    uint3 cell = clusterCellOf(grid, input.position.xy, depth);
+    uint cluster = clusterIndex(grid, cell);
+
+    ClusterRange range = loadFromBuffer<ClusterRange>(BufferHandle(grid.ranges), cluster);
+
+    // **Only this cell's lights.** That is the whole of clustered forward+: the
+    // cost stops being fragments times lights and becomes fragments times the
+    // lights that actually reach them.
+    for (uint slot = 0; slot < range.count; ++slot)
+    {
+        uint index = loadFromBuffer<uint>(BufferHandle(grid.indices), range.offset + slot);
+        PointLightGpu light = loadFromBuffer<PointLightGpu>(BufferHandle(grid.lights), index);
 
         float3 toLight = light.position - input.worldPosition;
         float distanceSquared = dot(toLight, toLight);
 
-        // Squared throughout, so the only square root is the one `normalize`
-        // needs. Comparing against the squared radius rather than the radius
-        // keeps the early-out exact rather than approximately so.
-        float radiusSquared = light.radius * light.radius;
+        // The same falloff the cluster build's radius test assumes, from the
+        // same place, so the two cannot drift — see `lib/light.slang`.
+        float attenuation = pointLightAttenuation(distanceSquared, light.radius);
 
-        if (distanceSquared >= radiusSquared)
+        if (attenuation <= 0.0)
         {
             continue;
         }
-
-        // Inverse square, windowed to reach exactly zero at the radius. The
-        // window matters more than it looks: unwindowed inverse square never
-        // reaches zero, so a light cut off at its radius leaves a visible edge —
-        // and the radius is what cluster assignment tests, so the shading has to
-        // agree with it or lights pop as the camera moves.
-        //
-        // Guarded against the singularity at zero distance, which is otherwise
-        // an infinity that spreads through the sum and shows as a white pixel.
-        float window = saturate(1.0 - (distanceSquared * distanceSquared)
-                                    / (radiusSquared * radiusSquared));
-        float attenuation = window * window / max(distanceSquared, 1e-4);
 
         float lambert = saturate(dot(normal, normalize(toLight)));
 

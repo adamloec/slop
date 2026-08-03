@@ -78,10 +78,8 @@ impl OrbitCamera {
 #[must_use]
 pub fn camera(aspect: f32, centre: Vec3, angle: f32, settings: OrbitCamera) -> Mat4 {
     let distance = settings.distance;
-    let eye = centre
-        + Quat::from_rotation_y(angle) * Vec3::new(0.0, distance * settings.height, distance);
 
-    let view = slop_math::look_at(eye, centre, slop_math::UP);
+    let view = view_of(centre, angle, settings);
 
     // The engine's own projection, not glam's: it is reverse-Z and infinite,
     // matching the depth comparison `slop-rhi` configures, and it flips Y for
@@ -97,6 +95,44 @@ pub fn camera(aspect: f32, centre: Vec3, angle: f32, settings: OrbitCamera) -> M
     );
 
     projection * view
+}
+
+/// Where the camera is, without the projection.
+///
+/// Split out because the cluster build needs the view on its own: cells are
+/// axis-aligned in *view* space, and a light's position has to reach that space
+/// to be tested against one. [`camera`] is this plus the projection, so the two
+/// describe the same camera by construction rather than by both being passed the
+/// same arguments and hoping.
+#[must_use]
+pub fn view_of(centre: Vec3, angle: f32, settings: OrbitCamera) -> Mat4 {
+    let distance = settings.distance;
+    let eye = centre
+        + Quat::from_rotation_y(angle) * Vec3::new(0.0, distance * settings.height, distance);
+
+    slop_math::look_at(eye, centre, slop_math::UP)
+}
+
+/// What the cluster build needs to know about the camera.
+///
+/// Shared with [`camera`] for the reason the whole of this module is shared:
+/// clustering against a camera the frame is not actually drawn with puts every
+/// fragment in the wrong cell, and the failure looks like lights in the wrong
+/// place rather than like a mismatch.
+#[must_use]
+pub fn cluster_camera(
+    aspect: f32,
+    centre: Vec3,
+    angle: f32,
+    settings: OrbitCamera,
+    screen: (f32, f32),
+) -> slop_render::ClusterCamera {
+    slop_render::ClusterCamera {
+        view: view_of(centre, angle, settings),
+        tan_half_fov_y: slop_math::scalar::tan(settings.field_of_view.to_radians() * 0.5),
+        aspect,
+        screen,
+    }
 }
 
 /// The model's centre and radius, from the meshes it names.

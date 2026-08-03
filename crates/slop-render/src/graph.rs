@@ -150,6 +150,13 @@ pub struct RenderPass<'a> {
     /// bake the stage into each constant, and E1c replaced that with a selector
     /// precisely so the graph could supply it here.
     pub samples: &'a [(ImageId, Stage)],
+    /// Buffers this pass reads, and the stage that reads them.
+    ///
+    /// §9.4's forward pass reads the light list a compute pass wrote, which is
+    /// the first buffer dependency that crosses from compute into graphics —
+    /// [`ComputePass::reads`] covers the other direction and could not express
+    /// this one.
+    pub reads: &'a [(BufferId, Stage)],
 }
 
 impl Default for RenderPass<'_> {
@@ -159,6 +166,7 @@ impl Default for RenderPass<'_> {
             color: None,
             depth: None,
             samples: &[],
+            reads: &[],
         }
     }
 }
@@ -170,6 +178,7 @@ impl std::fmt::Debug for RenderPass<'_> {
             .field("color", &self.color.map(|(id, _)| id))
             .field("depth", &self.depth.map(|(id, _, _)| id))
             .field("samples", &self.samples.len())
+            .field("reads", &self.reads.len())
             .finish()
     }
 }
@@ -235,6 +244,7 @@ enum Recorded<'a> {
         color: Option<(ImageId, Load)>,
         depth: Option<(ImageId, Load, bool)>,
         samples: Vec<(ImageId, Stage)>,
+        reads: Vec<(BufferId, Stage)>,
         record: Box<dyn FnOnce(&mut Pass<'_>) + 'a>,
     },
     Compute {
@@ -348,6 +358,7 @@ impl<'a> Graph<'a> {
             color: desc.color,
             depth: desc.depth,
             samples: desc.samples.to_vec(),
+            reads: desc.reads.to_vec(),
             record: Box::new(record),
         });
     }
@@ -405,6 +416,7 @@ impl<'a> Graph<'a> {
                     color,
                     depth,
                     samples,
+                    reads,
                     record,
                 } => {
                     // Reads first. Ordering them before the attachment
@@ -412,6 +424,10 @@ impl<'a> Graph<'a> {
                     // depending on how the declaration happened to be written.
                     for (id, stage) in &samples {
                         self.transition(command, *id, ImageState::shader_read(*stage));
+                    }
+
+                    for (id, stage) in &reads {
+                        self.transition_buffer(command, *id, BufferState::shader_read(*stage));
                     }
 
                     if let Some((id, _)) = color {

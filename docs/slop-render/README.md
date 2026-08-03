@@ -15,6 +15,7 @@ its passes, and the passes that draw a cooked model into HDR and resolve it.
               render(|frame| …) ──► acquire, record, submit, present
                    │
                    ├──► Graph::add        — declare each pass and what it touches
+                   │      ├─ cluster build  Clusters::build          ──► light lists
                    │      ├─ depth prepass  MeshRenderer::draw_depth
                    │      ├─ scene          MeshRenderer::draw       ──► HDR
                    │      └─ tonemap        Tonemap::draw            ──► swapchain
@@ -23,9 +24,10 @@ its passes, and the passes that draw a cooked model into HDR and resolve it.
                    └──► Frame::finish               — and what keeps it alive
 ```
 
-Nothing in that declaration names a barrier. The remaining passes of Stage A —
-shadows, cluster build, IBL, the post stack — arrive across `PLAN.md` §9.5
-E4–E7, and are added to the same declaration rather than to a call order.
+Nothing in that declaration names a barrier — including the one between the
+compute pass and the fragments that read what it wrote. The remaining passes of
+Stage A — shadows, IBL, the post stack — arrive across `PLAN.md` §9.5 E5–E7, and
+are added to the same declaration rather than to a call order.
 
 ## 2. Status
 
@@ -44,7 +46,7 @@ E4–E7, and are added to the same declaration rather than to a call order.
 | Depth prepass, including the alpha-masked half | Landed — masked half untested, `PLAN.md` §6.1 | M3, E4 |
 | Lights as data — `Lights`, `PointLight`, `View` | Landed — see §13 | M3, E4 |
 | Per-instance transforms in a storage buffer | Landed | M3, E4 |
-| Cluster grid and build pass; the forward pass reading it | Planned | M3, E4 |
+| Clustered forward+ — grid, build pass, forward pass reading it | Landed — see §14 | M3, E4 |
 | Shadows, IBL, post stack | Planned | M3, E5–E7 |
 | The overlay drawing inside the graph | **Absent** — the last caller of `Frame::finish` | M3 |
 | `MeshRenderer` decomposition — it is a god object today | Planned — `docs/reviews/2026-08-03.md` item 2 | M3 |
@@ -69,7 +71,10 @@ E4–E7, and are added to the same declaration rather than to a call order.
 | `Tonemap` | The fullscreen pass that resolves it onto the swapchain |
 | `PointLight` | One light, as a caller describes it |
 | `Lights` | The GPU-side light buffer, one per frame in flight |
-| `View` | What every draw in a frame shares: the camera, and the lights |
+| `View` | What every draw in a frame shares: the camera, and the cluster grid |
+| `ClusterGrid` | How the frustum is divided, and the depth-to-slice mapping |
+| `ClusterCamera` | What the build pass needs about the camera |
+| `Clusters` | The build pass and the per-cell light lists it fills |
 
 ## 4. Why two calls and not one
 
@@ -338,3 +343,65 @@ wrong multiply would have shown as broken geometry, and none of it moved a pixel
 
 So the lit references differ from their predecessors by lighting alone, which is
 the only claim being made for them.
+
+## 14. Clustered forward+, and the test the reference images cannot be
+
+The frustum is divided into 16 × 9 × 24 cells, a compute pass decides once per
+frame which lights reach each one, and the forward pass shades a fragment with
+its own cell's list. That is the difference between a cost of fragments times
+*lights* and fragments times *the lights that actually reach them*.
+
+Three pieces have to agree, and two of them are shaders:
+
+| Piece | Where |
+|---|---|
+| The grid, and the depth-to-slice mapping | `ClusterGrid`, mirrored in `shaders/lib/cluster.slang` |
+| Assignment — sphere against cell | `passes/cluster_build.slang`, twinned by `sphere_touches_box` |
+| Lookup — fragment to cell | `passes/model.slang`, through the same include |
+
+**The grid is a buffer, not push constants**, and that is the reason: the build
+pass places lights into cells and the forward pass looks its own cell up, and
+the two disagreeing puts a fragment in a cluster whose list was built for
+somewhere else. Nothing reports that — it looks like lights in the wrong place.
+One buffer, read twice, makes disagreement impossible.
+
+### The reference images cannot check any of it
+
+Adding clustering changed **0 of 65536 pixels** on both models. That is the
+correct answer, and it is not evidence.
+
+The forward pass sums the lights its cell names, and the falloff reaches exactly
+zero at the radius — so a light listed in a cell it does not reach contributes
+nothing. An assignment that put *every* light in *every* cell would render
+identically. So would one whose cells are in the wrong place, as long as the
+union still covers each light. The picture simply cannot distinguish them.
+
+`tests/cluster.rs` compares the emitted grid element by element against
+`ClusterGrid::bounds` and `sphere_touches_box` — the same arithmetic written
+twice on purpose, with the CPU copy checked against slice boundaries worked out
+by hand. It also asserts that some cluster holds a *proper subset* of the
+lights, because a test whose expected lists are all empty passes against a pass
+that does nothing.
+
+That test was confirmed live by removing the Y flip from the shader's cell
+bounds: it fails, naming the first cluster that disagrees.
+
+### Why the radius is a hard cutoff
+
+See §13. It is what makes "is this light in this cell" a question with an
+answer, and it is why the falloff and the assignment have to read the same
+radius from the same place.
+
+### What this deliberately does not do
+
+- **A cluster's list has a fixed stride**, so a cell reached by more than
+  `max_per_cluster` lights silently drops the rest. The default grid at the
+  default stride is under a megabyte, and the seam is already the compacted one
+  — a range is an offset *and* a count, not a product of the index.
+- **The build reads every light for every cell.** Fine at these scene sizes; a
+  coarse cull per tile column is the standard next step, behind an unchanged
+  declaration.
+- **The grid is fixed at 16 × 9 regardless of the window's aspect**, so cells
+  stop being square away from 16:9. That costs efficiency, not correctness.
+
+All three are in `PLAN.md` §6.1.
