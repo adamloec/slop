@@ -26,6 +26,7 @@ use std::sync::Arc;
 
 use slop_app::debug_ui::DebugUi;
 use slop_app::gpu::{Gpu, GpuConfig};
+use slop_app::inspector::InspectorState;
 use slop_app::timing::FrameTimes;
 use slop_app::window::WindowConfig;
 use slop_app::winit::application::ApplicationHandler;
@@ -34,6 +35,7 @@ use slop_app::winit::event_loop::{ActiveEventLoop, EventLoop};
 use slop_app::winit::window::WindowId;
 use slop_asset::Vfs;
 use slop_core::diagnostics::tracing::{error, info};
+use slop_ecs::{Entity, World};
 use slop_math::{Mat4, Quat, Vec3};
 use slop_render::{FrameRenderer, FrameRendererConfig, MeshRenderer};
 use slop_rhi::{BindlessHeap, BindlessHeapConfig, Device, ShaderModule};
@@ -43,6 +45,36 @@ const DEFAULT_MODEL: &str = "models/cube.model";
 
 /// Vertical field of view, in degrees.
 const FIELD_OF_VIEW: f32 = 55.0;
+
+/// The orbiting camera, as a component.
+///
+/// **In the world rather than in `Renderer`, so the inspector can edit it.**
+/// That is the point of putting it here: every field below appears in the debug
+/// UI without a line of UI code naming it, because `slop-reflect` describes the
+/// type and `slop_app::inspector` walks the description. Dragging `height` moves
+/// the camera on the next frame.
+///
+/// This is not the scene representation. `docs/DESIGN.md` gives `slop-scene` the
+/// runtime tree at M5, and putting the *model's* geometry into the world is that
+/// work rather than this. What is here is the one piece of live state this
+/// example has, which is what makes it an honest subject for an inspector rather
+/// than a fabricated one.
+#[derive(slop_reflect::Reflect, Debug, Clone, Copy)]
+#[repr(C)]
+struct OrbitCamera {
+    /// Distance from the model's centre.
+    distance: f32,
+    /// How far above the centre the camera sits, as a fraction of `distance`.
+    height: f32,
+    /// Radians of orbit per *frame* rather than per second — `docs/DESIGN.md`
+    /// §2.14 makes the frame number the only clock a reproducible render reads.
+    radians_per_frame: f32,
+    /// Vertical field of view, in degrees.
+    field_of_view: f32,
+    /// Whether the camera advances. Off freezes it where it is, which is what
+    /// makes a still worth looking at.
+    orbiting: bool,
+}
 
 /// Radians of orbit per frame.
 ///
@@ -148,9 +180,20 @@ struct Renderer {
     meshes: MeshRenderer,
     heap: BindlessHeap,
     frames: FrameRenderer,
-    /// How far the camera sits from the model's centre, from its bounds.
-    distance: f32,
+    /// Where the model sits, for the camera to look at.
     centre: Vec3,
+    /// The world holding the camera, and what the inspector inspects.
+    world: World,
+    camera: Entity,
+    /// Which entity the inspector is showing, across frames.
+    inspector: InspectorState,
+    /// The orbit angle, accumulated rather than derived from the frame number.
+    ///
+    /// Derived would be simpler and would ignore the speed being edited: at
+    /// frame 5000, halving `radians_per_frame` would jump the camera to the far
+    /// side of the model rather than slowing it. Accumulating means a change
+    /// takes effect from *now*.
+    angle: f32,
     /// The debug overlay, and the timing it reports.
     ui: DebugUi,
     frame_times: FrameTimes,
@@ -211,6 +254,33 @@ impl Renderer {
 
         let (centre, radius) = bounds(&vfs, &logical);
 
+        // One entity, one component. `with_builtins` registers the primitives
+        // that `OrbitCamera`'s fields resolve to; the component's own type is
+        // registered from its derived `Reflect` impl.
+        let mut world = World::with_builtins();
+        world
+            .registry_mut()
+            .register_native::<OrbitCamera>()
+            .map_err(|error| error.to_string())?;
+
+        let camera = world.spawn();
+        world
+            .insert(
+                camera,
+                OrbitCamera {
+                    // Far enough that the whole model fits the vertical field of
+                    // view, with a margin so nothing is clipped by the near
+                    // plane.
+                    distance: radius / slop_math::scalar::tan(FIELD_OF_VIEW.to_radians() * 0.5)
+                        * 1.4,
+                    height: 0.35,
+                    radians_per_frame: RADIANS_PER_FRAME,
+                    field_of_view: FIELD_OF_VIEW,
+                    orbiting: true,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
         // Built after the meshes so its font atlas lands in the same heap, and
         // before the first frame because the atlas arrives in the *first*
         // texture delta — a UI wired up mid-frame draws nothing at all.
@@ -228,10 +298,11 @@ impl Renderer {
             meshes,
             heap,
             frames,
-            // Far enough that the whole model fits the vertical field of view,
-            // with a margin so nothing is clipped by the near plane.
-            distance: radius / slop_math::scalar::tan(FIELD_OF_VIEW.to_radians() * 0.5) * 1.4,
             centre,
+            world,
+            camera,
+            inspector: InspectorState::default(),
+            angle: 0.0,
             ui,
             frame_times: FrameTimes::default(),
             model: logical,
@@ -259,18 +330,28 @@ impl Renderer {
             .upload(&mut self.heap, self.gpu.allocator(), &declared)
             .map_err(|error| error.to_string())?;
 
-        // Borrowed out of `self` field by field, so the closure does not capture
-        // it whole — `render` needs `&mut self.frames` at the same time.
+        // Read from the world every frame, so an edit in the inspector takes
+        // effect on the next one. Copied out because the closure below cannot
+        // borrow the world while `render` holds `&mut self.frames`.
+        let settings = *self
+            .world
+            .get::<OrbitCamera>(self.camera)
+            .expect("the camera entity is spawned in `new` and never despawned");
+
+        if settings.orbiting {
+            self.angle += settings.radians_per_frame;
+        }
+
         let meshes = &self.meshes;
         let heap = &self.heap;
         let ui = &mut self.ui;
         let allocator = self.gpu.allocator();
         let centre = self.centre;
-        let distance = self.distance;
+        let angle = self.angle;
 
         self.frames
             .render(|frame| {
-                meshes.record(heap, frame, camera(frame, centre, distance));
+                meshes.record(heap, frame, camera(frame, centre, angle, settings));
 
                 // Last, in a pass of its own: the overlay loads the colour
                 // attachment rather than clearing it, so it composites over the
@@ -302,6 +383,11 @@ impl Renderer {
         let draws = self.meshes.draw_count();
         let model = self.model.clone();
 
+        // Borrowed out of `self` so the closure does not capture it whole:
+        // `run` needs `&mut self.ui` at the same time.
+        let world = &mut self.world;
+        let inspector = &mut self.inspector;
+
         self.ui.run(self.gpu.window(), |context| {
             slop_app::egui::Window::new("slop").show(context, |ui| {
                 // Milliseconds first. See `slop_app::timing`.
@@ -317,6 +403,18 @@ impl Renderer {
                 ui.label(&model);
                 ui.label(format!("{meshes} meshes, {draws} draws"));
             });
+
+            // A second window rather than a section of the first, because it is
+            // the one thing here that is worth resizing and scrolling.
+            slop_app::egui::Window::new("inspector")
+                .default_open(false)
+                .show(context, |ui| {
+                    // Nothing reacts to the return value yet. The camera is read
+                    // fresh every frame, so an edit is picked up without needing
+                    // to be told about — a system that had to be re-run would
+                    // use this.
+                    let _changed = slop_app::inspector::inspector(ui, world, inspector);
+                });
         })
     }
 }
@@ -326,9 +424,10 @@ impl Renderer {
 /// Orbits the model rather than accepting input, so a run is reproducible from
 /// its frame number alone and a screenshot at frame *n* is comparable across
 /// machines (`docs/DESIGN.md` §2.14). Camera control arrives with the editor.
-fn camera(frame: &slop_render::Frame<'_>, centre: Vec3, distance: f32) -> Mat4 {
-    let angle = frame.number as f32 * RADIANS_PER_FRAME;
-    let eye = centre + Quat::from_rotation_y(angle) * Vec3::new(0.0, distance * 0.35, distance);
+fn camera(frame: &slop_render::Frame<'_>, centre: Vec3, angle: f32, settings: OrbitCamera) -> Mat4 {
+    let distance = settings.distance;
+    let eye = centre
+        + Quat::from_rotation_y(angle) * Vec3::new(0.0, distance * settings.height, distance);
 
     let view = slop_math::look_at(eye, centre, slop_math::UP);
     let aspect = frame.target.extent.width as f32 / frame.target.extent.height.max(1) as f32;
@@ -340,7 +439,11 @@ fn camera(frame: &slop_render::Frame<'_>, centre: Vec3, distance: f32) -> Mat4 {
     //
     // The near plane scales with the model so that a metre-wide cube and a
     // hundred-metre building both get sensible precision.
-    let projection = slop_math::perspective(FIELD_OF_VIEW.to_radians(), aspect, distance * 0.005);
+    let projection = slop_math::perspective(
+        settings.field_of_view.to_radians(),
+        aspect,
+        distance * 0.005,
+    );
 
     projection * view
 }

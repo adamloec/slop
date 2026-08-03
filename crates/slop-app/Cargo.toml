@@ -17,7 +17,9 @@ egui-winit = { workspace = true }
 # layer, and installing a process-wide subscriber is an application's decision.
 slop-asset = { workspace = true }
 slop-core = { workspace = true, features = ["subscriber"] }
+slop-ecs = { workspace = true }
 slop-math = { workspace = true }
+slop-reflect = { workspace = true }
 slop-render = { workspace = true }
 slop-rhi = { workspace = true }
 thiserror.workspace = true

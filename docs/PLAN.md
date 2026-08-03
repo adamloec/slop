@@ -160,9 +160,14 @@ world at once. Save, load and save again produces byte-identical text.
 
 `DESIGN.md` §6 sets M2 as "asset pipeline, glTF import + cook, texture
 compression, hot reload, **material system**. Load and render a **Sponza-scale
-scene**. Plus the **debug UI layer** (§10.2)." The first four are done; the last
-three are not, and the milestone is **about half complete** rather than nearly
-finished.
+scene**. Plus the **debug UI layer** (§10.2)." **All of it is done**, and §9.3's
+exit criteria are met — Sponza loads through the cook pipeline and renders with
+its own materials, mipmaps and normal maps, and the debug UI shows frame timing
+and inspects a live entity.
+
+What is *not* done is everything §6.1 records as deferred behind a seam. The
+milestone is complete; the register is the honest account of what it is standing
+on.
 
 | Area | State |
 |---|---|
@@ -184,7 +189,7 @@ finished.
 | Node transforms flattened into a cooked model | Landed |
 | Rendering a model's meshes with their materials | Landed — `MeshRenderer`, `examples/model` |
 | A Sponza-scale scene loading and drawing | Landed — 103 primitives, 25 materials, 70 textures, clean validation. Fetched by `slop-cli fetch sponza`, not committed. |
-| Debug UI — the entity inspector over `slop-reflect` | **Outstanding** |
+| Debug UI — the entity inspector over `slop-reflect` | Landed — `slop_app::inspector`, driven entirely by the type registry. No UI code names a component or a field. |
 | Mipmaps | Landed — generated at cook time in RGBA8, then each level compressed to BC7 separately. Payload grows by exactly the geometric-series third. |
 | Tangents, so normal maps can be sampled | Landed — read from glTF when present, derived from UVs when not. Sponza's 24 normal maps are sampled. |
 
@@ -850,9 +855,9 @@ can be produced faster than it can be reviewed line by line, and automated truth
 is the only thing preventing large volumes of subtly wrong architecture. Miri
 joined that suite with the ECS storage layer and belongs to it permanently.
 
-**M2 — Content + debug UI.** *About half done; see §3.0.2 and §9.* The pipeline
-half is finished and the rest is not: shader reflection, materials, a
-Sponza-scale scene, and the debug UI.
+**M2 — Content + debug UI.** *Complete; see §3.0.2 and §9.3.* Cook pipeline,
+shader reflection, materials, mipmaps, tangents, a Sponza-scale scene, and the
+debug UI with a reflection-driven entity inspector.
 
 The debug UI is pulled forward deliberately, and it stays pulled forward. Renderer
 bring-up without inspection tooling is the largest avoidable time sink in the
@@ -930,10 +935,26 @@ avoided for the job system.
 
 ### 9.3 Definition of done — M2
 
-- A Sponza-scale glTF loads through the cook pipeline and renders
-- Materials come from the file, not from code
-- Vertex layouts and push constants are reflected out of cooked shaders, not
+**Met, 2026-08-03.**
+
+- ✅ A Sponza-scale glTF loads through the cook pipeline and renders — 103
+  primitives, 25 materials, 70 BC7 textures with mip chains, normal-mapped
+- ✅ Materials come from the file, not from code
+- ✅ Vertex layouts and push constants are reflected out of cooked shaders, not
   restated in Rust
-- A debug overlay shows frame timing and lets an entity be inspected live
-- Both existing goldens still pass, unchanged, through `slop-render`
-- Nothing in `examples/` is doing a job an engine crate should be doing
+- ✅ A debug overlay shows frame timing and lets an entity be inspected live
+- ✅ Both existing goldens still pass, unchanged, through `slop-render`
+- ✅ Nothing in `examples/` is doing a job an engine crate should be doing —
+  `FrameRenderer`, `Pass`, `Gpu`, `DebugUi`, `FrameTimes` and `inspector` all
+  came out of examples during M2, and every example is `unsafe`-free
+
+**Two gaps that are not exit criteria and are worth naming rather than leaving
+implicit:**
+
+- **`examples/model` has no golden image.** `MeshRenderer`, materials, mipmaps
+  and tangents have no image-level regression; the cube's five goldens cover a
+  path none of them use. A Sponza golden must skip when the asset is not fetched,
+  and skips are what once let the whole suite report green while the demo refused
+  to start — so the skip has to be checked by name, as `harness` already does.
+- **Linux has never been run.** Every portability claim in this repository is
+  currently untested. Standing since M0.

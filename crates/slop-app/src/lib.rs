@@ -17,6 +17,7 @@
 
 pub mod debug_ui;
 pub mod gpu;
+pub mod inspector;
 pub mod logging;
 pub mod timing;
 pub mod window;
