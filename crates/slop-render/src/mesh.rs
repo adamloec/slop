@@ -35,11 +35,10 @@ use slop_core::FxHashMap;
 use slop_core::diagnostics::tracing::warn;
 use slop_math::Mat4;
 use slop_rhi::{
-    Allocator, Attachments, BindlessHeap, Blend, Buffer, BufferConfig, BufferState, BufferUsage,
-    ClearValue, ColorAttachment, CommandBuffer, CommandPool, DepthAttachment, Device, Extent2D,
-    Format, GraphicsPipeline, GraphicsPipelineConfig, Image, ImageConfig, ImageState, ImageUsage,
-    Load, MemoryLocation, PipelineLayout, PipelineLayoutConfig, SampledImage, Sampler,
-    SamplerConfig, ShaderModule, ShaderStage, StorageBuffer, TextureSampler,
+    Allocator, BindlessHeap, Blend, Buffer, BufferConfig, BufferState, BufferUsage, CommandBuffer,
+    CommandPool, Device, Extent2D, Format, GraphicsPipeline, GraphicsPipelineConfig, Image,
+    ImageConfig, ImageState, ImageUsage, MemoryLocation, PipelineLayout, PipelineLayoutConfig,
+    SampledImage, Sampler, SamplerConfig, ShaderModule, ShaderStage, StorageBuffer, TextureSampler,
 };
 
 use crate::{RenderError, VertexBinding};
@@ -546,52 +545,16 @@ impl MeshRenderer {
     /// learning once from golden tests that skipped on setup failure, and a
     /// `debug_assert` puts the complaint where the mistake is rather than
     /// leaving it to be diagnosed from an empty window.
-    pub fn record(
-        &self,
-        heap: &BindlessHeap,
-        frame: &crate::Frame<'_>,
-        target: &crate::HdrTarget,
-        view_projection: Mat4,
-    ) {
+    pub fn draw(&self, pass: &mut slop_rhi::Pass<'_>, heap: &BindlessHeap, view_projection: Mat4) {
         debug_assert!(
             !(self.materials_slot.is_some() && self.depth.is_none()),
             "a model is loaded but `MeshRenderer::resize` has never run, so there is \
              no depth buffer and nothing will be drawn"
         );
 
-        let (Some(materials), Some(depth)) = (self.materials_slot, self.depth.as_ref()) else {
+        let Some(materials) = self.materials_slot else {
             return;
         };
-
-        // The pass brackets its own writes rather than leaving the caller to.
-        // Forgetting `end_writing` is a tonemap sampling a target the scene may
-        // not have finished writing, which desktop hardware usually gets away
-        // with — the class of bug `docs/PLAN.md` §9.5 E3's graph exists to make
-        // unrepresentable, and until then worth keeping in one place.
-        target.begin_writing(frame);
-        frame.command.transition_image(
-            depth.handle(),
-            depth.aspect(),
-            // From UNDEFINED every frame: the depth buffer is cleared, so its
-            // previous contents are worth nothing and discarding is faster.
-            ImageState::UNDEFINED,
-            ImageState::DEPTH_ATTACHMENT,
-        );
-
-        let mut pass = frame.command.begin_rendering(&Attachments {
-            color: ColorAttachment {
-                view: target.view(),
-                load: Load::Clear(ClearValue::Color([0.02, 0.02, 0.03, 1.0])),
-            },
-            depth: Some(DepthAttachment {
-                view: depth.view(),
-                load: Load::Clear(ClearValue::Depth(slop_rhi::DEPTH_CLEAR)),
-                // Scratch for this pass only, so storing it would cost
-                // bandwidth for something nothing reads.
-                store: false,
-            }),
-            extent: target.extent(),
-        });
 
         pass.bind_pipeline(&self.pipeline);
         pass.bind_heap(heap);
@@ -614,21 +577,31 @@ impl MeshRenderer {
         }
 
         // Ends the pass, so the transition below is outside it.
-        drop(pass);
+        // **No barrier here, and no pass opened here either.**
+        //
+        // This used to bracket its own writes and transition the target itself,
+        // with a comment about only the last writer being allowed to. The graph
+        // opens the pass, and derives the transitions from what the declaration
+        // said this pass touches — so there is nothing left to forget.
+        // `docs/PLAN.md` §9.5 E3.
+    }
 
-        // Make the scene visible to whatever samples it — the tonemap pass, and
-        // later the post stack. This is the engine's first real pass dependency:
-        // everything before it was two passes writing the same image in
-        // sequence, which is an ordering rather than a dependency.
-        target.end_writing(frame);
+    /// The depth buffer, for [`Graph::import`](crate::Graph::import).
+    ///
+    /// `None` before [`resize`](Self::resize) has run. Exposed rather than kept
+    /// private because the graph is what declares it now, and a resource the
+    /// graph cannot name is one it cannot barrier.
+    #[must_use]
+    pub fn depth(
+        &self,
+    ) -> Option<(
+        slop_rhi::ImageHandle,
+        slop_rhi::ImageViewHandle,
+        slop_rhi::ImageAspect,
+    )> {
+        let depth = self.depth.as_ref()?;
 
-        // **This renderer no longer touches the frame's target at all.** It used
-        // to draw straight into it and leave it in `COLOR_ATTACHMENT` for the
-        // overlay, with a comment about only the last writer transitioning.
-        // Now `Tonemap` is what writes the presentable image, and the overlay
-        // still draws over that — so the last-writer rule has not gone away,
-        // it has moved to a shorter list. `Frame::finish` still ends the frame,
-        // and `docs/PLAN.md` §9.5 E3 is still what will derive it.
+        Some((depth.handle(), depth.view(), depth.aspect()))
     }
 }
 

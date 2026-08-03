@@ -557,17 +557,81 @@ impl Headless {
         let angle = frame.number as f32 * self.settings.radians_per_frame;
         let aspect = self.target.extent().width as f32 / self.target.extent().height as f32;
 
-        self.meshes.record(
-            &self.heap,
-            &frame,
-            &self.hdr,
-            camera(aspect, self.centre, angle, self.settings),
-        );
-        self.tonemap.record(&self.heap, &frame, &self.hdr);
+        // The same declaration the windowed viewer makes, minus the overlay.
+        // Nothing here names a barrier.
+        let mut graph = slop_render::Graph::new();
 
-        // Only the last thing to draw transitions the target — here to
-        // TRANSFER_SRC, so the copy below can read it.
-        frame.finish();
+        let scene = graph.import(&slop_render::Imported {
+            name: "hdr",
+            image: self.hdr.image(),
+            view: self.hdr.view(),
+            aspect: self.hdr.aspect(),
+            extent: self.hdr.extent(),
+            state: ImageState::UNDEFINED,
+            final_state: None,
+        });
+
+        let screen = graph.import(&slop_render::Imported {
+            name: "readback target",
+            image: self.target.handle(),
+            view: self.target.view(),
+            aspect: self.target.aspect(),
+            extent: self.target.extent(),
+            state: frame.target.from,
+            // Where the window would ask for PRESENT, this asks for
+            // TRANSFER_SRC — and the graph emits it because it knows which pass
+            // touched the image last. That is the arbitration `frame.finish`
+            // used to do by convention, and it is why this test no longer calls
+            // it.
+            final_state: Some(ImageState::TRANSFER_SRC),
+        });
+
+        let view_projection = camera(aspect, self.centre, angle, self.settings);
+        let meshes = &self.meshes;
+        let tonemap = &self.tonemap;
+        let heap = &self.heap;
+        let source = self.hdr.slot();
+
+        if let Some((image, view, aspect)) = self.meshes.depth() {
+            let depth = graph.import(&slop_render::Imported {
+                name: "depth",
+                image,
+                view,
+                aspect,
+                extent: self.hdr.extent(),
+                state: ImageState::UNDEFINED,
+                final_state: None,
+            });
+
+            graph.add(
+                &slop_render::PassDesc {
+                    name: "scene",
+                    color: Some((
+                        scene,
+                        slop_rhi::Load::Clear(slop_rhi::ClearValue::Color([0.02, 0.02, 0.03, 1.0])),
+                    )),
+                    depth: Some((
+                        depth,
+                        slop_rhi::Load::Clear(slop_rhi::ClearValue::Depth(slop_rhi::DEPTH_CLEAR)),
+                        false,
+                    )),
+                    ..slop_render::PassDesc::default()
+                },
+                |pass| meshes.draw(pass, heap, view_projection),
+            );
+        }
+
+        graph.add(
+            &slop_render::PassDesc {
+                name: "tonemap",
+                color: Some((screen, slop_rhi::Load::Discard)),
+                samples: &[(scene, slop_rhi::Stage::Fragment)],
+                ..slop_render::PassDesc::default()
+            },
+            |pass| tonemap.draw(pass, heap, source),
+        );
+
+        graph.execute(&command);
 
         command.copy_image_to_buffer(
             self.target.handle(),

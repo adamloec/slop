@@ -34,8 +34,19 @@ use slop_core::diagnostics::tracing::{error, info};
 use slop_ecs::{Entity, World};
 use slop_editor::{DebugUi, InspectorState};
 use slop_math::Vec3;
-use slop_render::{FrameRenderer, FrameRendererConfig, HdrTarget, MeshRenderer, Tonemap};
-use slop_rhi::{BindlessHeap, BindlessHeapConfig, Device, ShaderModule};
+use slop_render::{
+    FrameRenderer, FrameRendererConfig, Graph, HdrTarget, Imported, MeshRenderer, PassDesc, Tonemap,
+};
+
+/// What the scene pass clears the HDR target to.
+///
+/// Dark rather than black, so that geometry missing entirely is visibly
+/// different from geometry that is merely unlit.
+const CLEAR: [f32; 4] = [0.02, 0.02, 0.03, 1.0];
+use slop_rhi::{
+    BindlessHeap, BindlessHeapConfig, ClearValue, Device, ImageAspect, ImageState, Load,
+    ShaderModule, Stage,
+};
 
 // Shared with `tests/golden.rs`, so the window and the reference image are
 // framed by the same camera — see the library's docs.
@@ -284,23 +295,88 @@ impl Renderer {
                 let aspect =
                     frame.target.extent.width as f32 / frame.target.extent.height.max(1) as f32;
 
-                // Into the HDR target, not the swapchain.
-                meshes.record(heap, frame, hdr, camera(aspect, centre, angle, settings));
+                // **The frame as a declaration.** Nothing below names a barrier;
+                // the graph derives every one of them from what each pass says
+                // it touches. `docs/PLAN.md` §9.5 E3.
+                let mut graph = Graph::new();
 
-                // And back out of it. The first read-after-write dependency in
-                // the engine: this pass samples what the one above wrote.
-                tonemap.record(heap, frame, hdr);
+                let scene = graph.import(&Imported {
+                    name: "hdr",
+                    image: hdr.image(),
+                    view: hdr.view(),
+                    aspect: hdr.aspect(),
+                    extent: hdr.extent(),
+                    // Cleared by the pass that writes it, so its previous
+                    // contents are worth nothing.
+                    state: ImageState::UNDEFINED,
+                    final_state: None,
+                });
 
-                // Last, in a pass of its own: the overlay loads the colour
-                // attachment rather than clearing it, so it composites over the
-                // model. Errors are logged rather than propagated — a debug
-                // overlay that fails is not a reason to take the frame down.
+                let screen = graph.import(&Imported {
+                    name: "swapchain",
+                    image: frame.target.image,
+                    view: frame.target.view,
+                    aspect: ImageAspect::Color,
+                    extent: frame.target.extent,
+                    state: frame.target.from,
+                    // Left in COLOR_ATTACHMENT: the overlay still draws over it
+                    // outside the graph, and `Frame::finish` ends the frame.
+                    final_state: None,
+                });
+
+                let view_projection = camera(aspect, centre, angle, settings);
+
+                if let Some((image, view, aspect)) = meshes.depth() {
+                    let depth = graph.import(&Imported {
+                        name: "depth",
+                        image,
+                        view,
+                        aspect,
+                        extent: hdr.extent(),
+                        state: ImageState::UNDEFINED,
+                        final_state: None,
+                    });
+
+                    graph.add(
+                        &PassDesc {
+                            name: "scene",
+                            color: Some((scene, Load::Clear(ClearValue::Color(CLEAR)))),
+                            depth: Some((
+                                depth,
+                                Load::Clear(ClearValue::Depth(slop_rhi::DEPTH_CLEAR)),
+                                // Scratch for this pass, so storing it would
+                                // cost bandwidth nothing reads.
+                                false,
+                            )),
+                            ..PassDesc::default()
+                        },
+                        |pass| meshes.draw(pass, heap, view_projection),
+                    );
+                }
+
+                graph.add(
+                    &PassDesc {
+                        name: "tonemap",
+                        color: Some((screen, Load::Discard)),
+                        // The declaration that produces the barrier: this reads
+                        // what the pass above wrote.
+                        samples: &[(scene, Stage::Fragment)],
+                        ..PassDesc::default()
+                    },
+                    |pass| tonemap.draw(pass, heap, hdr.slot()),
+                );
+
+                graph.execute(frame.command);
+
+                // Still outside the graph, and the last thing that is: the
+                // overlay opens its own pass, composites over the tonemapped
+                // image, and is what keeps `Frame::finish` alive. Errors are
+                // logged rather than propagated — a debug overlay that fails is
+                // not a reason to take the frame down.
                 if let Err(failure) = ui.draw(heap, allocator, frame, &declared) {
                     error!(error = %failure, "the debug overlay did not draw");
                 }
 
-                // After everything that draws. Only the last writer transitions
-                // the target to its final state — see `Frame::finish`.
                 frame.finish();
             })
             .map_err(|error| error.to_string())?;

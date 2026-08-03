@@ -51,12 +51,14 @@
 
 mod error;
 mod frame;
+mod graph;
 mod hdr;
 mod mesh;
 mod vertex;
 
 pub use error::RenderError;
 pub use frame::{Frame, FrameOutcome, FrameRenderer, FrameRendererConfig, Target};
+pub use graph::{Graph, Imported, PassDesc, ResourceId};
 pub use hdr::{HdrTarget, Tonemap};
 pub use mesh::MeshRenderer;
 pub use vertex::VertexBinding;

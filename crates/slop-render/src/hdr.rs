@@ -33,13 +33,13 @@ use std::sync::Arc;
 use slop_asset::Reflection;
 use slop_core::Handle;
 use slop_rhi::{
-    Allocator, Attachments, BindlessHeap, Blend, ColorAttachment, Device, Extent2D, Format,
-    GraphicsPipeline, GraphicsPipelineConfig, Image, ImageConfig, ImageState, ImageUsage,
-    ImageViewHandle, Load, PipelineLayout, PipelineLayoutConfig, SampledImage, Sampler,
-    SamplerConfig, ShaderModule, ShaderStage, TextureSampler,
+    Allocator, BindlessHeap, Blend, Device, Extent2D, Format, GraphicsPipeline,
+    GraphicsPipelineConfig, Image, ImageConfig, ImageState, ImageUsage, ImageViewHandle,
+    PipelineLayout, PipelineLayoutConfig, SampledImage, Sampler, SamplerConfig, ShaderModule,
+    ShaderStage, TextureSampler,
 };
 
-use crate::{Frame, RenderError};
+use crate::RenderError;
 
 /// The format §9.4 chose, and the one a pipeline drawing into this must declare.
 ///
@@ -143,39 +143,42 @@ impl HdrTarget {
         self.image.view()
     }
 
+    /// The image itself, for [`Graph::import`](crate::Graph::import).
+    #[must_use]
+    pub fn image(&self) -> slop_rhi::ImageHandle {
+        self.image.handle()
+    }
+
+    /// Which aspects a barrier over it must name.
+    #[must_use]
+    pub fn aspect(&self) -> slop_rhi::ImageAspect {
+        self.image.aspect()
+    }
+
+    /// This target's slot in the bindless heap, for a pass that samples it.
+    #[must_use]
+    pub fn slot(&self) -> u32 {
+        self.slot.index()
+    }
+
     /// The size this was allocated at.
     #[must_use]
     pub fn extent(&self) -> Extent2D {
         self.extent
     }
 
-    /// Put the target into the state a pass may render into it from.
-    ///
-    /// From `UNDEFINED`, because the scene pass clears: the previous frame's
-    /// contents are worth nothing and discarding them is faster than preserving
-    /// them.
-    pub fn begin_writing(&self, frame: &Frame<'_>) {
-        frame.command.transition_image(
-            self.image.handle(),
-            self.image.aspect(),
-            ImageState::UNDEFINED,
-            ImageState::COLOR_ATTACHMENT,
-        );
-    }
-
-    /// Make what was written visible to the fragment shader that samples it.
-    ///
-    /// **This is the barrier the whole pass exists around.** Without it the
-    /// tonemap reads whatever the scene pass had flushed so far, which on
-    /// desktop hardware is usually everything and occasionally is not.
-    pub fn end_writing(&self, frame: &Frame<'_>) {
-        frame.command.transition_image(
-            self.image.handle(),
-            self.image.aspect(),
-            ImageState::COLOR_ATTACHMENT,
-            ImageState::SHADER_READ,
-        );
-    }
+    // **`begin_writing` and `end_writing` used to be here, and are gone.**
+    //
+    // They bracketed the scene's writes and made them visible to the sampler,
+    // and the second was the barrier this whole target exists around. Both were
+    // correct and both were a convention: a caller could forget the second and
+    // the tonemap would read whatever had been flushed so far, which desktop
+    // hardware usually gets away with.
+    //
+    // `Graph` derives both from the declaration — the scene pass says it writes
+    // this and the tonemap says it samples it, and the difference between those
+    // two states *is* the barrier. Keeping the methods alongside would leave the
+    // convention available, which is how one comes back.
 }
 
 impl std::fmt::Debug for HdrTarget {
@@ -295,38 +298,21 @@ impl Tonemap {
         })
     }
 
-    /// Resolve `source` onto the frame's target.
+    /// Record the fullscreen resolve into a pass the caller opened.
     ///
-    /// Assumes [`HdrTarget::end_writing`] has already run, which is what makes
-    /// the scene's writes visible to the sampler here.
+    /// `source` is the HDR target's heap slot — [`HdrTarget::slot`].
     ///
-    /// Leaves the frame's target in [`ImageState::COLOR_ATTACHMENT`], not its
-    /// final state — an overlay may still draw over it, so the last-writer rule
-    /// in [`Frame::finish`] still applies.
-    pub fn record(&self, heap: &BindlessHeap, frame: &Frame<'_>, source: &HdrTarget) {
-        frame.command.transition_image(
-            frame.target.image,
-            slop_rhi::ImageAspect::Color,
-            frame.target.from,
-            ImageState::COLOR_ATTACHMENT,
-        );
-
-        let mut pass = frame.command.begin_rendering(&Attachments {
-            color: ColorAttachment {
-                view: frame.target.view,
-                // Every pixel is written by the fullscreen triangle, so clearing
-                // first would be writing the target twice.
-                load: Load::Discard,
-            },
-            depth: None,
-            extent: frame.target.extent,
-        });
-
+    /// **Records draws and nothing else.** It opens no pass and emits no
+    /// barrier, because a [`Graph`](crate::Graph) pass declaring
+    /// `samples: &[(hdr, Stage::Fragment)]` is what makes the scene's writes
+    /// visible here. This used to do both, and the barrier was the part a caller
+    /// could forget.
+    pub fn draw(&self, pass: &mut slop_rhi::Pass<'_>, heap: &BindlessHeap, source: u32) {
         pass.bind_pipeline(&self.pipeline);
         pass.bind_heap(heap);
 
         let push = PushConstants {
-            source: source.slot.index(),
+            source,
             sampler: self.sampler_slot.index(),
         };
 
