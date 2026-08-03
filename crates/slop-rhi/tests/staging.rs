@@ -96,6 +96,43 @@ fn data_survives_a_round_trip_through_device_local_memory() {
 }
 
 #[test]
+fn upload_memory_is_host_coherent_so_a_staging_write_needs_no_barrier() {
+    // The assumption every staging copy in the engine rests on, asserted rather
+    // than believed.
+    //
+    // Vulkan's host write ordering guarantee makes a host write visible to the
+    // device at queue submission, but only for writes already *available to the
+    // host memory domain* — which for coherent memory is all of them, and for
+    // non-coherent memory requires vkFlushMappedMemoryRanges first. Which
+    // memory type the allocator returns is a runtime decision, so a driver or a
+    // gpu-allocator upgrade could in principle hand back non-coherent upload
+    // memory and turn every barrier-free copy into a race that reproduces on
+    // one vendor.
+    //
+    // This exists because two upload paths in this repository disagreed about
+    // whether the barrier was needed and both passed their golden tests, so the
+    // suite could not tell "belt and braces" from "missing barrier"
+    // (CONSIDERATIONS.md item 3). This is the assertion that settles it.
+    let Some((_device, allocator)) = support::device_and_allocator() else {
+        return;
+    };
+
+    let staging = buffer(
+        &allocator,
+        "coherence probe",
+        64,
+        BufferUsage::TRANSFER_SRC,
+        MemoryLocation::Upload,
+    );
+
+    assert!(
+        staging.is_host_coherent(),
+        "upload memory is not host-coherent, so staging writes now need an \
+         explicit flush or a HOST_WRITE barrier before the GPU reads them"
+    );
+}
+
+#[test]
 fn device_local_memory_cannot_be_mapped() {
     // The reason staging exists at all. A caller reaching for `mapped()` on a
     // device-local buffer gets an error naming the fix rather than a pointer

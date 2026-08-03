@@ -132,6 +132,12 @@ impl Buffer {
 
     /// The buffer's contents for writing, for host-visible memory.
     ///
+    /// **A write through this needs no barrier before the GPU reads it**, so
+    /// long as it happens before the queue submission that reads it. See
+    /// [`MemoryLocation::Upload`] for why, and
+    /// [`is_host_coherent`](Self::is_host_coherent) for the condition it rests
+    /// on.
+    ///
     /// # Errors
     ///
     /// Returns [`RhiError::MemoryNotHostVisible`] for a buffer in
@@ -144,6 +150,29 @@ impl Buffer {
             .and_then(ga::Allocation::mapped_slice_mut)
             .and_then(|slice| slice.get_mut(..size))
             .ok_or(RhiError::MemoryNotHostVisible)
+    }
+
+    /// Whether this buffer's memory is host-coherent.
+    ///
+    /// The condition Vulkan's host write ordering guarantee rests on: a host
+    /// write to coherent memory is *available to the host memory domain*
+    /// immediately, and a queue submission then makes it visible to the device
+    /// with no barrier and no flush.
+    ///
+    /// Exposed so the guarantee can be asserted rather than assumed. Which
+    /// memory type an allocator hands back is a runtime decision, and a driver
+    /// or an allocator upgrade that produced non-coherent upload memory would
+    /// otherwise turn every barrier-free staging copy in the engine into a race
+    /// that reproduces on one vendor.
+    #[must_use]
+    pub fn is_host_coherent(&self) -> bool {
+        self.allocation
+            .as_ref()
+            .is_some_and(|allocation| {
+                allocation
+                    .memory_properties()
+                    .contains(vk::MemoryPropertyFlags::HOST_COHERENT)
+            })
     }
 }
 

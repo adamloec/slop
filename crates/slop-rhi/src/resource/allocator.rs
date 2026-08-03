@@ -28,6 +28,26 @@ pub enum MemoryLocation {
     DeviceOnly,
     /// Written by the CPU, read by the GPU — staging buffers and per-frame
     /// uniform data.
+    ///
+    /// Host-coherent, and that is load-bearing rather than incidental: **a host
+    /// write to this memory needs no barrier before the GPU reads it**, as long
+    /// as the write happens before the queue submission.
+    ///
+    /// Vulkan's host write ordering guarantee is what provides it. A queue
+    /// submission's first synchronization scope includes execution of
+    /// `vkQueueSubmit` on the host, and its first access scope includes every
+    /// host write already *available to the host memory domain* — which for
+    /// coherent memory means every host write, with no flush and no barrier.
+    /// Non-coherent memory would need `vkFlushMappedMemoryRanges` first, which
+    /// is why the coherence is asserted by
+    /// [`Buffer::is_host_coherent`](crate::Buffer::is_host_coherent) and tested
+    /// rather than assumed.
+    ///
+    /// Worth stating because the alternative is a `HOST_WRITE` → `TRANSFER_SRC`
+    /// barrier on every staging buffer, which is correct, free of charge, and
+    /// indistinguishable from a barrier that is actually required. Two upload
+    /// paths in this repository disagreed about it, and nothing recorded which
+    /// was right — see `CONSIDERATIONS.md` item 3.
     Upload,
     /// Written by the GPU, read by the CPU — screenshots, golden-image
     /// readback, GPU-side query results.

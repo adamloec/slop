@@ -650,12 +650,21 @@ fn upload_buffer(
     )
     .map_err(|error| error.to_string())?;
 
+    // No HOST_WRITE -> TRANSFER_SRC barrier on the staging buffer, and its
+    // absence is deliberate rather than an omission. Vulkan's host write
+    // ordering guarantee covers it: the write above happens before the queue
+    // submission below, and `MemoryLocation::Upload` is host-coherent, so the
+    // write is already available to the host memory domain and the submission
+    // makes it visible to the device.
+    //
+    // This function used to emit that barrier while `slop_render`'s equivalent
+    // did not, and nothing in the tree said which was right — both passed their
+    // golden tests, because a redundant barrier and a required one look
+    // identical from the outside. `CONSIDERATIONS.md` item 3 is that finding.
+    // The reasoning now lives on `MemoryLocation::Upload`, and
+    // `slop-rhi/tests/staging.rs` asserts the coherence it rests on, so the two
+    // paths agree for a recorded reason rather than by coincidence.
     slop_rhi::submit_and_wait(device, |command| {
-        command.barrier_buffer(
-            staging.handle(),
-            BufferState::HOST_WRITE,
-            BufferState::TRANSFER_SRC,
-        );
         command.copy_buffer(staging.handle(), destination.handle(), size);
         command.barrier_buffer(destination.handle(), BufferState::TRANSFER_DST, final_state);
     })
