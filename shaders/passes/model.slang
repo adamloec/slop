@@ -116,6 +116,42 @@ VertexOut vertexMain(VertexIn input)
     return output;
 }
 
+// The depth prepass's fragment stage — cutout, and nothing else.
+//
+// Opaque geometry runs the prepass with **no fragment shader at all**, which is
+// the entire point of a prepass: rasterization writes depth and no shading runs.
+// Alpha-masked geometry cannot do that. The `discard` below is what decides
+// whether the fragment exists, so a prepass that skipped it would write depth
+// across each leaf card's full rectangle and occlude whatever stood behind the
+// transparent part — Sponza's foliage and chains are entirely alpha-masked, so
+// this is most of the scene rather than a corner case (`docs/PLAN.md` §9.4).
+//
+// The condition is deliberately the same expression as `fragmentMain`'s. If the
+// two ever disagree the prepass cuts away a fragment the forward pass keeps, or
+// keeps one it cuts, and the result is geometry that vanishes rather than an
+// error anyone gets told about.
+[shader("fragment")]
+void prepassMain(VertexOut input)
+{
+    MaterialGpu material =
+        loadFromBuffer<MaterialGpu>(BufferHandle(g_push.materials), g_push.material);
+
+    float alpha = material.baseColor.a;
+
+    if (material.baseColorTexture != NO_TEXTURE)
+    {
+        TextureHandle texture = { material.baseColorTexture };
+        SamplerHandle sampler = { material.sampler };
+
+        alpha *= sampleTexture(texture, sampler, input.uv).a;
+    }
+
+    if ((material.flags & ALPHA_MODE_MASK_BITS) == ALPHA_MODE_MASK && alpha < material.alphaCutoff)
+    {
+        discard;
+    }
+}
+
 // A single directional light, deliberately.
 //
 // This is a bring-up shader: its job is to prove that geometry, materials and

@@ -98,6 +98,23 @@ impl Stage {
     }
 }
 
+/// Every access flag in this file that writes memory.
+///
+/// Listed rather than derived, because Vulkan offers no "is this a write"
+/// predicate and the flags are a flat bitset. That makes this a list which can
+/// fall behind the states above — a write flag missing from here is a barrier
+/// silently not emitted — so `every_writing_state_says_it_writes` below walks
+/// the named states and checks each one against it.
+const WRITE_ACCESSES: vk::AccessFlags2 = vk::AccessFlags2::from_raw(
+    vk::AccessFlags2::SHADER_WRITE.as_raw()
+        | vk::AccessFlags2::SHADER_STORAGE_WRITE.as_raw()
+        | vk::AccessFlags2::COLOR_ATTACHMENT_WRITE.as_raw()
+        | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE.as_raw()
+        | vk::AccessFlags2::TRANSFER_WRITE.as_raw()
+        | vk::AccessFlags2::HOST_WRITE.as_raw()
+        | vk::AccessFlags2::MEMORY_WRITE.as_raw(),
+);
+
 /// A point in an image's lifetime: its layout, and the stage and access that
 /// last touched it or will next touch it.
 ///
@@ -225,6 +242,25 @@ impl ImageState {
         access: vk::AccessFlags2::empty(),
     };
 
+    /// Whether these accesses write memory.
+    ///
+    /// What tells a render graph that a barrier is needed **even when the state
+    /// does not change**. A depth prepass and the forward pass testing against
+    /// it are both [`DEPTH_ATTACHMENT`](Self::DEPTH_ATTACHMENT): identical
+    /// layout, identical stages, identical access. Nothing about the state
+    /// differs, and Vulkan still orders neither rendering scope against the
+    /// other — the prepass's late-fragment-test write and the forward pass's
+    /// early-fragment-test read need a dependency between them or the second
+    /// pass may test against depth the first has not finished writing.
+    ///
+    /// Barriering only on a *change* of state misses exactly that case, which is
+    /// how `docs/PLAN.md` §9.4's prepass found it. Synchronization validation
+    /// did not report it.
+    #[must_use]
+    pub const fn writes(self) -> bool {
+        self.access.as_raw() & WRITE_ACCESSES.as_raw() != 0
+    }
+
     /// An image read by a shader, at the stage that reads it.
     ///
     /// See [`Stage`] for why this takes one rather than assuming.
@@ -301,6 +337,15 @@ pub struct BufferState {
 }
 
 impl BufferState {
+    /// Whether these accesses write memory.
+    ///
+    /// See [`ImageState::writes`] for why a render graph needs this and what it
+    /// misses without it.
+    #[must_use]
+    pub const fn writes(self) -> bool {
+        self.access.as_raw() & WRITE_ACCESSES.as_raw() != 0
+    }
+
     /// Just written by the CPU through a mapped pointer.
     pub const HOST_WRITE: Self = Self {
         stage: vk::PipelineStageFlags2::HOST,
@@ -961,6 +1006,66 @@ mod tests {
             "the first barrier on an acquired image is staged earlier than the \
              semaphore it must follow"
         );
+    }
+
+    /// `WRITE_ACCESSES` must keep up with the states named above.
+    ///
+    /// It is a hand-written list, because Vulkan's access flags are a flat
+    /// bitset with no way to ask whether one writes. A state whose write flag is
+    /// missing from that list reports `writes() == false`, and a render graph
+    /// then skips a barrier it needed — which is not a validation error, it is a
+    /// race. So the states are enumerated here and each is checked against the
+    /// answer, rather than the list being trusted.
+    #[test]
+    fn every_writing_state_says_it_writes() {
+        for (state, expected) in [
+            (ImageState::UNDEFINED, false),
+            (ImageState::ACQUIRED, false),
+            (ImageState::PRESENT, false),
+            (ImageState::COLOR_ATTACHMENT, true),
+            (ImageState::DEPTH_ATTACHMENT, true),
+            (ImageState::SHADER_READ, false),
+            (ImageState::shader_read(Stage::Compute), false),
+            (ImageState::DEPTH_READ, false),
+            (ImageState::TRANSFER_SRC, false),
+            (ImageState::TRANSFER_DST, true),
+            (ImageState::STORAGE_WRITE, true),
+        ] {
+            assert_eq!(
+                state.writes(),
+                expected,
+                "{state:?} disagrees about whether it writes"
+            );
+        }
+
+        for (state, expected) in [
+            (BufferState::HOST_READ, false),
+            (BufferState::HOST_WRITE, true),
+            (BufferState::TRANSFER_SRC, false),
+            (BufferState::TRANSFER_DST, true),
+            (BufferState::VERTEX_INPUT, false),
+            (BufferState::INDEX_INPUT, false),
+            (BufferState::SHADER_READ, false),
+            (BufferState::INDIRECT, false),
+            (BufferState::storage_write(Stage::Compute), true),
+        ] {
+            assert_eq!(
+                state.writes(),
+                expected,
+                "{state:?} disagrees about whether it writes"
+            );
+        }
+    }
+
+    /// The case that made `writes` necessary at all.
+    ///
+    /// A depth prepass and the forward pass after it are the *same state*, so a
+    /// graph barriering on state change alone emits nothing between them. This
+    /// is the property that stops it.
+    #[test]
+    fn two_consecutive_depth_passes_are_indistinguishable_by_state_alone() {
+        assert_eq!(ImageState::DEPTH_ATTACHMENT, ImageState::DEPTH_ATTACHMENT);
+        assert!(ImageState::DEPTH_ATTACHMENT.writes());
     }
 
     /// `ACQUIRED` discards, exactly as `UNDEFINED` does.

@@ -603,6 +603,32 @@ impl Headless {
                 final_state: None,
             });
 
+            // The same two passes the windowed path declares, in the same
+            // order. That is what makes this a golden test of the frame rather
+            // than of a simplified stand-in.
+            //
+            // **What the references do and do not prove about the prepass.** A
+            // prepass that drew nothing at all would leave depth at
+            // `DEPTH_CLEAR`, every fragment would pass, and the image would be
+            // identical — so "the goldens are unchanged" is not evidence the
+            // prepass runs. What is: clearing this to 1.0 instead, so the
+            // prepass leaves the near plane everywhere, changes 65533 of 65536
+            // pixels. The scene pass really does test against what this wrote.
+            // Measured, and the reason the reference is trusted here.
+            graph.add(
+                &slop_render::RenderPass {
+                    name: "depth prepass",
+                    color: None,
+                    depth: Some((
+                        depth,
+                        slop_rhi::Load::Clear(slop_rhi::ClearValue::Depth(slop_rhi::DEPTH_CLEAR)),
+                        true,
+                    )),
+                    ..slop_render::RenderPass::default()
+                },
+                |pass| meshes.draw_depth(pass, heap, view_projection),
+            );
+
             graph.add(
                 &slop_render::RenderPass {
                     name: "scene",
@@ -610,11 +636,7 @@ impl Headless {
                         scene,
                         slop_rhi::Load::Clear(slop_rhi::ClearValue::Color([0.02, 0.02, 0.03, 1.0])),
                     )),
-                    depth: Some((
-                        depth,
-                        slop_rhi::Load::Clear(slop_rhi::ClearValue::Depth(slop_rhi::DEPTH_CLEAR)),
-                        false,
-                    )),
+                    depth: Some((depth, slop_rhi::Load::Preserve, false)),
                     ..slop_render::RenderPass::default()
                 },
                 |pass| meshes.draw(pass, heap, view_projection),

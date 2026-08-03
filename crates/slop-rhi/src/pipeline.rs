@@ -68,12 +68,23 @@ pub struct ShaderStage<'a> {
 pub struct GraphicsPipelineConfig<'a> {
     /// The vertex stage.
     pub vertex: ShaderStage<'a>,
-    /// The fragment stage.
-    pub fragment: ShaderStage<'a>,
-    /// Format of the single colour attachment this pipeline renders into.
+    /// The fragment stage, or `None` for a pipeline that produces no fragments.
     ///
-    /// Must match the swapchain's, or the driver rejects the draw.
-    pub color_format: Format,
+    /// `None` is what a depth prepass over opaque geometry wants: rasterization
+    /// still runs and still writes depth, but no fragment shader is invoked, so
+    /// the pass costs geometry throughput and nothing else. That is the entire
+    /// point of a prepass (`docs/PLAN.md` §9.4) — running the real shader twice
+    /// would cost more than the overdraw it saves.
+    ///
+    /// Alpha-masked geometry is the exception and needs `Some`: the `discard` is
+    /// what decides whether the fragment exists at all, so a prepass that skips
+    /// it writes depth for pixels that should have been cut away.
+    pub fragment: Option<ShaderStage<'a>>,
+    /// Format of the single colour attachment this pipeline renders into, or
+    /// `None` for a pipeline that writes only depth.
+    ///
+    /// Must match the attachment's, or the driver rejects the draw.
+    pub color_format: Option<Format>,
     /// Format of the depth attachment, or `None` for a pipeline that neither
     /// tests nor writes depth.
     ///
@@ -285,16 +296,21 @@ impl GraphicsPipeline {
         layout: &Arc<PipelineLayout>,
         config: &GraphicsPipelineConfig<'_>,
     ) -> Result<Self, RhiError> {
-        let stages = [
+        let mut stages = vec![
             vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::VERTEX)
                 .module(config.vertex.module.handle())
                 .name(config.vertex.entry),
-            vk::PipelineShaderStageCreateInfo::default()
-                .stage(vk::ShaderStageFlags::FRAGMENT)
-                .module(config.fragment.module.handle())
-                .name(config.fragment.entry),
         ];
+
+        if let Some(fragment) = config.fragment {
+            stages.push(
+                vk::PipelineShaderStageCreateInfo::default()
+                    .stage(vk::ShaderStageFlags::FRAGMENT)
+                    .module(fragment.module.handle())
+                    .name(fragment.entry),
+            );
+        }
 
         // One interleaved vertex buffer at binding 0, or none at all.
         //
@@ -360,7 +376,15 @@ impl GraphicsPipeline {
         let multisample = vk::PipelineMultisampleStateCreateInfo::default()
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
 
-        let attachments = [config.blend.attachment()];
+        // One blend state per colour attachment, and none when there are none:
+        // `attachmentCount` must equal the `colorAttachmentCount` below, so
+        // these two are derived from the same `Option` rather than written
+        // twice.
+        let attachments: Vec<vk::PipelineColorBlendAttachmentState> = config
+            .color_format
+            .map(|_| config.blend.attachment())
+            .into_iter()
+            .collect();
         let color_blend =
             vk::PipelineColorBlendStateCreateInfo::default().attachments(&attachments);
 
@@ -378,7 +402,8 @@ impl GraphicsPipeline {
             .depth_bounds_test_enable(false)
             .stencil_test_enable(false);
 
-        let color_formats = [config.color_format.to_vk()];
+        let color_formats: Vec<vk::Format> =
+            config.color_format.map(Format::to_vk).into_iter().collect();
         let mut rendering = vk::PipelineRenderingCreateInfo::default()
             .color_attachment_formats(&color_formats)
             .depth_attachment_format(

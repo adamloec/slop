@@ -4,8 +4,9 @@
 
 ## 1. Purpose
 
-The renderer — `DESIGN.md` §4. Two things today: the loop that turns a swapchain
-into a stream of frames, and the pass that draws a cooked model.
+The renderer — `DESIGN.md` §4. Three things today: the loop that turns a
+swapchain into a stream of frames, the graph that derives the barriers between
+its passes, and the passes that draw a cooked model into HDR and resolve it.
 
 ```
  window size ──► prepare ──► (resize your attachments)
@@ -13,14 +14,18 @@ into a stream of frames, and the pass that draws a cooked model.
                    ▼
               render(|frame| …) ──► acquire, record, submit, present
                    │
-                   ├──► MeshRenderer::record        — the model, with its materials
-                   ├──► slop_editor::DebugUi::draw  — the debug UI, over it
-                   └──► Frame::finish               — the last writer, and only it
+                   ├──► Graph::add        — declare each pass and what it touches
+                   │      ├─ depth prepass  MeshRenderer::draw_depth
+                   │      ├─ scene          MeshRenderer::draw       ──► HDR
+                   │      └─ tonemap        Tonemap::draw            ──► swapchain
+                   ├──► Graph::execute   — every barrier, derived from the above
+                   ├──► slop_editor::DebugUi::draw  — still outside the graph
+                   └──► Frame::finish               — and what keeps it alive
 ```
 
-The render graph and the passes that make up Stage A arrive at M3 (`PLAN.md`
-§9). This crate exists now because everything M2 still owed — the debug UI,
-materials, Sponza — needed a frame loop that was not copy-pasted.
+Nothing in that declaration names a barrier. The remaining passes of Stage A —
+shadows, cluster build, IBL, the post stack — arrive across `PLAN.md` §9.5
+E4–E7, and are added to the same declaration rather than to a call order.
 
 ## 2. Status
 
@@ -33,8 +38,12 @@ materials, Sponza — needed a frame loop that was not copy-pasted.
 | `MeshRenderer` — draws a cooked model, one pipeline for every material | Landed — see §10 | M2 |
 | Material system — glTF materials, bindless textures, alpha modes | Landed | M2 |
 | `Overlay` — the debug UI's Vulkan backend | Moved to `slop-editor` — see §8 | M2 |
-| Render graph — passes declaring reads and writes | Planned | M3 |
-| Clustered forward+, shadows, IBL, HDR/tonemap | Planned | M3 |
+| Render graph — passes declaring reads and writes | Landed — see §12 | M3, E3 |
+| Compute passes and tracked buffers in the graph | Landed | M3, E4 |
+| HDR target and tonemap resolve | Landed | M3, E2 |
+| Depth prepass, including the alpha-masked half | Landed — masked half untested, `PLAN.md` §6.1 | M3, E4 |
+| Clustered forward+, shadows, IBL, post stack | Planned | M3, E4–E7 |
+| The overlay drawing inside the graph | **Absent** — the last caller of `Frame::finish` | M3 |
 | `MeshRenderer` decomposition — it is a god object today | Planned — `docs/reviews/2026-08-03.md` item 2 | M3 |
 | Automated coverage of the loop itself | **Absent** — see §6 | M3 |
 
@@ -49,6 +58,12 @@ materials, Sponza — needed a frame loop that was not copy-pasted.
 | `Target` | The image being drawn to, and the states it enters and leaves in |
 | `FrameOutcome` | Whether a frame was presented or skipped |
 | `MeshRenderer` | Loads a cooked model and draws every mesh it places |
+| `Graph` | The frame's passes, and the barriers derived from what each declares |
+| `Imported` / `ImportedBuffer` | A resource the graph tracks but does not own |
+| `ImageId` / `BufferId` | Names a tracked resource; separate types because they barrier differently |
+| `RenderPass` / `ComputePass` | What one pass reads and writes |
+| `HdrTarget` | The floating-point image the scene is drawn into |
+| `Tonemap` | The fullscreen pass that resolves it onto the swapchain |
 
 ## 4. Why two calls and not one
 
@@ -242,3 +257,37 @@ not have to find out by rendering something:
   front sort is worse than not blending.
 - **Nothing is culled.** Every instance is drawn every frame. Frustum culling and
   the BVH are `slop-scene`'s at M3.
+
+## 12. The graph, and the one rule that is not obvious
+
+A pass declares what it touches; `execute` derives the barriers. That replaced a
+convention — *"only the last writer may transition the target"* — which had
+already failed once, because two passes both believed they were last.
+
+The derivation is nearly the obvious one: a resource has a state, the next pass
+wants it in some state, and the difference is the barrier. **The exception is
+worth knowing about**, because it is invisible in the declaration and cost a
+measurement to find:
+
+> Two passes can want a resource in the *same* state and still need a barrier
+> between them.
+
+The depth prepass and the forward pass after it are both `DEPTH_ATTACHMENT` —
+identical layout, identical stages, identical access. Nothing about the state
+changes, and Vulkan orders the two rendering scopes against each other only if
+something says to. A graph barriering on change-of-state alone emits nothing.
+
+So `Tracked` carries `written` beside `state`, and the skip needs the previous
+use to have been a *read* as well: read-after-read is free, anything after a
+write is not. `ImageState::writes` and `BufferState::writes` answer it from the
+access mask, and `slop-rhi` has a test walking every named state so the
+hand-written list of write flags cannot fall behind them.
+
+**Synchronization validation did not report the missing barrier**, with the
+layer on and `validate_sync` enabled. That is the third gap in its coverage this
+milestone has measured; `crates/slop-render/tests/compute.rs` records another.
+Barriers here rest on reading the code more than the tooling suggests.
+
+What the graph deliberately does not do yet — no topological ordering, no
+culling of passes nothing reads, no transient aliasing — is in the module's own
+documentation, with the reasoning.

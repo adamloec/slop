@@ -10,7 +10,11 @@
 //! let mut meshes = MeshRenderer::new(&device, &mut heap, &module, &reflection, formats)?;
 //! meshes.load(&allocator, &mut heap, &vfs, "models/sponza.model")?;
 //!
-//! renderer.render(|frame| meshes.record(frame, view_projection))?;
+//! // Two passes, declared to the graph. Neither names a barrier.
+//! graph.add(&RenderPass { name: "depth prepass", color: None, depth: .., .. },
+//!           |pass| meshes.draw_depth(pass, &heap, view_projection));
+//! graph.add(&RenderPass { name: "scene", color: .., depth: .., .. },
+//!           |pass| meshes.draw(pass, &heap, view_projection));
 //! ```
 //!
 //! # One pipeline, however many materials
@@ -50,6 +54,19 @@ use crate::{RenderError, VertexBinding};
 /// in `shaders/passes/model.slang`.
 const NO_TEXTURE: u32 = u32::MAX;
 
+/// Which bits of a material's `flags` hold its alpha mode.
+///
+/// Matches `ALPHA_MODE_MASK_BITS` in `shaders/passes/model.slang`. Two bits, so
+/// the remaining thirty are free for the flags real shading will want.
+const ALPHA_MODE_BITS: u32 = 3;
+
+/// The alpha mode meaning "cut the fragment away below the cutoff".
+///
+/// Matches `ALPHA_MODE_MASK` in the shader and `AlphaMode::Mask`'s discriminant
+/// below. The prepass selects a pipeline on this, so a disagreement between the
+/// two sides shows as geometry that vanishes rather than as an error.
+const ALPHA_MODE_MASK: u32 = 1;
+
 /// One material as the shader reads it.
 ///
 /// Mirrors `MaterialGpu` in `shaders/passes/model.slang`. `#[repr(C)]` is
@@ -78,6 +95,12 @@ struct GpuMesh {
     index_count: u32,
     /// Row in the material buffer this mesh is drawn with.
     material: u32,
+    /// Whether this mesh's material cuts fragments away with `discard`.
+    ///
+    /// Selects which prepass pipeline draws it, and the two are not
+    /// interchangeable: masked geometry *must* run a fragment shader in the
+    /// prepass, opaque geometry must not.
+    masked: bool,
 }
 
 /// One placement of one mesh.
@@ -106,6 +129,12 @@ struct PushConstants {
 /// Loads a cooked model and draws it.
 pub struct MeshRenderer {
     pipeline: GraphicsPipeline,
+    /// Depth only, no fragment shader. What the prepass draws opaque geometry
+    /// with — see [`draw_depth`](MeshRenderer::draw_depth).
+    prepass_opaque: GraphicsPipeline,
+    /// Depth only, with the cutout fragment shader. What masked geometry needs,
+    /// because its `discard` is what decides the fragment exists.
+    prepass_masked: GraphicsPipeline,
     meshes: Vec<GpuMesh>,
     placements: Vec<Placement>,
     /// Held so the heap's descriptors stay valid. Never read after upload —
@@ -161,29 +190,56 @@ impl MeshRenderer {
             },
         )?);
 
+        // Every pipeline below shares this. Written once rather than three
+        // times, because the vertex stage and the vertex layout agreeing across
+        // them is what makes the prepass's depth match the forward pass's:
+        // different position arithmetic in the two would leave the forward pass
+        // failing its own depth test and geometry vanishing.
+        let shared = GraphicsPipelineConfig {
+            vertex: ShaderStage {
+                module,
+                entry: c"vertexMain",
+            },
+            fragment: None,
+            color_format: None,
+            depth_format: Some(depth_format),
+            vertex_layout: Some(vertices.layout()),
+            // Off, for now, and this is a real limitation rather than an
+            // oversight: `double_sided` is per material and culling is per
+            // pipeline, so honouring it needs two pipelines and a sort.
+            // Culling everything would erase Sponza's foliage, which is
+            // single-sided geometry meant to be seen from behind.
+            // `docs/PLAN.md` §6.1 records the pair.
+            cull_back_faces: false,
+            blend: Blend::Opaque,
+        };
+
         let pipeline = GraphicsPipeline::new(
             device,
             &layout,
             &GraphicsPipelineConfig {
-                vertex: ShaderStage {
-                    module,
-                    entry: c"vertexMain",
-                },
-                fragment: ShaderStage {
+                fragment: Some(ShaderStage {
                     module,
                     entry: c"fragmentMain",
-                },
-                color_format,
-                depth_format: Some(depth_format),
-                vertex_layout: Some(vertices.layout()),
-                // Off, for now, and this is a real limitation rather than an
-                // oversight: `double_sided` is per material and culling is per
-                // pipeline, so honouring it needs two pipelines and a sort.
-                // Culling everything would erase Sponza's foliage, which is
-                // single-sided geometry meant to be seen from behind.
-                // `docs/PLAN.md` §6.1 records the pair.
-                cull_back_faces: false,
-                blend: Blend::Opaque,
+                }),
+                color_format: Some(color_format),
+                ..shared
+            },
+        )?;
+
+        // No fragment stage at all: rasterization writes depth and nothing is
+        // shaded, which is the whole saving a prepass exists for.
+        let prepass_opaque = GraphicsPipeline::new(device, &layout, &shared)?;
+
+        let prepass_masked = GraphicsPipeline::new(
+            device,
+            &layout,
+            &GraphicsPipelineConfig {
+                fragment: Some(ShaderStage {
+                    module,
+                    entry: c"prepassMain",
+                }),
+                ..shared
             },
         )?;
 
@@ -205,6 +261,8 @@ impl MeshRenderer {
 
         Ok(Self {
             pipeline,
+            prepass_opaque,
+            prepass_masked,
             meshes: Vec::new(),
             placements: Vec::new(),
             images: Vec::new(),
@@ -296,9 +354,20 @@ impl MeshRenderer {
                 },
             };
 
+            // Read back off the row rather than off the `Material`, so the flag
+            // the prepass selects on and the flag the shader tests are the same
+            // value. A mesh with no material takes the default row, which has
+            // no `Material` to consult at all.
+            let masked = materials[material as usize].flags & ALPHA_MODE_BITS == ALPHA_MODE_MASK;
+
             index_of.insert(name.to_owned(), self.meshes.len());
-            self.meshes
-                .push(upload_mesh(allocator, &mut uploads, &mesh, material)?);
+            self.meshes.push(upload_mesh(
+                allocator,
+                &mut uploads,
+                &mesh,
+                material,
+                masked,
+            )?);
         }
 
         for instance in &model.instances {
@@ -369,7 +438,7 @@ impl MeshRenderer {
             alpha_cutoff: material.alpha_cutoff,
             flags: match material.alpha_mode {
                 AlphaMode::Opaque => 0,
-                AlphaMode::Mask => 1,
+                AlphaMode::Mask => ALPHA_MODE_MASK,
                 AlphaMode::Blend => 2,
             },
             base_color_texture: NO_TEXTURE,
@@ -560,20 +629,7 @@ impl MeshRenderer {
         pass.bind_heap(heap);
 
         for placement in &self.placements {
-            let mesh = &self.meshes[placement.mesh];
-
-            let push = PushConstants {
-                model_view_projection: view_projection * placement.transform,
-                normal_rows: normal_rows(placement.transform),
-                materials: materials.index(),
-                material: mesh.material,
-                _pad: [0; 2],
-            };
-
-            pass.push_constants(&bytemuck::bytes_of(&push)[..self.push_constant_bytes as usize]);
-            pass.bind_vertex_buffer(&mesh.vertices);
-            pass.bind_index_buffer(&mesh.indices);
-            pass.draw_indexed(mesh.index_count, 1, 0, 0);
+            self.record(pass, placement, materials, view_projection);
         }
 
         // Ends the pass, so the transition below is outside it.
@@ -584,6 +640,94 @@ impl MeshRenderer {
         // opens the pass, and derives the transitions from what the declaration
         // said this pass touches — so there is nothing left to forget.
         // `docs/PLAN.md` §9.5 E3.
+    }
+
+    /// Record the depth prepass — every mesh, depth only, no shading.
+    ///
+    /// `docs/PLAN.md` §9.4. The forward pass then tests against a depth buffer
+    /// that already holds the nearest surface at every pixel, so a fragment
+    /// hidden behind something else is rejected before its shader runs. That
+    /// matters more the more expensive shading gets, which is the direction
+    /// Stage A is going.
+    ///
+    /// Draws through the **same vertex entry point** as
+    /// [`draw`](Self::draw) with the **same push constants**, which is not a
+    /// tidiness point: the forward pass tests `GREATER_OR_EQUAL` against what
+    /// this wrote, so position arithmetic that differed by one bit in the
+    /// unfavourable direction would reject the very fragment that produced the
+    /// depth, and the surface would disappear.
+    ///
+    /// # What is not covered by a test
+    ///
+    /// **The masked half.** Sponza has 14 masked meshes of 103, so the split
+    /// runs — but drawing them through `prepass_opaque` instead, which is the
+    /// mistake this exists to prevent, changes **0 of 65536 pixels** in the
+    /// reference frame. Measured, not assumed. The reference camera sits in the
+    /// arcade among columns and banners, and no cutout in it has anything
+    /// behind it whose disappearance would show.
+    ///
+    /// So this path is correct by construction — the shader tests the same
+    /// expression the forward pass does — and nothing independent checks it.
+    /// `docs/PLAN.md` §6.1 carries the row; closing it wants a source asset
+    /// shaped for the case rather than a camera hunt through Sponza, which was
+    /// tried.
+    pub fn draw_depth(
+        &self,
+        pass: &mut slop_rhi::Pass<'_>,
+        heap: &BindlessHeap,
+        view_projection: Mat4,
+    ) {
+        let Some(materials) = self.materials_slot else {
+            return;
+        };
+
+        // Walked twice, grouped by pipeline, rather than once with a bind per
+        // draw. Which prepass pipeline a mesh needs is a property of its
+        // material, and rebinding per placement would cost more than the
+        // prepass saves — Sponza is 103 primitives.
+        for (masked, pipeline) in [(false, &self.prepass_opaque), (true, &self.prepass_masked)] {
+            pass.bind_pipeline(pipeline);
+            // Bound for both, though only the masked pipeline samples anything:
+            // the alternative is a rule about which pipeline needs it, and that
+            // rule breaks silently the day the vertex shader reads the heap.
+            pass.bind_heap(heap);
+
+            for placement in &self.placements {
+                if self.meshes[placement.mesh].masked != masked {
+                    continue;
+                }
+
+                self.record(pass, placement, materials, view_projection);
+            }
+        }
+    }
+
+    /// One draw, identical whichever pipeline is bound.
+    ///
+    /// Shared by [`draw`](Self::draw) and [`draw_depth`](Self::draw_depth)
+    /// rather than written twice, because the push constants the two send must
+    /// be the same bytes — see `draw_depth` for what happens when they are not.
+    fn record(
+        &self,
+        pass: &slop_rhi::Pass<'_>,
+        placement: &Placement,
+        materials: slop_core::Handle<StorageBuffer>,
+        view_projection: Mat4,
+    ) {
+        let mesh = &self.meshes[placement.mesh];
+
+        let push = PushConstants {
+            model_view_projection: view_projection * placement.transform,
+            normal_rows: normal_rows(placement.transform),
+            materials: materials.index(),
+            material: mesh.material,
+            _pad: [0; 2],
+        };
+
+        pass.push_constants(&bytemuck::bytes_of(&push)[..self.push_constant_bytes as usize]);
+        pass.bind_vertex_buffer(&mesh.vertices);
+        pass.bind_index_buffer(&mesh.indices);
+        pass.draw_indexed(mesh.index_count, 1, 0, 0);
     }
 
     /// The depth buffer, for [`Graph::import`](crate::Graph::import).
@@ -727,6 +871,7 @@ fn upload_mesh(
     uploads: &mut Uploads,
     mesh: &Mesh,
     material: u32,
+    masked: bool,
 ) -> Result<GpuMesh, RenderError> {
     let vertices = upload_buffer(
         allocator,
@@ -750,6 +895,7 @@ fn upload_mesh(
         indices,
         index_count: mesh.indices.len() as u32,
         material,
+        masked,
     })
 }
 

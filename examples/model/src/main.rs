@@ -338,14 +338,34 @@ impl Renderer {
                         final_state: None,
                     });
 
+                    // Depth first, and nothing else. A pass with no colour
+                    // attachment at all — `docs/PLAN.md` §9.4.
+                    graph.add(
+                        &RenderPass {
+                            name: "depth prepass",
+                            color: None,
+                            depth: Some((
+                                depth,
+                                Load::Clear(ClearValue::Depth(slop_rhi::DEPTH_CLEAR)),
+                                // Stored, unlike every depth attachment before
+                                // this one: the pass below is what reads it.
+                                true,
+                            )),
+                            ..RenderPass::default()
+                        },
+                        |pass| meshes.draw_depth(pass, heap, view_projection),
+                    );
+
                     graph.add(
                         &RenderPass {
                             name: "scene",
                             color: Some((scene, Load::Clear(ClearValue::Color(CLEAR)))),
                             depth: Some((
                                 depth,
-                                Load::Clear(ClearValue::Depth(slop_rhi::DEPTH_CLEAR)),
-                                // Scratch for this pass, so storing it would
+                                // What the prepass wrote. Clearing here would
+                                // throw the prepass away and leave it pure cost.
+                                Load::Preserve,
+                                // Scratch from here on, so storing it would
                                 // cost bandwidth nothing reads.
                                 false,
                             )),

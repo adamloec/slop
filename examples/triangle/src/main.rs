@@ -138,11 +138,11 @@ impl Renderer {
                     module: &module,
                     entry: c"vertexMain",
                 },
-                fragment: ShaderStage {
+                fragment: Some(ShaderStage {
                     module: &module,
                     entry: c"fragmentMain",
-                },
-                color_format: renderer.format(),
+                }),
+                color_format: Some(renderer.format()),
                 // No depth: the triangle is a single flat primitive with nothing
                 // to occlude it. Depth arrives with the cube.
                 depth_format: None,
@@ -273,10 +273,10 @@ fn record(pipeline: &GraphicsPipeline, frame: &Frame<'_>) {
     );
 
     let mut pass = frame.command.begin_rendering(&Attachments {
-        color: ColorAttachment {
+        color: Some(ColorAttachment {
             view,
             load: Load::Clear(ClearValue::Color([0.02, 0.02, 0.03, 1.0])),
-        },
+        }),
         // No depth: the triangle is one flat primitive with nothing to occlude
         // it, and the pipeline was built the same way.
         depth: None,

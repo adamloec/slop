@@ -1,8 +1,10 @@
 //! The renderer — `docs/DESIGN.md` §4.
 //!
-//! Today it owns one thing: the loop that turns a swapchain into a stream of
-//! frames. The render graph, the material system and the passes that make up
-//! Stage A arrive at M3 (`docs/PLAN.md` §9).
+//! Three things: the loop that turns a swapchain into a stream of frames, the
+//! [`Graph`] that derives the barriers between a frame's passes, and the passes
+//! that draw a cooked model into HDR and resolve it. The rest of Stage A —
+//! shadows, clustered lighting, IBL, the post stack — arrives across
+//! `docs/PLAN.md` §9.5 E4–E7.
 //!
 //! ```ignore
 //! let mut renderer = FrameRenderer::new(&device, &surface, size, &config)?;
@@ -11,7 +13,16 @@
 //! if let Some(extent) = renderer.prepare(&surface, window_size)? {
 //!     scene.resize(&allocator, extent)?;      // depth buffer, and anything else sized
 //! }
-//! renderer.render(|frame| scene.record(frame.command, frame.target, frame.number))?;
+//!
+//! renderer.render(|frame| {
+//!     let mut graph = Graph::new();
+//!     let screen = graph.import(&Imported { name: "swapchain", .. });
+//!
+//!     graph.add(&RenderPass { name: "scene", color: Some((screen, load)), .. },
+//!               |pass| scene.draw(pass));
+//!
+//!     graph.execute(frame.command);
+//! })?;
 //! ```
 //!
 //! # It is not a framework

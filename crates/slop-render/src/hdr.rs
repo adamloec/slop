@@ -250,11 +250,11 @@ impl Tonemap {
                     module,
                     entry: c"vertexMain",
                 },
-                fragment: ShaderStage {
+                fragment: Some(ShaderStage {
                     module,
                     entry: c"fragmentMain",
-                },
-                color_format,
+                }),
+                color_format: Some(color_format),
                 // No depth at all. The triangle covers the viewport and there is
                 // nothing to test against; declaring a depth format here would
                 // mean the pass had to be given one.

@@ -151,11 +151,11 @@ impl Overlay {
                     module,
                     entry: c"vertexMain",
                 },
-                fragment: ShaderStage {
+                fragment: Some(ShaderStage {
                     module,
                     entry: c"fragmentMain",
-                },
-                color_format,
+                }),
+                color_format: Some(color_format),
                 // No depth. The overlay draws last, over everything, and a depth
                 // test would let the scene occlude the interface reading it.
                 depth_format: None,
@@ -379,12 +379,12 @@ impl Overlay {
         };
 
         let mut pass = command.begin_rendering(&Attachments {
-            color: ColorAttachment {
+            color: Some(ColorAttachment {
                 view: frame.target.view,
                 // Preserve, never clear: the scene is already in this attachment
                 // and the overlay composites over it.
                 load: Load::Preserve,
-            },
+            }),
             depth: None,
             extent: frame.target.extent,
         });

@@ -181,11 +181,11 @@ impl Scene {
                     module: &module,
                     entry: c"vertexMain",
                 },
-                fragment: ShaderStage {
+                fragment: Some(ShaderStage {
                     module: &module,
                     entry: c"fragmentMain",
-                },
-                color_format,
+                }),
+                color_format: Some(color_format),
                 depth_format: Some(depth_format),
                 vertex_layout: Some(vertices_layout.layout()),
                 // On. With culling off a reversed face still renders, and the
@@ -506,10 +506,10 @@ impl Scene {
         );
 
         let mut pass = command.begin_rendering(&Attachments {
-            color: ColorAttachment {
+            color: Some(ColorAttachment {
                 view: target.view,
                 load: Load::Clear(ClearValue::Color([0.02, 0.02, 0.03, 1.0])),
-            },
+            }),
             depth: Some(DepthAttachment {
                 view: self.depth.view(),
                 load: Load::Clear(ClearValue::Depth(DEPTH_CLEAR)),

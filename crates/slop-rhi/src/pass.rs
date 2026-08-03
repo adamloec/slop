@@ -24,11 +24,12 @@
 //! # What is deliberately not here
 //!
 //! Anything with no caller. `docs/PLAN.md` §4.1-D is explicit that a guessed
-//! shape gets rebuilt anyway, so this covers what the three existing consumers
-//! do and nothing else: one colour attachment, an optional depth attachment,
-//! one vertex buffer binding. Multiple render targets, instanced draws with a
-//! non-zero first instance, and indirect draws all arrive with the passes that
-//! need them.
+//! shape gets rebuilt anyway, so this covers what the existing consumers do and
+//! nothing else: at most one colour attachment, an optional depth attachment,
+//! one vertex buffer binding. **Multiple** render targets, instanced draws with
+//! a non-zero first instance, and indirect draws all arrive with the passes that
+//! need them. Zero colour attachments is here because §9.4's depth prepass is
+//! that pass.
 
 use std::sync::Arc;
 
@@ -97,8 +98,12 @@ pub struct DepthAttachment {
 /// Everything a pass renders into.
 #[derive(Debug, Clone, Copy)]
 pub struct Attachments {
-    /// The colour target.
-    pub color: ColorAttachment,
+    /// The colour target, or `None` for a pass that writes only depth.
+    ///
+    /// `None` is the depth prepass (`docs/PLAN.md` §9.4). Must agree with the
+    /// pipeline's `color_format` the same way `depth` must agree with its
+    /// `depth_format`.
+    pub color: Option<ColorAttachment>,
     /// The depth target, or `None` for a pass that neither tests nor writes it.
     ///
     /// Must agree with the pipeline's `depth_format`: a pipeline built with a
@@ -131,12 +136,23 @@ impl CommandBuffer {
     ///
     /// The command buffer must be recording and not already inside a pass.
     pub fn begin_rendering<'a>(&'a self, attachments: &Attachments) -> Pass<'a> {
-        let color = [rendering_attachment(
-            attachments.color.view,
-            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-            attachments.color.load,
-            true,
-        )];
+        // An array plus a slice rather than a `Vec`: this is a per-frame path
+        // and `docs/CONVENTIONS.md` §8 says it allocates nothing. Zero or one
+        // colour attachment is all `Attachments` can express, so the storage is
+        // a fixed size.
+        let one;
+        let color: &[vk::RenderingAttachmentInfo<'_>] = match attachments.color {
+            Some(color) => {
+                one = [rendering_attachment(
+                    color.view,
+                    vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                    color.load,
+                    true,
+                )];
+                &one
+            }
+            None => &[],
+        };
 
         let depth = attachments.depth.map(|depth| {
             rendering_attachment(
@@ -153,7 +169,7 @@ impl CommandBuffer {
                 extent: attachments.extent.to_vk(),
             })
             .layer_count(1)
-            .color_attachments(&color);
+            .color_attachments(color);
 
         if let Some(depth) = &depth {
             info = info.depth_attachment(depth);

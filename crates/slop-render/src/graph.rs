@@ -15,6 +15,13 @@
 //! make: a resource has a state, the next pass needs it in some state, and the
 //! difference is the barrier.
 //!
+//! "The difference is the barrier" is very slightly wrong, and E4's depth
+//! prepass is what found it. Two consecutive passes can want a resource in the
+//! *same* state — a prepass writing depth and a forward pass testing it are both
+//! `DEPTH_ATTACHMENT` — and Vulkan still orders neither rendering scope against
+//! the other. So the graph tracks whether the last use wrote, not just what
+//! state it left behind. See [`ImageState::writes`] and `transition`.
+//!
 //! # What it deliberately does not do yet
 //!
 //! **Passes run in declaration order.** No topological sort, no reordering, no
@@ -73,6 +80,13 @@ struct Tracked {
     /// What the last pass to touch it left it in. Starts at whatever the caller
     /// declared on import.
     state: ImageState,
+    /// Whether the last use of it wrote.
+    ///
+    /// Not derivable from `state` at the moment it matters: two consecutive
+    /// depth passes are the same state, and skipping the barrier because
+    /// nothing changed is the bug this exists to stop. See
+    /// [`ImageState::writes`].
+    written: bool,
     /// What it must be left in when the frame ends, if anything.
     ///
     /// This is what makes the last-writer rule disappear: the graph knows which
@@ -121,6 +135,10 @@ pub struct RenderPass<'a> {
     /// For diagnostics and, at `docs/DESIGN.md` §10.2, the pass visualiser.
     pub name: &'static str,
     /// The colour attachment, and how to treat what is already in it.
+    ///
+    /// `None` with a depth attachment is a depth-only pass — §9.4's prepass.
+    /// `None` with neither is a mistake, and `execute` panics rather than
+    /// recording draws that could not land anywhere.
     pub color: Option<(ImageId, Load)>,
     /// The depth attachment, how to treat it, and whether to keep the result.
     pub depth: Option<(ImageId, Load, bool)>,
@@ -170,6 +188,8 @@ struct TrackedBuffer {
     name: &'static str,
     buffer: BufferHandle,
     state: BufferState,
+    /// Whether the last use of it wrote — see [`Tracked::written`].
+    written: bool,
     final_state: Option<BufferState>,
 }
 
@@ -266,6 +286,10 @@ impl<'a> Graph<'a> {
             name: resource.name,
             buffer: resource.buffer,
             state: resource.state,
+            // Whatever the declared starting state implies. An imported buffer
+            // said to arrive mid-write is one whose first reader needs a
+            // barrier, and the caller already said so by naming the state.
+            written: resource.state.writes(),
             final_state: resource.final_state,
         });
 
@@ -301,6 +325,7 @@ impl<'a> Graph<'a> {
             aspect: resource.aspect,
             extent: resource.extent,
             state: resource.state,
+            written: resource.state.writes(),
             final_state: resource.final_state,
         });
 
@@ -397,16 +422,23 @@ impl<'a> Graph<'a> {
                         self.transition(command, id, ImageState::DEPTH_ATTACHMENT);
                     }
 
-                    let attachment = color.map(|(id, load)| {
-                        let tracked = &self.resources[id.0];
+                    // The render area comes from whichever attachment there is.
+                    // A depth prepass has only depth, and its extent is as good
+                    // a source as a colour target's — Vulkan requires the two to
+                    // cover the area either way.
+                    let Some(extent) = color
+                        .or(depth.map(|(id, load, _)| (id, load)))
+                        .map(|(id, _)| self.resources[id.0].extent)
+                    else {
+                        // Neither colour nor depth is not a pass, it is a
+                        // mistake: nothing it drew could go anywhere. Named
+                        // rather than silently recorded into nothing.
+                        panic!("render pass '{name}' declares no attachments at all");
+                    };
 
-                        (
-                            ColorAttachment {
-                                view: tracked.view,
-                                load,
-                            },
-                            tracked.extent,
-                        )
+                    let attachment = color.map(|(id, load)| ColorAttachment {
+                        view: self.resources[id.0].view,
+                        load,
                     });
 
                     let depth = depth.map(|(id, load, store)| DepthAttachment {
@@ -414,17 +446,6 @@ impl<'a> Graph<'a> {
                         load,
                         store,
                     });
-
-                    let Some((attachment, extent)) = attachment else {
-                        // A render pass with no colour attachment would be a
-                        // depth-only pass, which §9.4's prepass is and this
-                        // cannot express yet — `Attachments` requires a colour
-                        // target. Named rather than silently skipped.
-                        panic!(
-                            "render pass '{name}' declares no colour attachment; depth-only \
-                             passes are not yet expressible"
-                        );
-                    };
 
                     let mut rendering = command.begin_rendering(&Attachments {
                         color: attachment,
@@ -487,32 +508,42 @@ impl<'a> Graph<'a> {
         }
     }
 
-    /// Move one buffer into `wanted`, if it is not already there.
+    /// Move one buffer into `wanted`, if anything needs moving.
     fn transition_buffer(&mut self, command: &CommandBuffer, id: BufferId, wanted: BufferState) {
         let tracked = &mut self.buffers[id.0];
 
-        if tracked.state == wanted {
+        if tracked.state == wanted && !tracked.written {
             return;
         }
 
         command.barrier_buffer(tracked.buffer, tracked.state, wanted);
         tracked.state = wanted;
+        tracked.written = wanted.writes();
     }
 
-    /// Move one resource into `wanted`, if it is not already there.
+    /// Move one resource into `wanted`, if anything needs moving.
+    ///
+    /// **Two conditions, not one.** Skipping a no-op transition is not just an
+    /// optimisation — a barrier from a state to itself tells the driver to flush
+    /// and invalidate for nothing, and at eight passes that is eight wasted
+    /// barriers a frame. But "the state is unchanged" is not the same question
+    /// as "nothing needs ordering": a depth prepass leaves the buffer in
+    /// `DEPTH_ATTACHMENT` and the forward pass wants it in `DEPTH_ATTACHMENT`,
+    /// and Vulkan orders the two rendering scopes against each other only if
+    /// something says to. That barrier really is from a state to itself.
+    ///
+    /// So the skip needs the previous use to have been a *read* as well. A
+    /// read-after-read is free; anything after a write is not.
     fn transition(&mut self, command: &CommandBuffer, id: ImageId, wanted: ImageState) {
         let tracked = &mut self.resources[id.0];
 
-        // Skipping a no-op transition is not just an optimisation: a barrier
-        // from a state to itself is legal but tells the driver to flush and
-        // invalidate for nothing, and at eight passes that is eight wasted
-        // barriers a frame.
-        if tracked.state == wanted {
+        if tracked.state == wanted && !tracked.written {
             return;
         }
 
         command.transition_image(tracked.image, tracked.aspect, tracked.state, wanted);
         tracked.state = wanted;
+        tracked.written = wanted.writes();
     }
 }
 
@@ -553,18 +584,35 @@ mod tests {
                 height: 1,
             },
             state,
+            written: state.writes(),
             final_state: None,
         }
     }
 
     #[test]
-    fn a_resource_already_in_the_wanted_state_needs_no_barrier() {
-        let resource = tracked(ImageState::COLOR_ATTACHMENT);
+    fn a_resource_read_twice_in_the_same_state_needs_no_barrier() {
+        let resource = tracked(ImageState::SHADER_READ);
 
-        assert_eq!(resource.state, ImageState::COLOR_ATTACHMENT);
-        // The condition `transition` tests. Asserted on the states rather than
-        // by counting emitted barriers, because emitting needs a device.
-        assert!(resource.state == ImageState::COLOR_ATTACHMENT);
+        // The condition `transition` tests, both halves. Asserted on the state
+        // rather than by counting emitted barriers, because emitting needs a
+        // device.
+        assert_eq!(resource.state, ImageState::SHADER_READ);
+        assert!(!resource.written, "a sampled read is not a write");
+    }
+
+    #[test]
+    fn a_resource_written_then_wanted_in_the_same_state_still_needs_one() {
+        // The depth prepass. Nothing about the state changes between the two
+        // passes, and the barrier is required anyway — barriering on state
+        // change alone emits nothing here.
+        let resource = tracked(ImageState::DEPTH_ATTACHMENT);
+
+        assert_eq!(resource.state, ImageState::DEPTH_ATTACHMENT);
+        assert!(
+            resource.written,
+            "a depth attachment write must be recorded as one, or the pass after \
+             it is unordered against it"
+        );
     }
 
     #[test]

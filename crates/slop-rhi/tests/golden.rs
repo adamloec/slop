@@ -173,11 +173,11 @@ impl Headless {
                     module,
                     entry: c"vertexMain",
                 },
-                fragment: ShaderStage {
+                fragment: Some(ShaderStage {
                     module,
                     entry: c"fragmentMain",
-                },
-                color_format: FORMAT,
+                }),
+                color_format: Some(FORMAT),
                 // No depth: one flat primitive with nothing to occlude it.
                 depth_format: None,
                 // Positions come from SV_VertexID, so there is nothing to bind.
