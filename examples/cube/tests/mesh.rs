@@ -265,3 +265,46 @@ fn the_cube_model_places_its_one_mesh() {
 
     assert_eq!(model.instances[0].transform, expected);
 }
+
+#[test]
+fn every_vertex_has_a_tangent_perpendicular_to_its_normal() {
+    // `assets/cube.gltf` has no TANGENT attribute, so these are derived by the
+    // importer — this is the check on that derivation against a real artifact
+    // rather than a synthetic quad.
+    //
+    // Perpendicularity and unit length are what the shader assumes when it
+    // builds the tangent frame. Neither is free: the accumulated tangent is
+    // unnormalised and generally not perpendicular until Gram-Schmidt runs.
+    let Some(mesh) = cooked() else { return };
+
+    for (index, vertex) in mesh.vertices.iter().enumerate() {
+        assert!(
+            vertex.has_tangent(),
+            "vertex {index} has no tangent, but the cube's UVs are not degenerate"
+        );
+
+        let tangent = [vertex.tangent[0], vertex.tangent[1], vertex.tangent[2]];
+        let length =
+            (tangent[0] * tangent[0] + tangent[1] * tangent[1] + tangent[2] * tangent[2]).sqrt();
+
+        assert!(
+            (length - 1.0).abs() < 1e-5,
+            "vertex {index} tangent is {length} long, not unit"
+        );
+
+        let along_normal = tangent[0] * vertex.normal[0]
+            + tangent[1] * vertex.normal[1]
+            + tangent[2] * vertex.normal[2];
+
+        assert!(
+            along_normal.abs() < 1e-5,
+            "vertex {index} tangent is not perpendicular to its normal: {along_normal}"
+        );
+
+        assert!(
+            vertex.tangent[3] == 1.0 || vertex.tangent[3] == -1.0,
+            "handedness must be exactly +1 or -1, not {}",
+            vertex.tangent[3]
+        );
+    }
+}

@@ -61,6 +61,8 @@ struct VertexIn
     float3 position : POSITION;
     float3 normal : NORMAL;
     float2 uv : TEXCOORD0;
+    // Object-space tangent, handedness in `w`. See `slop_asset::Vertex`.
+    float4 tangent : TANGENT;
 };
 
 struct VertexOut
@@ -68,6 +70,12 @@ struct VertexOut
     float4 position : SV_Position;
     float3 normal : NORMAL;
     float2 uv : TEXCOORD0;
+    // World-space tangent, with handedness carried through untouched in `w`.
+    //
+    // Interpolated across the triangle like the normal, and renormalised in the
+    // fragment shader for the same reason: interpolating two unit vectors gives
+    // something shorter than unit length between them.
+    float4 tangent : TANGENT;
 };
 
 [shader("vertex")]
@@ -87,6 +95,23 @@ VertexOut vertexMain(VertexIn input)
 
     output.normal = normalize(mul(normalMatrix, input.normal));
     output.uv = input.uv;
+
+    // **The normal matrix, used on a tangent, which is not strictly correct.**
+    //
+    // A normal is perpendicular to the surface and transforms by the inverse
+    // transpose; a tangent lies *along* the surface and transforms like any
+    // other direction, by the model matrix. The two agree up to scale under
+    // rotation and uniform scale — and after the normalize below, agree exactly.
+    // They diverge only under non-uniform scale, where this skews the tangent.
+    //
+    // The model matrix is not here to use: this block is 120 of the 128 bytes
+    // Vulkan guarantees, and another float3x3 needs 48 more. The fix is the
+    // per-instance data that a storage buffer will carry, which is where the
+    // model matrix belongs anyway. `docs/PLAN.md` §6.1 has the row.
+    //
+    // `w` passes through untouched: handedness is a property of the UV mapping,
+    // not of where the model sits.
+    output.tangent = float4(normalize(mul(normalMatrix, input.tangent.xyz)), input.tangent.w);
 
     return output;
 }
@@ -125,6 +150,42 @@ float4 fragmentMain(VertexOut input) : SV_Target
     }
 
     float3 normal = normalize(input.normal);
+
+    // Normal mapping. The map stores a direction in **tangent space** — a frame
+    // aligned to the texture's axes — so applying it means building that frame
+    // and rotating the sampled direction into world space.
+    //
+    // Guarded on the tangent being non-zero as well as on the texture existing.
+    // A mesh whose source had no tangents and whose UVs are degenerate gets a
+    // zero tangent (see `slop_asset::Vertex::has_tangent`), and normalizing that
+    // gives NaN — which spreads into the lit colour and shows as black or white
+    // pixels rather than as an obviously wrong normal.
+    if (material.normalTexture != NO_TEXTURE && dot(input.tangent.xyz, input.tangent.xyz) > 0.0)
+    {
+        TextureHandle texture = { material.normalTexture };
+        SamplerHandle sampler = { material.sampler };
+
+        // Renormalised after interpolation, then made perpendicular to the
+        // normal again by Gram-Schmidt: interpolating across a triangle does not
+        // preserve either unit length or the right angle between them.
+        float3 tangent = normalize(input.tangent.xyz);
+        tangent = normalize(tangent - normal * dot(normal, tangent));
+
+        // `w` is where mirrored UVs are recorded. Dropping it flips the
+        // bitangent on every mirrored surface — extremely common, since artists
+        // mirror half a symmetrical model to halve the texture budget — and
+        // lights those surfaces as though from the opposite side.
+        float3 bitangent = cross(normal, tangent) * input.tangent.w;
+
+        // Stored 0..1, used -1..1: a normal map's texels are directions biased
+        // into an unsigned texture, and skipping this leaves every normal in the
+        // positive octant, which lights the whole surface as though it faced up
+        // and to the right.
+        float3 sampled = sampleTexture(texture, sampler, input.uv).xyz * 2.0 - 1.0;
+
+        normal = normalize(tangent * sampled.x + bitangent * sampled.y + normal * sampled.z);
+    }
+
     float lambert = saturate(dot(normal, LIGHT_DIRECTION));
 
     return float4(albedo.rgb * (AMBIENT + lambert), albedo.a);

@@ -30,6 +30,14 @@ struct VertexIn
     float3 position : POSITION;
     float3 normal : NORMAL;
     float2 uv : TEXCOORD0;
+    // Declared but unused, and it must stay declared. The vertex layout is
+    // derived from this struct by reflection, so leaving the tangent out would
+    // compute a 32-byte stride for a buffer whose vertices are 48 — every
+    // vertex after the first would be read from the middle of its predecessor.
+    //
+    // The cube has no normal map. It carries tangents because the mesh format
+    // has one layout, which `docs/PLAN.md` §6.1 records as deliberate.
+    float4 tangent : TANGENT;
 };
 
 struct VertexOut

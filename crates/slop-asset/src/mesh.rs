@@ -24,7 +24,7 @@
 //! vertices   u32      count
 //! indices    u32      count
 //! material   u32      length of the material path, zero if there is none
-//! vertex data         vertices × 32 bytes
+//! vertex data         vertices × 48 bytes
 //! index data          indices × 4 bytes
 //! ```
 //!
@@ -48,13 +48,13 @@ const MAGIC: &[u8; 8] = b"SLOPMESH";
 ///
 /// Bump when the layout changes. Every artifact then fails its stamp and
 /// regenerates from source, which is the whole reason cooking is a build step.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 /// Bytes before the vertex data.
 const HEADER: usize = 24;
 
 /// Bytes per vertex.
-pub const VERTEX_SIZE: usize = 32;
+pub const VERTEX_SIZE: usize = 48;
 
 /// Why a cooked mesh could not be read.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -113,8 +113,16 @@ pub enum MeshError {
 
 /// One vertex.
 ///
-/// The layout the cube's shader declares, and the only one the format has —
-/// `docs/PLAN.md` §6.1 records why flexibility waits and why it is cheap to add.
+/// **One layout, for every mesh.** Every shader that draws cooked geometry must
+/// declare all of these, because the vertex layout is derived from shader
+/// reflection and a shader that omits a field computes a stride shorter than the
+/// buffer's — reading every vertex after the first from the middle of its
+/// predecessor. The cube declares a tangent it never samples for exactly this
+/// reason.
+///
+/// The alternative is per-mesh layouts and pipeline variants to match, which is
+/// a real requirement for skinned and instanced geometry and is not one yet;
+/// `docs/PLAN.md` §6.1 records why it waits and why it is cheap to add.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
@@ -124,6 +132,39 @@ pub struct Vertex {
     pub normal: [f32; 3],
     /// Texture coordinate, origin top-left.
     pub uv: [f32; 2],
+    /// Object-space tangent, with handedness in `w`.
+    ///
+    /// A normal map stores directions in **tangent space** — a per-vertex frame
+    /// aligned to the texture's axes — so sampling one means knowing that frame.
+    /// The normal gives one axis; this gives a second; the third is
+    /// `cross(normal, tangent) * w`.
+    ///
+    /// `w` is `+1` or `-1` and is not decoration. It records whether the texture
+    /// is mirrored across this triangle, which is extremely common — an artist
+    /// UV-maps half a symmetrical model and flips the other half to halve the
+    /// texture budget. Dropping it inverts the bitangent on every mirrored
+    /// surface, and a normal map applied with an inverted bitangent lights those
+    /// surfaces as though from the opposite side.
+    ///
+    /// Zero when the source had no tangents and none could be derived, which
+    /// means "no tangent frame" rather than "a degenerate one" — see
+    /// [`Vertex::has_tangent`].
+    pub tangent: [f32; 4],
+}
+
+impl Vertex {
+    /// Whether this vertex carries a usable tangent frame.
+    ///
+    /// A shader must check rather than assume: a mesh whose source had no
+    /// tangents and whose UVs are degenerate gets a zero tangent, and
+    /// normalising that produces NaN, which propagates into the lit colour and
+    /// shows as black or white pixels rather than as an obviously wrong normal.
+    #[must_use]
+    pub fn has_tangent(&self) -> bool {
+        let [x, y, z, _] = self.tangent;
+
+        x != 0.0 || y != 0.0 || z != 0.0
+    }
 }
 
 /// A mesh, decoded.
@@ -164,6 +205,7 @@ impl Mesh {
                 .iter()
                 .chain(&vertex.normal)
                 .chain(&vertex.uv)
+                .chain(&vertex.tangent)
             {
                 out.extend_from_slice(&value.to_le_bytes());
             }
@@ -230,6 +272,12 @@ impl Mesh {
                     read_f32(bytes, at + 20),
                 ],
                 uv: [read_f32(bytes, at + 24), read_f32(bytes, at + 28)],
+                tangent: [
+                    read_f32(bytes, at + 32),
+                    read_f32(bytes, at + 36),
+                    read_f32(bytes, at + 40),
+                    read_f32(bytes, at + 44),
+                ],
             });
         }
 
@@ -296,16 +344,19 @@ mod tests {
                     position: [0.0, 0.0, 0.0],
                     normal: [0.0, 0.0, 1.0],
                     uv: [0.0, 0.0],
+                    tangent: [1.0, 0.0, 0.0, 1.0],
                 },
                 Vertex {
                     position: [1.0, 0.0, 0.0],
                     normal: [0.0, 0.0, 1.0],
                     uv: [1.0, 0.0],
+                    tangent: [1.0, 0.0, 0.0, 1.0],
                 },
                 Vertex {
                     position: [0.0, 1.0, 0.0],
                     normal: [0.0, 0.0, 1.0],
                     uv: [0.0, 1.0],
+                    tangent: [1.0, 0.0, 0.0, 1.0],
                 },
             ],
             indices: vec![0, 1, 2],
@@ -336,6 +387,7 @@ mod tests {
                 position: [f32::MIN, -0.0, f32::MAX],
                 normal: [f32::EPSILON, f32::MIN_POSITIVE, 1.0 / 3.0],
                 uv: [f32::INFINITY, f32::NEG_INFINITY],
+                tangent: [f32::NAN, -1.0, 0.5, -1.0],
             }],
             indices: vec![0, 0, 0],
             material: None,
@@ -359,6 +411,7 @@ mod tests {
                 position: [1.0, 0.0, 0.0],
                 normal: [0.0, 0.0, 0.0],
                 uv: [0.0, 0.0],
+                tangent: [0.0; 4],
             }],
             indices: vec![0],
             material: None,

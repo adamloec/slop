@@ -49,9 +49,15 @@ fn the_shaders_vertex_matches_the_cooked_meshs_vertex() {
 }
 
 #[test]
-fn the_shader_reads_position_normal_and_uv_in_that_order() {
+fn the_shader_reads_position_normal_uv_and_tangent_in_that_order() {
     // Order matters as much as size: swapping normal and uv keeps the stride
     // identical and renders a cube lit by its texture coordinates.
+    //
+    // The tangent is declared by the cube's shader and never read by it. That is
+    // required rather than sloppy: this reflection *is* the vertex layout, so
+    // omitting the tangent would compute a 32-byte stride for a buffer whose
+    // vertices are 48, and every vertex after the first would be read from the
+    // middle of its predecessor. This assertion is what keeps the two in step.
     let Some(reflection) = cooked() else { return };
 
     let formats: Vec<VertexFormat> = reflection
@@ -66,7 +72,32 @@ fn the_shader_reads_position_normal_and_uv_in_that_order() {
             VertexFormat::Float32x3,
             VertexFormat::Float32x3,
             VertexFormat::Float32x2,
+            VertexFormat::Float32x4,
         ]
+    );
+}
+
+#[test]
+fn the_reflected_stride_matches_the_cooked_vertex() {
+    // The invariant the test above protects, stated directly and against the
+    // real number rather than against a restatement of it.
+    let Some(reflection) = cooked() else { return };
+
+    let stride: usize = reflection
+        .vertex_inputs
+        .iter()
+        .map(|input| match input.format {
+            VertexFormat::Float32 => 4,
+            VertexFormat::Float32x2 => 8,
+            VertexFormat::Float32x3 => 12,
+            VertexFormat::Float32x4 => 16,
+        })
+        .sum();
+
+    assert_eq!(
+        stride,
+        slop_asset::mesh::VERTEX_SIZE,
+        "the shader's vertex layout must be exactly the cooked mesh's vertex"
     );
 }
 
@@ -82,7 +113,7 @@ fn the_locations_are_contiguous_from_zero() {
         .map(|input| input.location)
         .collect();
 
-    assert_eq!(locations, vec![0, 1, 2]);
+    assert_eq!(locations, vec![0, 1, 2, 3]);
 }
 
 #[test]
