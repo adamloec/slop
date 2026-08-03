@@ -53,8 +53,8 @@ mod sync;
 mod usage;
 
 pub use command::{
-    BufferState, CommandBuffer, CommandPool, ImageState, Submission, WaitStage, submit_and_wait,
-    submit_recorded_and_wait,
+    BufferState, CommandBuffer, CommandPool, ImageState, Stage, Submission, WaitStage,
+    submit_and_wait, submit_recorded_and_wait,
 };
 pub use compute::{Compute, ComputePipeline, workgroups};
 pub use descriptor::{

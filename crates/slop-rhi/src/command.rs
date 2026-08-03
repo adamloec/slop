@@ -48,6 +48,56 @@ impl WaitStage {
     }
 }
 
+/// Which shader stage touches a resource.
+///
+/// # Why a state takes this rather than assuming it
+///
+/// A barrier needs the *stage* that reads or writes, not just what the access
+/// is. Every named state here used to bake one in — [`ImageState::SHADER_READ`]
+/// meant "read by a **fragment** shader" — which was correct while graphics was
+/// the only consumer and stopped being correct the moment compute arrived.
+///
+/// The alternative was a constant per stage per access: `SHADER_READ`,
+/// `SHADER_READ_COMPUTE`, `DEPTH_READ`, `DEPTH_READ_COMPUTE`, and so on for
+/// every stage added later. That grows multiplicatively and each new name is a
+/// place for the access mask to be typed differently.
+///
+/// This is a step toward, not a replacement for, what `docs/PLAN.md` §9.5 E3
+/// does: the render graph knows what stage each pass runs at, so it will supply
+/// this rather than the caller naming it. Keeping the *shape* — access in the
+/// state, stage supplied — means that change is the graph filling in an argument
+/// that already exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    /// A fragment shader. What samples a material's textures.
+    Fragment,
+
+    /// A compute shader. `docs/PLAN.md` §9.4's cluster build, and the post
+    /// stack at E7.
+    Compute,
+
+    /// Any stage at all.
+    ///
+    /// Correct but pessimistic: it orders against work that never touched the
+    /// resource. Right when a buffer is reached through a device address and the
+    /// stage genuinely is not known — which is why
+    /// [`BufferState::SHADER_READ`] uses it — and wrong as a default, because a
+    /// barrier that over-synchronises is invisible in every way except speed.
+    Any,
+}
+
+impl Stage {
+    /// The Vulkan stage mask this maps to.
+    #[must_use]
+    pub(crate) const fn to_vk(self) -> vk::PipelineStageFlags2 {
+        match self {
+            Self::Fragment => vk::PipelineStageFlags2::FRAGMENT_SHADER,
+            Self::Compute => vk::PipelineStageFlags2::COMPUTE_SHADER,
+            Self::Any => vk::PipelineStageFlags2::ALL_COMMANDS,
+        }
+    }
+}
+
 /// A point in an image's lifetime: its layout, and the stage and access that
 /// last touched it or will next touch it.
 ///
@@ -100,12 +150,13 @@ impl ImageState {
         access: vk::AccessFlags2::empty(),
     };
 
-    /// Being read by a shader.
-    pub const SHADER_READ: Self = Self {
-        layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-        stage: vk::PipelineStageFlags2::FRAGMENT_SHADER,
-        access: vk::AccessFlags2::SHADER_SAMPLED_READ,
-    };
+    /// Being read by a **fragment** shader.
+    ///
+    /// The overwhelmingly common case — a material sampling a texture — kept as
+    /// a constant so the thirteen call sites that mean exactly this do not have
+    /// to say so. [`shader_read`](Self::shader_read) is the same thing with the
+    /// stage chosen, and this is defined in terms of it so the two cannot drift.
+    pub const SHADER_READ: Self = Self::shader_read(Stage::Fragment);
 
     /// The destination of a copy or blit.
     pub const TRANSFER_DST: Self = Self {
@@ -140,13 +191,63 @@ impl ImageState {
         ),
     };
 
-    /// Depth being read by a shader, as in a shadow map or a depth prepass
-    /// consumed later in the frame.
-    pub const DEPTH_READ: Self = Self {
-        layout: vk::ImageLayout::DEPTH_READ_ONLY_OPTIMAL,
-        stage: vk::PipelineStageFlags2::FRAGMENT_SHADER,
-        access: vk::AccessFlags2::SHADER_SAMPLED_READ,
+    /// Depth being read by a **fragment** shader, as in a shadow map sampled by
+    /// the pass that lights the scene.
+    ///
+    /// [`depth_read`](Self::depth_read) is the same with the stage chosen —
+    /// `docs/PLAN.md` §9.4's cluster build reads the depth prepass from compute.
+    pub const DEPTH_READ: Self = Self::depth_read(Stage::Fragment);
+
+    /// A swapchain image just handed over by `acquire`, whose previous contents
+    /// are not needed.
+    ///
+    /// [`UNDEFINED`](Self::UNDEFINED)'s layout, but staged at colour-attachment
+    /// output rather than top-of-pipe — **and that difference is a real bug
+    /// fix, not a refinement.**
+    ///
+    /// A frame waits on the acquire semaphore at colour-attachment output, so
+    /// that vertex work need not wait for an image it never touches. A barrier
+    /// transitioning the image at *top of pipe* is then ordered **before** that
+    /// wait, and may run while the presentation engine still owns the image.
+    /// Nothing observable goes wrong on desktop hardware, which is why this
+    /// survived from M0 until synchronization validation was switched on and
+    /// reported it ten times per frame in every example.
+    ///
+    /// The rule to keep: **the first barrier on an acquired image must be staged
+    /// no earlier than the stage its semaphore is waited at.** Those two live in
+    /// different files, so changing either alone reintroduces this.
+    pub const ACQUIRED: Self = Self {
+        layout: vk::ImageLayout::UNDEFINED,
+        stage: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+        access: vk::AccessFlags2::empty(),
     };
+
+    /// An image read by a shader, at the stage that reads it.
+    ///
+    /// See [`Stage`] for why this takes one rather than assuming.
+    #[must_use]
+    pub const fn shader_read(stage: Stage) -> Self {
+        Self {
+            layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            stage: stage.to_vk(),
+            access: vk::AccessFlags2::SHADER_SAMPLED_READ,
+        }
+    }
+
+    /// A depth image read by a shader, at the stage that reads it.
+    ///
+    /// `DEPTH_READ_ONLY_OPTIMAL` rather than the general shader-read layout: a
+    /// depth image being sampled is still a depth image, and the read-only depth
+    /// layout is what lets it stay bound as a depth attachment for testing while
+    /// another pass samples it.
+    #[must_use]
+    pub const fn depth_read(stage: Stage) -> Self {
+        Self {
+            layout: vk::ImageLayout::DEPTH_READ_ONLY_OPTIMAL,
+            stage: stage.to_vk(),
+            access: vk::AccessFlags2::SHADER_SAMPLED_READ,
+        }
+    }
 
     /// Being written by a compute shader through the heap's storage-image
     /// binding.
@@ -245,6 +346,31 @@ impl BufferState {
         stage: vk::PipelineStageFlags2::DRAW_INDIRECT,
         access: vk::AccessFlags2::INDIRECT_COMMAND_READ,
     };
+
+    /// Being written by a shader through the heap's storage-buffer binding.
+    ///
+    /// `docs/PLAN.md` §9.4's cluster build is the first of these: compute writes
+    /// a light-index buffer that the forward pass then reads, and the read side
+    /// is [`SHADER_READ`](Self::SHADER_READ) above.
+    ///
+    /// **Read and write, both**, for the reason
+    /// [`ImageState::STORAGE_WRITE`] gives: a pass that accumulates into a
+    /// buffer reads what it wrote, and a write-only state orders that wrongly
+    /// while looking correct.
+    ///
+    /// Unlike the image side there is no layout to get wrong here, which is why
+    /// this is a plain function of the stage and `ImageState`'s equivalent is a
+    /// constant pinned to `GENERAL`.
+    #[must_use]
+    pub const fn storage_write(stage: Stage) -> Self {
+        Self {
+            stage: stage.to_vk(),
+            access: vk::AccessFlags2::from_raw(
+                vk::AccessFlags2::SHADER_STORAGE_READ.as_raw()
+                    | vk::AccessFlags2::SHADER_STORAGE_WRITE.as_raw(),
+            ),
+        }
+    }
 }
 
 /// Allocates command buffers for one thread and one frame in flight.

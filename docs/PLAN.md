@@ -1118,20 +1118,50 @@ Found by checking what E4 needs rather than assuming, and neither is scheduled:
    building the thing that needed it — which is the argument for E1 existing as a
    task rather than being absorbed into E2.
 
-**Two more, still open, and both belong to E4:**
+4. ~~**The bindless heap has no writable buffer view.**~~ **Landed at E1c.**
+   `RWByteAddressBuffer g_rw_buffers[]` aliases binding 3, with `storeToBuffer`
+   beside `loadFromBuffer`. Declared as a second view rather than making
+   `g_buffers` writable everywhere, because a fragment shader that *can* write
+   its material table is one that eventually does.
+5. ~~**`BufferState` has no compute states.**~~ **Landed at E1c**, along with the
+   `Stage` selector that stopped the constants doubling per stage.
 
-4. **The bindless heap has no writable buffer view.** `shaders/lib/bindless.slang`
-   declares `ByteAddressBuffer g_buffers[]` — read-only. Storage *images* are
-   already writable (`RWTexture2D`), which is what E1b's test used, so this was
-   invisible until now. §9.4's cluster build writes a light-index **buffer**, so
-   it needs an `RWByteAddressBuffer` view aliased onto the same binding and a
-   `storeToBuffer` helper beside `loadFromBuffer`. Aliasing a descriptor binding
-   with a compatible type is legal; nothing about it is hard, and it is exactly
-   the sort of thing that costs a day when met mid-task.
-5. **`BufferState` has no compute states.** The image side gained
-   `ImageState::STORAGE_WRITE` at E1b because the test could not exist without
-   it. The buffer side has no equivalent, and the cluster build needs
-   compute-write followed by fragment-read across a buffer.
+**And one that was not a prerequisite at all — it was a bug.**
+
+Enabling synchronization validation (see below) reported **ten hazards per frame
+in every example**, all the same one: the swapchain image's first layout
+transition was staged at top-of-pipe while the acquire semaphore is waited at
+colour-attachment output, so the transition could run while the presentation
+engine still owned the image. Present since M0, invisible because desktop
+hardware tolerates it. Fixed by `ImageState::ACQUIRED`, which stages the
+transition to match the wait.
+
+#### Synchronization validation is now on, and was not before
+
+The core validation layer checks that structures are well-formed and that objects
+are used in valid states. It does **not** check that a write is ordered against
+the read that follows it. That is opt-in, and the engine was not asking for it —
+so every hand-written barrier in the tree was unverified.
+
+Two things made switching it on harder than it should have been, recorded because
+the next person will hit both:
+
+- `VK_EXT_validation_features`, the mechanism every older example uses, is
+  deprecated and **absent from SDK 1.4**. Chaining its structure is accepted and
+  silently does nothing.
+- `VK_EXT_layer_settings`, the replacement, is provided **by the validation
+  layer** rather than by the driver — so `vkEnumerateInstanceExtensionProperties`
+  with a null layer name does not list it. It reported as unavailable on a
+  machine with a working SDK until the enumeration named the layer.
+
+`DESIGN.md` §2.2 commits to explicit barriers; this is the check that the
+commitment is met. It matters more before E3's render graph than after: today
+every barrier is hand-written, and afterwards this is what says the graph derived
+them correctly.
+
+**The whole test suite passes with it on** — 867 tests, zero hazards — so the
+hand-written barriers in `MeshRenderer`, the overlay and `scene.rs` were all
+correct. The frame loop was the exception, and only the examples exercise it.
 
 ---
 

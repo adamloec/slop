@@ -131,15 +131,54 @@ impl Instance {
             .engine_name(c"slop")
             .api_version(REQUIRED_API_VERSION);
 
-        let create_info = vk::InstanceCreateInfo::default()
+        // **Synchronization validation, which the core layer does not do.**
+        //
+        // The layer checks that structures are well-formed and that objects are
+        // used in valid states. It does *not* check that a write is ordered
+        // against the read that follows it — that is opt-in, and without it a
+        // missing or wrong barrier is silent.
+        //
+        // Measured, not assumed: a compute pass writing a storage buffer, then a
+        // transfer reading it with a deliberately *wrong* source state, passed
+        // with the layer reporting nothing. The GPU produced the right answer,
+        // which is what a race does until it does not.
+        //
+        // `docs/DESIGN.md` §2.2 commits to explicit barriers, so this is the
+        // check that the commitment is met. It matters more before `docs/PLAN.md`
+        // §9.5's render graph than after: today every barrier is hand-written,
+        // and afterwards this is what says the graph derived them correctly.
+        //
+        // Switched on through `VK_EXT_layer_settings`. Its predecessor,
+        // `VK_EXT_validation_features`, is deprecated and absent from SDK 1.4 —
+        // chaining that one instead is accepted and silently does nothing.
+        // `values` is raw bytes, so the `VkBool32` goes in as its native-endian
+        // representation rather than as a typed slice.
+        let sync_on = vk::TRUE.to_ne_bytes();
+        let sync_setting = [vk::LayerSettingEXT::default()
+            .layer_name(VALIDATION_LAYER)
+            .setting_name(c"validate_sync")
+            .ty(vk::LayerSettingTypeEXT::BOOL32)
+            .values(&sync_on)];
+        let mut layer_settings = vk::LayerSettingsCreateInfoEXT::default().settings(&sync_setting);
+
+        let settings_available = extensions
+            .iter()
+            .any(|name| name.as_c_str() == ash::ext::layer_settings::NAME);
+
+        let mut create_info = vk::InstanceCreateInfo::default()
             .application_info(&application_info)
             .enabled_extension_names(&extension_ptrs)
             .enabled_layer_names(&layers);
 
-        // SAFETY: `create_info` borrows `application_info`, `extension_ptrs` and
-        // `layers`, all of which outlive this call. The name pointers come from
-        // `CString`s owned by `extensions` and by `VALIDATION_LAYER`, which is
-        // 'static.
+        if validation_enabled && settings_available {
+            create_info = create_info.push_next(&mut layer_settings);
+        }
+
+        // SAFETY: `create_info` borrows `application_info`, `extension_ptrs`,
+        // `layers` and — when validation is on — `layer_settings` and everything
+        // it points at, all of which outlive this call. The name pointers come
+        // from `CString`s owned by `extensions` and by `VALIDATION_LAYER`, which
+        // is 'static.
         let raw = unsafe { entry.create_instance(&create_info, None) }?;
 
         let errors = Arc::new(AtomicU64::new(0));
@@ -222,7 +261,28 @@ impl Instance {
     ) -> Result<Vec<CString>, RhiError> {
         // SAFETY: enumerating extension properties on a loaded entry with a null
         // layer name is always valid.
-        let available = unsafe { entry.enumerate_instance_extension_properties(None) }?;
+        let mut available = unsafe { entry.enumerate_instance_extension_properties(None) }?;
+
+        // **A null layer name lists only what the drivers provide.** Extensions
+        // implemented *by a layer* are invisible until that layer is named, and
+        // `VK_EXT_layer_settings` is one of them — the validation layer supplies
+        // it. Checking only the driver list reports it as unavailable on a
+        // machine where the SDK is installed and working, which is what happened
+        // here before this second enumeration existed.
+        if config.validation.wanted() {
+            // SAFETY: as above, with a layer name the loader may or may not
+            // know; an unknown layer yields an empty list rather than an error.
+            let from_layer =
+                unsafe { entry.enumerate_instance_extension_properties(Some(VALIDATION_LAYER)) };
+
+            // Ignored rather than propagated: the layer being absent is what
+            // `resolve_validation` reports, and reporting it twice from two
+            // places would give the same condition two different messages.
+            if let Ok(from_layer) = from_layer {
+                available.extend(from_layer);
+            }
+        }
+
         let available: Vec<&CStr> = available
             .iter()
             .filter_map(|property| property.extension_name_as_c_str().ok())
@@ -241,6 +301,26 @@ impl Instance {
                 return Err(RhiError::MissingInstanceExtension(
                     name.to_string_lossy().into_owned(),
                 ));
+            }
+        }
+
+        // Optional, and checked rather than required: it turns on
+        // synchronization validation (see `Instance::new`), which is a
+        // development aid rather than something the engine needs to run. Absent
+        // on older SDKs — and its predecessor, `VK_EXT_validation_features`, is
+        // absent on newer ones, having been deprecated in favour of this.
+        // Requiring either would make the engine refuse to start on one half of
+        // the installed base to gain a check.
+        if config.validation.wanted() {
+            let settings: CString = ash::ext::layer_settings::NAME.into();
+
+            if available.contains(&settings.as_c_str()) {
+                wanted.push(settings);
+            } else {
+                warn!(
+                    "VK_EXT_layer_settings is unavailable; synchronization validation is off \
+                     and a missing barrier will not be reported"
+                );
             }
         }
 

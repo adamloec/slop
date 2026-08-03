@@ -52,6 +52,19 @@
 // Offsets are in bytes and must be a multiple of four.
 [[vk::binding(3, 0)]] ByteAddressBuffer g_buffers[];
 
+// The same binding again, writable.
+//
+// Not a second descriptor and not a second slot: binding 3 is already
+// VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, which permits writes -- it is the shader's
+// declaration above that makes it read-only. Aliasing one binding with two views
+// is legal in Vulkan and is how a compute pass writes the same buffer a fragment
+// shader later reads, using the same heap index for both.
+//
+// Declared separately rather than making `g_buffers` writable everywhere,
+// because a fragment shader that can write its material table is a fragment
+// shader that eventually does.
+[[vk::binding(3, 0)]] RWByteAddressBuffer g_rw_buffers[];
+
 // A texture slot. Mirrors `Handle<SampledImage>::index()` on the CPU side; the
 // generation stays there and never crosses to the GPU.
 //
@@ -87,6 +100,15 @@ struct BufferHandle
 T loadFromBuffer<T>(BufferHandle buffer, uint index)
 {
     return g_buffers[NonUniformResourceIndex(buffer.index)].Load<T>(index * sizeof(T));
+}
+
+// Write one element into a heap buffer.
+//
+// The counterpart of `loadFromBuffer`, through the writable view. `T` must be
+// blittable and its size a multiple of four, as the load side requires.
+void storeToBuffer<T>(BufferHandle buffer, uint index, T value)
+{
+    g_rw_buffers[NonUniformResourceIndex(buffer.index)].Store<T>(index * sizeof(T), value);
 }
 
 // Sample a texture from the heap.

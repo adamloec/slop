@@ -50,8 +50,8 @@ struct PushConstants {
     height: u32,
 }
 
-/// The cooked shader, or `None` when nothing has been cooked yet.
-fn module(device: &Arc<slop_rhi::Device>) -> Option<ShaderModule> {
+/// One cooked shader, or `None` when nothing has been cooked yet.
+fn module(device: &Arc<slop_rhi::Device>, logical: &str) -> Option<ShaderModule> {
     let vfs = match Vfs::discover(&std::env::current_dir().expect("a working directory")) {
         Ok(vfs) => vfs,
         Err(error) => {
@@ -60,9 +60,9 @@ fn module(device: &Arc<slop_rhi::Device>) -> Option<ShaderModule> {
         }
     };
 
-    let bytes = vfs
-        .read("shaders/passes/fill.spv")
-        .expect("fill.spv must be cooked; run `cargo run -p slop-cli -- cook`");
+    let bytes = vfs.read(logical).unwrap_or_else(|_| {
+        panic!("{logical} must be cooked; run `cargo run -p slop-cli -- cook`")
+    });
 
     Some(ShaderModule::from_bytes(device, &bytes).expect("the cooked module must be valid SPIR-V"))
 }
@@ -79,7 +79,7 @@ fn a_compute_shader_writes_every_texel_it_was_dispatched_for() {
     let Some((device, allocator)) = support::device_and_allocator() else {
         return;
     };
-    let Some(module) = module(&device) else {
+    let Some(module) = module(&device, "shaders/passes/fill.spv") else {
         return;
     };
 
@@ -259,5 +259,144 @@ fn a_format_that_cannot_be_stored_to_is_refused() {
             assert_eq!(missing, "storage image");
         }
         other => panic!("expected FormatUnsupported, got {other}"),
+    }
+}
+
+/// Matches `[numthreads(64, 1, 1)]` in `shaders/passes/accumulate.slang`.
+const LINEAR_GROUP: u32 = 64;
+
+/// Deliberately not a multiple of [`LINEAR_GROUP`], for the reason [`SIZE`] is
+/// not a multiple of [`GROUP`].
+const COUNT: u32 = 100;
+
+/// Push constants, matching `PushConstants` in `accumulate.slang`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct AccumulatePush {
+    target: u32,
+    count: u32,
+}
+
+/// A compute shader writes a storage **buffer**, and the barrier that orders
+/// that write against the CPU's read actually orders it.
+///
+/// The image test above proves dispatch works. This one exists because
+/// [`BufferState::storage_write`] is a barrier constant, and a barrier constant
+/// with no consumer is untested by construction — asserting its access mask in a
+/// unit test proves only that it was typed as typed.
+///
+/// It also exercises the writable buffer view added to `lib/bindless.slang`,
+/// which is what `docs/PLAN.md` §9.4's cluster build needs and what the storage
+/// **image** path let E1b avoid noticing.
+#[test]
+fn a_compute_shader_writes_a_storage_buffer_the_cpu_can_then_read() {
+    let Some((device, allocator)) = support::device_and_allocator() else {
+        return;
+    };
+    let Some(module) = module(&device, "shaders/passes/accumulate.spv") else {
+        return;
+    };
+
+    let mut heap = BindlessHeap::new(&device, &BindlessHeapConfig::default())
+        .expect("a heap must be creatable");
+
+    let bytes = u64::from(COUNT) * 4;
+
+    // Device-local, so the readback below genuinely crosses a barrier rather
+    // than reading host memory the shader happened to write coherently.
+    let target = Buffer::new(
+        &allocator,
+        &BufferConfig {
+            name: "compute target",
+            size: bytes,
+            usage: slop_rhi::BufferUsage::STORAGE | slop_rhi::BufferUsage::TRANSFER_SRC,
+            location: MemoryLocation::DeviceOnly,
+        },
+    )
+    .expect("a storage buffer must be creatable");
+
+    let slot = heap
+        .insert_storage_buffer(target.handle())
+        .expect("the heap must have room");
+
+    let layout = Arc::new(
+        PipelineLayout::new(
+            &device,
+            &PipelineLayoutConfig {
+                heap: Some(&heap),
+                push_constant_bytes: size_of::<AccumulatePush>() as u32,
+            },
+        )
+        .expect("a layout must be creatable"),
+    );
+
+    let pipeline = ComputePipeline::new(
+        &device,
+        &layout,
+        ShaderStage {
+            module: &module,
+            entry: c"accumulateMain",
+        },
+    )
+    .expect("the compute pipeline must compile");
+
+    let readback = Buffer::new(
+        &allocator,
+        &BufferConfig {
+            name: "buffer readback",
+            size: bytes,
+            usage: slop_rhi::BufferUsage::TRANSFER_DST,
+            location: MemoryLocation::Readback,
+        },
+    )
+    .expect("a readback buffer must be creatable");
+
+    let pool = slop_rhi::CommandPool::new(&device, device.queue_families().graphics)
+        .expect("a pool must be creatable");
+    let command = pool
+        .allocate(1)
+        .expect("one buffer must be allocatable")
+        .pop()
+        .expect("one was requested");
+
+    command.begin().expect("recording must begin");
+
+    {
+        let compute = command.bind_compute(&pipeline);
+        compute.bind_heap(&heap);
+        compute.push_constants(bytemuck::bytes_of(&AccumulatePush {
+            target: slot.index(),
+            count: COUNT,
+        }));
+        compute.dispatch(workgroups(COUNT, LINEAR_GROUP), 1, 1);
+    }
+
+    // The barrier this test exists for: the compute write must be visible to
+    // the transfer that follows.
+    command.barrier_buffer(
+        target.handle(),
+        BufferState::storage_write(slop_rhi::Stage::Compute),
+        BufferState::TRANSFER_SRC,
+    );
+    command.copy_buffer(target.handle(), readback.handle(), bytes);
+    command.barrier_buffer(
+        readback.handle(),
+        BufferState::TRANSFER_DST,
+        BufferState::HOST_READ,
+    );
+    command.make_visible_to_host(readback.handle());
+    command.end().expect("recording must end");
+
+    support::submit_and_wait(&device, &command);
+
+    let mut readback = readback;
+    let written: &[u32] = bytemuck::cast_slice(readback.mapped_mut().expect("mappable"));
+
+    for index in 0..COUNT {
+        assert_eq!(
+            written[index as usize],
+            index * 3 + 1,
+            "element {index} is wrong; the shader wrote elsewhere or not at all"
+        );
     }
 }

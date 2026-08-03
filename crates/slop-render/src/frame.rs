@@ -366,7 +366,13 @@ impl FrameRenderer {
                 extent: self.swapchain.extent(),
                 // The frame clears, so the previous contents are worth nothing
                 // and discarding them is faster than preserving them.
-                from: ImageState::UNDEFINED,
+                //
+                // `ACQUIRED` rather than `UNDEFINED`: both discard, but this one
+                // is staged to match the acquire semaphore's wait in `submit`
+                // below. `UNDEFINED` stages at top-of-pipe, which is *before*
+                // that wait, so the transition could run while the presentation
+                // engine still held the image. See `ImageState::ACQUIRED`.
+                from: ImageState::ACQUIRED,
                 to: ImageState::PRESENT,
             },
             number: self.frame_number,
