@@ -958,10 +958,11 @@ avoided for the job system.
 **Two gaps that are not exit criteria and are worth naming rather than leaving
 implicit:**
 
-- **`examples/model` has no golden image.** `MeshRenderer`, materials, mipmaps
-  and tangents have no image-level regression; the cube's five goldens cover a
-  path none of them use. A Sponza golden must skip when the asset is not fetched,
-  and skips are what once let the whole suite report green while the demo refused
-  to start — so the skip has to be checked by name, as `harness` already does.
+- ~~`examples/model` has no golden image.~~ **Closed before M3 started.** Two
+  references: the cube model, which always runs, and Sponza, which skips by name
+  when it has not been fetched. Verified by disabling normal mapping in the
+  shader — Sponza fails at 14% of pixels and the cube model passes, because the
+  cube has no normal map, so the two references demonstrably cover different
+  things.
 - **Linux has never been run.** Every portability claim in this repository is
   currently untested. Standing since M0.

@@ -703,6 +703,7 @@ dependencies = [
  "slop-reflect",
  "slop-render",
  "slop-rhi",
+ "slop-verify",
 ]
 
 [[package]]

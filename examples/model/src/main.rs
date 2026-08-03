@@ -34,52 +34,13 @@ use slop_asset::Vfs;
 use slop_core::diagnostics::tracing::{error, info};
 use slop_ecs::{Entity, World};
 use slop_editor::{DebugUi, InspectorState};
-use slop_math::{Mat4, Quat, Vec3};
+use slop_math::Vec3;
 use slop_render::{FrameRenderer, FrameRendererConfig, MeshRenderer};
 use slop_rhi::{BindlessHeap, BindlessHeapConfig, Device, ShaderModule};
 
-/// Which model to draw, when nothing says otherwise.
-const DEFAULT_MODEL: &str = "models/cube.model";
-
-/// Vertical field of view, in degrees.
-const FIELD_OF_VIEW: f32 = 55.0;
-
-/// The orbiting camera, as a component.
-///
-/// **In the world rather than in `Renderer`, so the inspector can edit it.**
-/// That is the point of putting it here: every field below appears in the debug
-/// UI without a line of UI code naming it, because `slop-reflect` describes the
-/// type and `slop_editor::inspector` walks the description. Dragging `height` moves
-/// the camera on the next frame.
-///
-/// This is not the scene representation. `docs/DESIGN.md` gives `slop-scene` the
-/// runtime tree at M5, and putting the *model's* geometry into the world is that
-/// work rather than this. What is here is the one piece of live state this
-/// example has, which is what makes it an honest subject for an inspector rather
-/// than a fabricated one.
-#[derive(slop_reflect::Reflect, Debug, Clone, Copy)]
-#[repr(C)]
-struct OrbitCamera {
-    /// Distance from the model's centre.
-    distance: f32,
-    /// How far above the centre the camera sits, as a fraction of `distance`.
-    height: f32,
-    /// Radians of orbit per *frame* rather than per second — `docs/DESIGN.md`
-    /// §2.14 makes the frame number the only clock a reproducible render reads.
-    radians_per_frame: f32,
-    /// Vertical field of view, in degrees.
-    field_of_view: f32,
-    /// Whether the camera advances. Off freezes it where it is, which is what
-    /// makes a still worth looking at.
-    orbiting: bool,
-}
-
-/// Radians of orbit per frame.
-///
-/// Per *frame* rather than per second, matching the cube and for the same
-/// reason: `docs/DESIGN.md` §2.14 makes a frame number the only clock a
-/// reproducible render may read.
-const RADIANS_PER_FRAME: f32 = 0.006;
+// Shared with `tests/golden.rs`, so the window and the reference image are
+// framed by the same camera — see the library's docs.
+use example_model::{DEFAULT_MODEL, OrbitCamera, assets, bounds, camera};
 
 fn main() {
     slop_app::logging::init();
@@ -262,20 +223,7 @@ impl Renderer {
 
         let camera = world.spawn();
         world
-            .insert(
-                camera,
-                OrbitCamera {
-                    // Far enough that the whole model fits the vertical field of
-                    // view, with a margin so nothing is clipped by the near
-                    // plane.
-                    distance: radius / slop_math::scalar::tan(FIELD_OF_VIEW.to_radians() * 0.5)
-                        * 1.4,
-                    height: 0.35,
-                    radians_per_frame: RADIANS_PER_FRAME,
-                    field_of_view: FIELD_OF_VIEW,
-                    orbiting: true,
-                },
-            )
+            .insert(camera, OrbitCamera::framing(radius))
             .map_err(|error| error.to_string())?;
 
         // Built after the meshes so its font atlas lands in the same heap, and
@@ -348,7 +296,13 @@ impl Renderer {
 
         self.frames
             .render(|frame| {
-                meshes.record(heap, frame, camera(frame, centre, angle, settings));
+                // Aspect from the target rather than the window: they agree
+                // except on the frame a resize is noticed, and the target is
+                // what is actually being drawn into.
+                let aspect =
+                    frame.target.extent.width as f32 / frame.target.extent.height.max(1) as f32;
+
+                meshes.record(heap, frame, camera(aspect, centre, angle, settings));
 
                 // Last, in a pass of its own: the overlay loads the colour
                 // attachment rather than clearing it, so it composites over the
@@ -414,89 +368,6 @@ impl Renderer {
                 });
         })
     }
-}
-
-/// The view-projection for one frame.
-///
-/// Orbits the model rather than accepting input, so a run is reproducible from
-/// its frame number alone and a screenshot at frame *n* is comparable across
-/// machines (`docs/DESIGN.md` §2.14). Camera control arrives with the editor.
-fn camera(frame: &slop_render::Frame<'_>, centre: Vec3, angle: f32, settings: OrbitCamera) -> Mat4 {
-    let distance = settings.distance;
-    let eye = centre
-        + Quat::from_rotation_y(angle) * Vec3::new(0.0, distance * settings.height, distance);
-
-    let view = slop_math::look_at(eye, centre, slop_math::UP);
-    let aspect = frame.target.extent.width as f32 / frame.target.extent.height.max(1) as f32;
-
-    // The engine's own projection, not glam's: it is reverse-Z and infinite,
-    // matching the depth comparison `slop-rhi` configures, and it flips Y for
-    // Vulkan's clip space. Reaching for `Mat4::perspective_rh` here would draw
-    // the model inverted and fail every depth test.
-    //
-    // The near plane scales with the model so that a metre-wide cube and a
-    // hundred-metre building both get sensible precision.
-    let projection = slop_math::perspective(
-        settings.field_of_view.to_radians(),
-        aspect,
-        distance * 0.005,
-    );
-
-    projection * view
-}
-
-/// The model's centre and radius, from the meshes it names.
-///
-/// Read from the cooked artifacts rather than guessed, so pointing this at
-/// Sponza frames Sponza and pointing it at a cube frames a cube. A renderer that
-/// needed a hand-tuned camera per asset would be a demo rather than a viewer.
-fn bounds(vfs: &Vfs, logical: &str) -> (Vec3, f32) {
-    let Ok(bytes) = vfs.read(logical) else {
-        return (Vec3::ZERO, 1.0);
-    };
-    let Ok(model) = slop_asset::Model::read(&bytes) else {
-        return (Vec3::ZERO, 1.0);
-    };
-
-    let mut min = Vec3::splat(f32::MAX);
-    let mut max = Vec3::splat(f32::MIN);
-
-    for instance in &model.instances {
-        let Ok(bytes) = vfs.read(&instance.mesh) else {
-            continue;
-        };
-        let Ok(mesh) = slop_asset::Mesh::read(&bytes) else {
-            continue;
-        };
-
-        let transform = Mat4::from_cols_array(&instance.transform);
-
-        for vertex in &mesh.vertices {
-            let placed = transform.transform_point3(Vec3::from_array(vertex.position));
-
-            min = min.min(placed);
-            max = max.max(placed);
-        }
-    }
-
-    if min.x > max.x {
-        return (Vec3::ZERO, 1.0);
-    }
-
-    let centre = (min + max) * 0.5;
-
-    ((centre), (max - min).length() * 0.5)
-}
-
-/// Cooked assets, found by walking up from wherever this was run.
-///
-/// An application's decision, which is why the starting directory is chosen here
-/// rather than inside `slop-asset` — `docs/CONVENTIONS.md` §5.1 keeps a library
-/// from reading the environment on its caller's behalf.
-fn assets() -> Result<Vfs, String> {
-    let here = std::env::current_dir().map_err(|error| error.to_string())?;
-
-    Vfs::discover(&here).map_err(|error| error.to_string())
 }
 
 fn load_shader(device: &Arc<Device>, vfs: &Vfs) -> Result<ShaderModule, String> {

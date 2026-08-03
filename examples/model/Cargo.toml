@@ -7,6 +7,14 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+# A library as well as a binary, for the same reason `example-cube` is one: the
+# windowed viewer and the headless golden test must frame the model with the same
+# camera, or "the test passes" and "the window looks right" quietly stop being
+# the same claim.
+[lib]
+name = "example_model"
+path = "src/lib.rs"
+
 [[bin]]
 name = "example-model"
 path = "src/main.rs"
@@ -21,6 +29,11 @@ slop-math = { workspace = true }
 slop-reflect = { workspace = true }
 slop-render = { workspace = true }
 slop-rhi = { workspace = true }
+
+[dev-dependencies]
+# Golden images. A dev-dependency deliberately: verification is a test concern,
+# and nothing it pulls in reaches a shipped game.
+slop-verify = { workspace = true }
 
 [lints]
 workspace = true
