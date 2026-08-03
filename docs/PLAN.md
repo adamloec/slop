@@ -738,10 +738,18 @@ rather than deleted so the decision stays readable.
 (resolved), `JobSystem backed by std::thread::scope` (resolved), the fixed vertex
 layout (tangent added, so retargeted at M3), `Every sampler is created fresh at
 its use site` (still true at three call sites, overdue), `WorldCell::query
-allocates` (still true, overdue) and `Reflect rejects generic types` (still
-true, overdue). **The remaining rows tagged M1 or M2 have not been re-checked
-and may be in either state.** That is a gap, and naming it is better than a
-register that reads as audited when it is not.
+allocates` (**now resolved** — see the row) and `Reflect rejects generic types`
+(still true, overdue). **The remaining rows tagged M1 or M2 have not been
+re-checked and may be in either state.** That is a gap, and naming it is better
+than a register that reads as audited when it is not.
+
+**`Synchronous upload — submit and wait` is now half true, and the row is kept
+because the half that remains is the one it names.** `slop-render` batches every
+transfer for one `MeshRenderer::load` into a single command buffer rather than
+submitting and blocking per vertex buffer, per index buffer and per texture —
+which was `CONSIDERATIONS.md` item 2's fifth defect. That is still one blocking
+submit at the end, and `examples/cube/src/scene.rs` still submits per resource.
+The async transfer queue with a staging ring is what closes it.
 
 **The distinction this table enforces:** everything below is either a requirement
 currently living in the wrong crate (which gets **rebuilt** where it belongs), or
@@ -760,6 +768,15 @@ records what was found afterwards. The vocabulary here — Replaced, Extended,
 Rebuilt — makes every row read as scheduling, which is exactly how a register
 turns into a story about not having debt. Read both.
 
+**All three of those examples have since been fixed**, along with the rest of
+that review's twelve items — the `vk::` leak is at zero references above
+`slop-rhi`, `load` replaces rather than accumulates, and the barrier
+disagreement is settled and recorded. What has *not* changed is why the claim
+was withdrawn. The register did not catch any of them, because it only ever
+records what was chosen; a review is what finds what was not. Keeping both is
+the arrangement, and a future audit that finds this table clean has learned
+nothing about the tree.
+
 | What | Where | Standing in for | Fate | When |
 |---|---|---|---|---|
 | Every renderer must be told whether it is the last to draw | `slop-render` | The render graph deriving barriers from declared reads and writes | **Replaced.** Only the last writer may transition the target to its final state, and no renderer can know whether it is last — so each stops at `COLOR_ATTACHMENT` and the caller ends with `Frame::finish`. That is a convention held by comment, and it already failed once: `MeshRenderer` transitioned to `PRESENT_SRC`, and adding an overlay put a pass on an image the presentation engine already owned, once per frame. Item E is what makes it derived rather than remembered. | M3 |
@@ -770,7 +787,7 @@ turns into a story about not having debt. Read both.
 | Mip generation is a box filter | `slop-cook/src/texture_import.rs` | A Kaiser or Mitchell kernel, per asset | **Replaced.** What hardware would do and what every pipeline starts with. Better kernels trade sharpness against ringing, which is a per-asset judgement — the same missing import settings. | M3 |
 | `Gpu` ties one window to one device | `slop-app/src/gpu.rs` | A device shared by several surfaces | **Extended.** Right for a game, which has one window; wrong for the editor (`DESIGN.md` §2.12), where a detached viewport is a second surface on the *same* device — re-running bring-up would create a second device and make sharing a texture between panels impossible. The split is `Gpu` keeping instance/device/allocator and handing out surfaces, and it is additive: `Gpu::new` stays the one-window path. Not done now because the editor does not exist and a two-window API designed without one is a guess. | M6 |
 | `FrameRenderer` has no automated test | `slop-render` | A smoke test that drives a real window, or a headless path that fakes a swapchain | **Extended.** Everything it does needs a surface, a surface needs a window, and a test harness has no event loop — the cube's golden renders headlessly and so covers `Scene`, not this. The check today is running both examples under `SLOP_FRAMES` with validation on, which is a command someone has to type. **The resize path has no coverage at all**, automated or otherwise, because `SLOP_FRAMES` never resizes the window. | M3 |
-| Scene setup — uploads, pipeline, draw recording | `examples/cube/src/scene.rs` | `slop-render` + `slop-asset` | **Rebuilt.** It proves the pieces fit together; it is not the shape an engine wants. One hard-coded pipeline, a sampler and a heap owned by the scene, and push constants restated from the shader — all of it example-grade on purpose, none of it moves. (`CARGO_MANIFEST_DIR` is no longer among them: `Vfs::discover` walks up for a cooked cache, which works the same in a source tree and beside a shipped binary.) | M3 |
+| Scene setup — uploads, pipeline, draw recording | `examples/cube/src/scene.rs` | `slop-render` + `slop-asset` | **Rebuilt.** It proves the pieces fit together; it is not the shape an engine wants. One hard-coded pipeline, a sampler and a heap owned by the scene, and push constants restated from the shader — all of it example-grade on purpose, none of it moves. (`CARGO_MANIFEST_DIR` is no longer among them: `Vfs::discover` walks up for a cooked cache, which works the same in a source tree and beside a shipped binary.) **Exit condition: the material system absorbs this rather than becoming a third copy of it.** `CONSIDERATIONS.md` item 3 is what that guards against — this file's uploader and `slop-render`'s had already disagreed about a staging barrier, and both passed their golden tests, so the suite could not tell a redundant barrier from a missing one. That question is settled and recorded (`MemoryLocation::Upload`), which is the part that could not wait for M3; the duplication itself still can. | M3 |
 | `VertexBinding` cannot express a buffer format that differs from the shader's type | `slop-render/src/vertex.rs` | A per-location format override | **Extended.** Reflection is a fact about the shader; the buffer format is a decision about memory. They coincide for every float attribute and diverge for a packed one — egui's four-byte colour read as a `float4`. The overlay states its layout and uses reflection to check the shader, which is correct and is not derivation. | M3 |
 | A glTF-referenced image is cooked separately from the same file under `assets/` | `slop-cli` | One artifact per distinct source image | **Replaced.** `assets/checker.png` cooks to `textures/checker.tex` *and*, because `cube.gltf` references it, to `textures/cube.0.tex`. Correct and wasteful. Deduplicating means keying artifacts by content rather than by name, which is a cache change rather than an importer one. | M2/M3 |
 | A cooked model is a flat list, not a hierarchy | `slop-asset/src/model.rs` | `slop-scene`'s runtime tree, once something articulates | **Joined by.** Right for a static level, which is drawn rather than posed, and wrong the moment a parent joint animates. The tree is a *runtime* structure `slop-scene` owns; this format records where things ended up. | M5 |
@@ -807,7 +824,7 @@ turns into a story about not having debt. Read both.
 | `World::get_mut` stamps eagerly rather than on write | `slop-ecs` | Nothing planned | **Kept.** A point lookup is a caller who already named the single component they intend to write, so the cost is one false positive per call — and the alternative is `Mut<T>` leaking into every single-entity access path. | — |
 | Batches, not a dependency graph | `slop-ecs` | Run a system the moment its predecessors finish | **Replaced.** Derived from the same access sets, so it is a scheduling policy change rather than a data model one. What it additionally needs is a deterministic tie-break, so buffers still apply in schedule order rather than completion order — which batching gets for free. | M3 |
 | A system cannot *create* a resource, only mutate one | `slop-ecs` | `CommandBuffer` recording resource insertion | **Extended.** Resources are installed at setup with `&mut World`; a system computing a new one is the rare case, and deferring it needs the same staging the buffer already does for components. | M2 |
-| `WorldCell::query` allocates a small `Vec` per call to check the declaration | `slop-ecs` | The access set precomputed per system | **Replaced.** A handful of elements, once per query rather than per row — but it is in the frame loop, which `CONVENTIONS.md` §8 says should allocate nothing. | M2 |
+| ~~`WorldCell::query` allocates a small `Vec` per call to check the declaration~~ | `slop-ecs` | The access set precomputed per system | **Resolved in M2.** Not by precomputing it: the set is a pure function of the query type, so there was nothing to keep. `QueryData::collect_access(&mut Vec<Access>)` became `each_access(&mut dyn FnMut(Access))` and the check folds over it, allocating nothing. `collect_access` survives as a provided method for building a system's declaration, which is a once-per-system cost where a `Vec` is right. | ✅ |
 | The layout fingerprint has no consumer | `slop-reflect` | A module loader comparing the guest's against the host's | **Joined by.** Built now because `TypeInfo` is the contract a guest is compiled against, and the check is a pure function of data already there. | M4 |
 | Type identity is a path, so renaming a type breaks saves | `slop-reflect` | An alias table mapping old paths to current ids | **Extended.** `#[reflect(path)]` already covers a type *moving modules*. What is missing is renaming with old saves in existence — and nothing is serialized yet, so the alias table wants designing against a real format rather than an imagined one. | M2 |
 | No parent/child hierarchy | `slop-ecs` | A relationship component, plus cascade-despawn and a topological transform pass | **Joined by.** Deliberately not M1: it changes none of the scheduler's conflict rules, since parent-before-child is ordering *within* a system rather than between systems. It is a subsystem rather than a feature — Bevy reworked theirs more than once — and wants designing when transform propagation is a real consumer. | M2 |

@@ -77,6 +77,61 @@ cheaper fix than was proposed, and one had already gotten worse. Those amendment
 are folded into the items themselves rather than appended as a second review,
 because two reviews of the same tree is how a review stops being read.
 
+---
+
+## Acted on — all twelve items, 2026-08-03
+
+Every item below has been implemented, one commit each, with the full suite —
+61 test binaries including ten GPU golden images — green at every step. The
+items are kept rather than deleted, because what they record is *why* each
+change was made, and a register of resolved findings is the only thing that
+stops the same shortcut being taken again.
+
+| Item | Outcome |
+|---|---|
+| 1 — the `vk::` leak | **113 references above `slop-rhi` → 0.** `Format`, `Extent2D`, `BufferUsage`, `ImageUsage`, opaque handles, `WaitStage`. `ash` is a direct dependency of `slop-rhi` alone |
+| 2 — `MeshRenderer` | All five defects fixed. `resize` waits; `load` replaces and is tested; the silent `continue` warns; uploads batch into one submit |
+| 3 — the duplicated uploader | Barrier question **settled and recorded**: `slop-render` was right, and `MemoryLocation::Upload`'s coherence is now asserted by a test. Absorbing `scene.rs` stays M3, with an exit condition on the `PLAN.md` row |
+| 4 — the app shell | `slop_app::Application` + `run`. 310 lines removed from four examples |
+| 5 — `slop-editor` | `inspector` behind a feature, off by default. Triangle and cube link neither `slop-ecs` nor `slop-reflect`. Rename to `slop-debug` still deferred |
+| 6 — `Reflect` | `Send + Sync` supertrait, plus a `const` assertion in `slop-ecs` so relaxing it fails where it matters |
+| 7 — smaller items | `WorldCell::query` allocates nothing. The other bullets are judgement calls left as recorded — see below |
+| 8 — stale doc paths | Fixed, and the audit widened: `CONVENTIONS.md` had one the item never looked for |
+| 9 — error shapes | `EditorError` keeps typed causes and names no binary. Same fix applied to `slop_asset::VfsError` |
+| 10 — the raw submit | Gone, and two further copies with it. The `unsafe` block is now in one place |
+| 11 — `slop-cook`'s `anyhow` | Not reversed. `PLAN.md` §6.1 carries the row and the trigger |
+| 12 — `docs/` coverage | 13 of 13 |
+
+**Three of this review's own claims did not survive contact with the tree**, and
+they are corrected in place above rather than quietly dropped:
+
+- **Item 1's tail.** The four-name breakdown covering 90 of 113 was exact. The
+  description of the remaining 23 was not — `vk::Image` and `vk::ImageView` were
+  one occurrence each, not the bulk.
+- **Item 8's count.** "10 stale paths in `PLAN.md`" did not reproduce; it was 3
+  unique paths across 8 occurrences. `DESIGN.md`'s 1 was right. And the audit
+  missed `CONVENTIONS.md`, which held a reference to a `prelude.rs` that has
+  never existed in any crate — a convention written in the present tense that
+  nothing follows, which is worse than a moved file.
+- **Item 10's framing.** The `unsafe` block was real. "The only `unsafe` outside
+  §7's three sanctioned homes" was not: the tree has `unsafe` in seven places
+  and §7 listed three. The rule was stale, not the code. §7 now lists all seven.
+
+**What was deliberately not done**, with the reasoning rather than a shrug:
+
+- **Item 5's rename** to `slop-debug`. Splitting it from the feature gate is
+  what let the cheap half land; merging them is what would have stopped it.
+- **Item 3's absorption** of `examples/cube/src/scene.rs`. M3 material-system
+  work. Only the correctness question was urgent, because the answer was going
+  to be lost with the duplicate.
+- **Item 7's `Result<_, String>`** across the examples, its test-placement
+  observation, and `slop-core` being the misc crate. The review argues all three
+  as observations rather than verdicts, and they are.
+- **Item 7's `Cargo.toml` prose.** Moving ~150 lines of dependency reasoning out
+  of a manifest is a real improvement and a large diff of pure prose movement.
+  It wants a deliberate decision rather than being swept in beside twelve
+  behavioural changes.
+
 **Calibration first, because it changes how the rest should be read.** The Rust
 is strong. `slop-ecs/src/column.rs` is disciplined type-erased storage — numbered
 invariants on the type, every `unsafe` block justified against one of them, ZSTs

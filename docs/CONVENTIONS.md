@@ -311,9 +311,27 @@ Each consumer-facing crate exposes a prelude of types the caller cannot avoid.
 Types and traits only, never functions, and never "everything in the crate":
 
 ```rust
-// slop-ecs/src/prelude.rs
-pub use crate::{Component, Entity, Query, World};
+// slop-core/src/prelude.rs
+pub use crate::{Handle, JobSystem, SlotMap};
 ```
+
+**Not yet true of most crates, and this is the honest note rather than the
+aspiration.** `slop-core` has a prelude; nothing else does. The example above
+used to name `slop-ecs/src/prelude.rs` exporting `Component`, `Entity`, `Query`
+and `World` — a file that does not exist, exporting a `Component` type that
+does not exist either.
+
+That is `CONSIDERATIONS.md` item 8 in a document the item did not audit. It only
+counted stale paths in `PLAN.md` and `DESIGN.md`, and this is the worse kind:
+not a file that moved, but a convention written in the present tense that no
+crate follows. A rule nothing checks and nothing obeys has stopped being a
+convention.
+
+Adding the preludes is the fix, and it is deliberately not being done in the
+same breath as noticing — the right export set for a crate is a design question
+per crate, and `slop-ecs` in particular has no `Component` type to export
+because `docs/DESIGN.md` §2.3 makes components any `Reflect` type rather than a
+trait to implement.
 
 ### 2.6 Test placement
 
@@ -561,18 +579,36 @@ Use `debug_assert!` for invariants too expensive to check in shipping builds.
 
 ## 7. `unsafe`
 
-Confined to three places, and adding a fourth is a design discussion rather than
-a review comment:
+Confined to the places below, and adding another is a design discussion rather
+than a review comment:
 
 | Where | Why it is unavoidable |
 |---|---|
 | `slop-rhi` | Vulkan is a C API |
 | The GPU allocator | Raw device memory |
 | `slop-ecs`'s storage | Type-erased columns are pointer arithmetic by construction (`DESIGN.md` §2.4) — a `Column<T>` cannot exist for a `T` declared at runtime |
+| `slop-reflect`'s `TypeInfo` | Holds a `drop_in_place` function pointer that the ECS calls on erased bytes. `Reflect` is an `unsafe trait` for the same reason |
+| `slop-reflect-derive` | Emits the `unsafe impl Reflect` above |
+| `slop-core`'s arena | A bump allocator hands out raw memory; this is the CPU-side counterpart of the row above it |
+| `slop-app`'s surface creation | `raw-window-handle` cannot express "the window outlives the surface", so the obligation is discharged once here and applications get none of their own |
 
 "`slop-ecs`'s storage" covers `column.rs` and `command.rs`: a command buffer
 holds owned component values as bytes plus a destructor, for the same reason a
 column does, and that is one place rather than two.
+
+**This table said "three places" until M2, and the tree had seven.** The four
+added above were all present and all justified; what was missing was the row.
+`CONSIDERATIONS.md` item 10 recorded a raw `queue_submit2` in an example's test
+as "the only `unsafe` outside §7's three sanctioned homes" — the block was real
+and is now gone, but the claim around it was not, and neither was the rule it
+appealed to. A confinement rule that has quietly stopped listing where the code
+actually is cannot be used to argue anything, which is `CONSIDERATIONS.md` item
+8 applied to this document.
+
+The rule that matters is unchanged: `unsafe` appears where a foreign API or an
+erased type makes it unavoidable, never for convenience and never for
+performance without a benchmark, and a new home is argued for rather than
+noticed afterwards.
 
 Every block carries `// SAFETY:` stating the invariant that makes it sound —
 enforced by `clippy::undocumented_unsafe_blocks`, so it fails the build, not
