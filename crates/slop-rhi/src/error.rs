@@ -153,6 +153,26 @@ pub enum RhiError {
     #[error("this memory is not host-visible; allocate it for upload or readback to map it")]
     MemoryNotHostVisible,
 
+    /// The device cannot use this format the way the image asked to use it.
+    ///
+    /// Checked before creation rather than left to the driver, because the
+    /// driver's answer is a validation message naming a create-info field. This
+    /// one names the format and what it was missing, which is what a caller has
+    /// to act on — usually by picking a different format, since a device that
+    /// cannot render into `R11G11B10Float` is not going to grow the ability.
+    ///
+    /// The common cause is a format chosen for one role and reused in another:
+    /// an HDR target that renders fine and then has to be sampled, or written by
+    /// a compute pass, neither of which the first choice guaranteed.
+    #[error("the device cannot use {format:?} for {missing}")]
+    FormatUnsupported {
+        /// The format that was asked for.
+        format: crate::Format,
+        /// The feature it lacks, in the engine's vocabulary rather than
+        /// Vulkan's — "sampling", "colour attachment".
+        missing: &'static str,
+    },
+
     /// A Vulkan call returned a failure code.
     #[error("Vulkan call failed: {0}")]
     Vulkan(#[from] ash::vk::Result),

@@ -80,6 +80,8 @@ impl Image {
     /// Fails if the driver rejects the image — an unsupported format or usage
     /// combination is the usual cause — or if device-local memory is exhausted.
     pub fn new(allocator: &Arc<Allocator>, config: &ImageConfig<'_>) -> Result<Self, RhiError> {
+        check_format_support(allocator.device(), config.format, config.usage)?;
+
         let device = allocator.device().raw();
 
         let create_info = vk::ImageCreateInfo::default()
@@ -218,6 +220,60 @@ impl Image {
 /// Panics if the device supports no depth format at all as a depth attachment.
 /// Vulkan requires `D16_UNORM` of every implementation, so this is unreachable
 /// on a conformant driver and would mean the device is lying about its formats.
+/// Refuse a format the device cannot use the way this image intends to.
+///
+/// **Checked here rather than left to the driver, and the driver turns out not
+/// to check it at all.** Disabling this and asking for a BC7 colour attachment —
+/// which the specification forbids outright, for every device — returns a
+/// perfectly good `VkImage` on the development machine. `vkCreateImage` is
+/// permitted to accept it; the undefined behaviour arrives later, when something
+/// renders into it. So this is not a nicer error message in front of a driver
+/// rejection that was going to happen anyway. It is the only thing that
+/// rejects it.
+///
+/// The query is a driver-side table lookup with no device round trip, so doing
+/// it per image is not worth caching. That would change if image creation ever
+/// moved into a frame; it is startup and resize work today.
+fn check_format_support(
+    device: &Arc<crate::Device>,
+    format: Format,
+    usage: ImageUsage,
+) -> Result<(), RhiError> {
+    // SAFETY: the physical device came from this instance's enumeration.
+    let properties = unsafe {
+        device
+            .instance()
+            .raw()
+            .get_physical_device_format_properties(device.physical_device(), format.to_vk())
+    };
+
+    // Optimal tiling, matching what `Image::new` creates. Linear tiling has its
+    // own, much narrower, feature set and this crate never asks for it.
+    let supported = properties.optimal_tiling_features;
+
+    // One usage at a time rather than one combined mask, so the error names the
+    // use that is unsupported instead of reporting the whole set and leaving the
+    // caller to bisect it.
+    const USES: [(ImageUsage, &str); 5] = [
+        (ImageUsage::TRANSFER_SRC, "transfer source"),
+        (ImageUsage::TRANSFER_DST, "transfer destination"),
+        (ImageUsage::SAMPLED, "sampling"),
+        (ImageUsage::COLOR_ATTACHMENT, "colour attachment"),
+        (
+            ImageUsage::DEPTH_STENCIL_ATTACHMENT,
+            "depth-stencil attachment",
+        ),
+    ];
+
+    for (one, missing) in USES {
+        if usage.contains(one) && !supported.contains(one.required_format_features()) {
+            return Err(RhiError::FormatUnsupported { format, missing });
+        }
+    }
+
+    Ok(())
+}
+
 pub fn preferred_depth_format(device: &Arc<crate::Device>) -> Format {
     const CANDIDATES: [Format; 4] = [
         Format::D32Float,

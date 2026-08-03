@@ -34,6 +34,27 @@ pub enum Format {
     /// swapchains prefer.
     Bgra8Srgb,
 
+    /// Four 16-bit floats. **The HDR render target** — `docs/PLAN.md` §9.4.
+    ///
+    /// Half floats, so roughly three decimal digits of precision over a range
+    /// that reaches 65504. A tonemapped image is eight bits per channel and a
+    /// scene's radiance is not: sunlit stone and a shadowed arch differ by
+    /// several orders of magnitude, and an 8-bit target clips the top of that
+    /// before the tonemap curve ever sees it.
+    Rgba16Float,
+    /// Three floats packed into 32 bits — 11 bits red, 11 green, 10 blue.
+    ///
+    /// Half the bandwidth of [`Rgba16Float`](Self::Rgba16Float) and what most
+    /// engines ship as their HDR target. Not the default here, deliberately: no
+    /// alpha channel, no negative values, and ten bits of blue bands visibly in
+    /// a TAA history buffer. `docs/PLAN.md` §6.1 carries the row for swapping to
+    /// it once there is content to measure the difference on.
+    ///
+    /// **Vulkan spells this one backwards.** `B10G11R11_UFLOAT_PACK32` names the
+    /// channels most-significant-bit first, which is the opposite of every other
+    /// format in this list; in memory and in a shader it is red, green, blue.
+    R11G11B10Float,
+
     /// One 32-bit float.
     R32Float,
     /// Two 32-bit floats. UVs.
@@ -73,6 +94,8 @@ impl Format {
             Self::Rgba8Unorm => vk::Format::R8G8B8A8_UNORM,
             Self::Rgba8Srgb => vk::Format::R8G8B8A8_SRGB,
             Self::Bgra8Srgb => vk::Format::B8G8R8A8_SRGB,
+            Self::Rgba16Float => vk::Format::R16G16B16A16_SFLOAT,
+            Self::R11G11B10Float => vk::Format::B10G11R11_UFLOAT_PACK32,
             Self::R32Float => vk::Format::R32_SFLOAT,
             Self::Rg32Float => vk::Format::R32G32_SFLOAT,
             Self::Rgb32Float => vk::Format::R32G32B32_SFLOAT,
@@ -103,6 +126,8 @@ impl Format {
             vk::Format::R8G8B8A8_UNORM => Self::Rgba8Unorm,
             vk::Format::R8G8B8A8_SRGB => Self::Rgba8Srgb,
             vk::Format::B8G8R8A8_SRGB => Self::Bgra8Srgb,
+            vk::Format::R16G16B16A16_SFLOAT => Self::Rgba16Float,
+            vk::Format::B10G11R11_UFLOAT_PACK32 => Self::R11G11B10Float,
             vk::Format::R32_SFLOAT => Self::R32Float,
             vk::Format::R32G32_SFLOAT => Self::Rg32Float,
             vk::Format::R32G32B32_SFLOAT => Self::Rgb32Float,
@@ -195,11 +220,13 @@ mod tests {
     /// apart, which is the one way a hand-written mapping goes wrong.
     #[test]
     fn every_format_round_trips_through_vulkan() {
-        const ALL: [Format; 16] = [
+        const ALL: [Format; 18] = [
             Format::Undefined,
             Format::Rgba8Unorm,
             Format::Rgba8Srgb,
             Format::Bgra8Srgb,
+            Format::Rgba16Float,
+            Format::R11G11B10Float,
             Format::R32Float,
             Format::Rg32Float,
             Format::Rgb32Float,
@@ -221,6 +248,34 @@ mod tests {
                 "{format:?} did not survive the round trip"
             );
         }
+    }
+
+    /// The HDR targets are colour, not depth. Getting this wrong would put the
+    /// depth aspect in every barrier over the HDR target, which is a validation
+    /// error rather than a wrong picture — but only once something transitions
+    /// one, which is E2 rather than now.
+    #[test]
+    fn the_hdr_formats_are_colour() {
+        assert_eq!(aspect_of(Format::Rgba16Float), ImageAspect::Color);
+        assert_eq!(aspect_of(Format::R11G11B10Float), ImageAspect::Color);
+
+        for format in [Format::Rgba16Float, Format::R11G11B10Float] {
+            assert!(!format.has_depth(), "{format:?} claims depth");
+            assert!(!format.has_stencil(), "{format:?} claims stencil");
+        }
+    }
+
+    /// `R11G11B10Float` maps to a Vulkan name whose channel order reads
+    /// backwards. Asserted rather than trusted to the doc comment, because the
+    /// neighbouring `B8G8R8A8_SRGB` really is blue-first and picking the
+    /// consistent-looking `R11G11B10` spelling — which Vulkan does not have —
+    /// is the mistake available here.
+    #[test]
+    fn the_packed_hdr_format_maps_to_vulkans_reversed_spelling() {
+        assert_eq!(
+            Format::R11G11B10Float.to_vk(),
+            vk::Format::B10G11R11_UFLOAT_PACK32
+        );
     }
 
     #[test]

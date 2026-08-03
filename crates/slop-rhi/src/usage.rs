@@ -142,6 +142,43 @@ impl ImageUsage {
 
         flags
     }
+
+    /// What a format must support for an image to be usable this way.
+    ///
+    /// Declaring a usage is not the same as the format supporting it. Vulkan
+    /// guarantees a small set of format-and-feature pairs and leaves the rest to
+    /// the device, so `R11G11B10Float` as a colour attachment is near-universal
+    /// while the same format as a storage image is not — and neither fact is
+    /// visible from the usage flags alone.
+    ///
+    /// Lives beside [`to_vk`](Self::to_vk) so the two mappings are read
+    /// together. A usage added to one and forgotten in the other is the drift
+    /// this placement exists to make obvious.
+    ///
+    /// `TRANSFER_SRC` and `TRANSFER_DST` map to features that only exist from
+    /// Vulkan 1.1 onward; the engine requires 1.3, so naming them is safe.
+    #[must_use]
+    pub fn required_format_features(self) -> vk::FormatFeatureFlags {
+        let mut features = vk::FormatFeatureFlags::empty();
+
+        if self.contains(Self::TRANSFER_SRC) {
+            features |= vk::FormatFeatureFlags::TRANSFER_SRC;
+        }
+        if self.contains(Self::TRANSFER_DST) {
+            features |= vk::FormatFeatureFlags::TRANSFER_DST;
+        }
+        if self.contains(Self::SAMPLED) {
+            features |= vk::FormatFeatureFlags::SAMPLED_IMAGE;
+        }
+        if self.contains(Self::COLOR_ATTACHMENT) {
+            features |= vk::FormatFeatureFlags::COLOR_ATTACHMENT;
+        }
+        if self.contains(Self::DEPTH_STENCIL_ATTACHMENT) {
+            features |= vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT;
+        }
+
+        features
+    }
 }
 
 impl BitOr for ImageUsage {
@@ -214,6 +251,41 @@ mod tests {
                 assert_ne!(one.to_vk(), other.to_vk(), "{one:?} and {other:?} collide");
             }
         }
+    }
+
+    /// The drift guard between the two mappings. A usage added to `to_vk` and
+    /// forgotten in `required_format_features` would return an empty feature
+    /// mask, and an empty mask is trivially satisfied — so the support check
+    /// would pass every format for that use and the omission would surface as a
+    /// driver rejection on somebody else's GPU.
+    #[test]
+    fn every_image_usage_requires_some_format_feature() {
+        const ALL: [ImageUsage; 5] = [
+            ImageUsage::TRANSFER_SRC,
+            ImageUsage::TRANSFER_DST,
+            ImageUsage::SAMPLED,
+            ImageUsage::COLOR_ATTACHMENT,
+            ImageUsage::DEPTH_STENCIL_ATTACHMENT,
+        ];
+
+        for usage in ALL {
+            assert!(
+                !usage.required_format_features().is_empty(),
+                "{usage:?} maps to a Vulkan usage but requires no format feature"
+            );
+        }
+    }
+
+    /// Combining usages combines the requirements, which is what makes checking
+    /// a single image's whole usage mask meaningful.
+    #[test]
+    fn combined_usages_require_both_sets_of_features() {
+        let usage = ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED;
+        let features = usage.required_format_features();
+
+        assert!(features.contains(vk::FormatFeatureFlags::COLOR_ATTACHMENT));
+        assert!(features.contains(vk::FormatFeatureFlags::SAMPLED_IMAGE));
+        assert!(!features.contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT));
     }
 
     #[test]
