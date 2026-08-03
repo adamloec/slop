@@ -31,10 +31,9 @@ use slop_core::diagnostics::tracing::{error, info};
 use slop_app::gpu::{Gpu, GpuConfig};
 use slop_app::timing::FrameTimes;
 use slop_app::window::WindowConfig;
-use slop_app::winit::application::ApplicationHandler;
 use slop_app::winit::event::WindowEvent;
-use slop_app::winit::event_loop::{ActiveEventLoop, EventLoop};
-use slop_app::winit::window::WindowId;
+use slop_app::winit::event_loop::ActiveEventLoop;
+use slop_app::winit::window::Window;
 use slop_editor::DebugUi;
 use slop_render::{Frame, FrameRenderer, FrameRendererConfig, Target};
 use slop_rhi::{
@@ -43,103 +42,46 @@ use slop_rhi::{
     ShaderModule, ShaderStage,
 };
 
-fn main() {
-    slop_app::logging::init();
+fn main() -> ! {
+    slop_app::run::<Renderer>()
+}
 
-    let event_loop = EventLoop::new().expect("an event loop must be creatable");
-    let mut app = App {
-        frame_limit: std::env::var("SLOP_FRAMES")
-            .ok()
-            .and_then(|value| value.parse().ok()),
-        ..Default::default()
-    };
+impl slop_app::Application for Renderer {
+    type Error = String;
 
-    event_loop.run_app(&mut app).expect("the event loop failed");
-
-    if let Some(failure) = &app.failure {
-        error!(error = %failure, "the renderer failed");
+    fn new(event_loop: &ActiveEventLoop) -> Result<Self, String> {
+        Self::create(event_loop)
     }
 
-    // Dropped explicitly so shutdown finishes — and logs that it finished —
-    // before the process exits. Letting it fall out of scope after the exit
-    // check would work, but "shutdown complete" is only trustworthy if it is
-    // printed after the teardown it describes.
-    let failed = app.failure.is_some();
-    drop(app);
+    fn window(&self) -> &Window {
+        self.gpu.window()
+    }
 
-    info!("shutdown complete");
+    fn render(&mut self) -> Result<(), String> {
+        self.draw()
+    }
 
-    if failed {
-        std::process::exit(1);
+    fn frame_number(&self) -> u64 {
+        self.renderer.frame_number()
+    }
+
+    fn resized(&mut self) {
+        self.renderer.invalidate();
+    }
+
+    fn on_window_event(&mut self, event: &WindowEvent) -> bool {
+        // The overlay sees every event first. The triangle has nothing to
+        // suppress — no camera, no picking — so the answer is discarded, but
+        // forwarding at all is what makes the overlay respond to a click.
+        //
+        // This example did not forward before. Cube and model did, from the
+        // same copy-pasted handler, and this one had simply drifted — which is
+        // the argument for the extraction rather than an aside to it.
+        self.ui.on_window_event(self.gpu.window(), event);
+        false
     }
 }
 
-#[derive(Default)]
-struct App {
-    renderer: Option<Renderer>,
-    failure: Option<String>,
-    /// Exit after this many frames, from `SLOP_FRAMES`.
-    frame_limit: Option<u64>,
-}
-
-impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.renderer.is_some() {
-            return;
-        }
-
-        match Renderer::new(event_loop) {
-            Ok(renderer) => self.renderer = Some(renderer),
-            Err(error) => {
-                self.failure = Some(error);
-                event_loop.exit();
-            }
-        }
-    }
-
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        let Some(renderer) = self.renderer.as_mut() else {
-            return;
-        };
-
-        match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(_) => renderer.mark_dirty(),
-            WindowEvent::RedrawRequested => {
-                if let Err(error) = renderer.render() {
-                    self.failure = Some(error);
-                    event_loop.exit();
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let Some(renderer) = self.renderer.as_ref() else {
-            return;
-        };
-
-        // `SLOP_FRAMES=n` exits after n frames. Makes shutdown verifiable
-        // without a human closing a window, and is the shape the deterministic
-        // headless mode in `docs/DESIGN.md` §5 needs — run a fixed number of
-        // frames, then stop.
-        if let Some(limit) = self.frame_limit
-            && renderer.frame_number() >= limit
-        {
-            println!("rendered {limit} frames; exiting");
-            // Cleared so this fires once: `about_to_wait` runs again before the
-            // loop actually unwinds.
-            self.frame_limit = None;
-            event_loop.exit();
-            return;
-        }
-
-        // Drive continuously rather than only on damage, so the frame loop is
-        // exercised the way a game's would be.
-        renderer.gpu.window().request_redraw();
-    }
-}
 struct Renderer {
     // Declared in drop order: everything built from the device, then the `Gpu`
     // that owns the device, surface and window — whose *internal* drop order is
@@ -161,7 +103,10 @@ struct Renderer {
 }
 
 impl Renderer {
-    fn new(event_loop: &ActiveEventLoop) -> Result<Self, String> {
+    /// Build the window, device and pipeline.
+    ///
+    /// Named apart from `Application::new` so neither shadows the other.
+    fn create(event_loop: &ActiveEventLoop) -> Result<Self, String> {
         let gpu = Gpu::new(
             event_loop,
             &GpuConfig {
@@ -245,15 +190,9 @@ impl Renderer {
         })
     }
 
-    fn frame_number(&self) -> u64 {
-        self.renderer.frame_number()
-    }
-
-    fn mark_dirty(&mut self) {
-        self.renderer.invalidate();
-    }
-
-    fn render(&mut self) -> Result<(), String> {
+    /// Draw one frame. Named apart from `Application::render` so neither
+    /// shadows the other.
+    fn draw(&mut self) -> Result<(), String> {
         // Nothing here is sized to the target — no depth buffer, no offscreen
         // attachment — so the new extent is discarded. The cube, which has one,
         // is where this return value earns its keep.

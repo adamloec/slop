@@ -29,8 +29,11 @@
 
 pub mod gpu;
 pub mod logging;
+pub mod shell;
 pub mod timing;
 pub mod window;
+
+pub use shell::{Application, run};
 
 /// Re-exported so consumers need no `winit` dependency of their own, and so the
 /// engine cannot end up split across two versions of it — which would make the

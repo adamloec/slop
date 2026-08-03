@@ -26,10 +26,9 @@ use std::sync::Arc;
 use slop_app::gpu::{Gpu, GpuConfig};
 use slop_app::timing::FrameTimes;
 use slop_app::window::WindowConfig;
-use slop_app::winit::application::ApplicationHandler;
 use slop_app::winit::event::WindowEvent;
-use slop_app::winit::event_loop::{ActiveEventLoop, EventLoop};
-use slop_app::winit::window::WindowId;
+use slop_app::winit::event_loop::ActiveEventLoop;
+use slop_app::winit::window::Window;
 use slop_asset::Vfs;
 use slop_core::diagnostics::tracing::{error, info};
 use slop_ecs::{Entity, World};
@@ -42,94 +41,40 @@ use slop_rhi::{BindlessHeap, BindlessHeapConfig, Device, ShaderModule};
 // framed by the same camera — see the library's docs.
 use example_model::{DEFAULT_MODEL, OrbitCamera, assets, bounds, camera};
 
-fn main() {
-    slop_app::logging::init();
-
-    let event_loop = EventLoop::new().expect("an event loop must be creatable");
-    let mut app = App {
-        frame_limit: std::env::var("SLOP_FRAMES")
-            .ok()
-            .and_then(|value| value.parse().ok()),
-        ..Default::default()
-    };
-
-    event_loop.run_app(&mut app).expect("the event loop failed");
-
-    if let Some(failure) = &app.failure {
-        error!(error = %failure, "the renderer failed");
-    }
-
-    let failed = app.failure.is_some();
-    drop(app);
-
-    info!("shutdown complete");
-
-    if failed {
-        std::process::exit(1);
-    }
+fn main() -> ! {
+    slop_app::run::<Renderer>()
 }
 
-#[derive(Default)]
-struct App {
-    renderer: Option<Renderer>,
-    failure: Option<String>,
-    frame_limit: Option<u64>,
-}
+impl slop_app::Application for Renderer {
+    type Error = String;
 
-impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.renderer.is_some() {
-            return;
-        }
-
-        match Renderer::new(event_loop) {
-            Ok(renderer) => self.renderer = Some(renderer),
-            Err(error) => {
-                self.failure = Some(error);
-                event_loop.exit();
-            }
-        }
+    fn new(event_loop: &ActiveEventLoop) -> Result<Self, String> {
+        Self::create(event_loop)
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        let Some(renderer) = self.renderer.as_mut() else {
-            return;
-        };
+    fn window(&self) -> &Window {
+        self.gpu.window()
+    }
 
+    fn render(&mut self) -> Result<(), String> {
+        self.draw()
+    }
+
+    fn frame_number(&self) -> u64 {
+        self.frames.frame_number()
+    }
+
+    fn resized(&mut self) {
+        self.frames.invalidate();
+    }
+
+    fn on_window_event(&mut self, event: &WindowEvent) -> bool {
         // The UI sees every event first and reports whether it consumed one.
         // Nothing here reads input yet, so the answer is discarded — but a
         // camera control added later must respect it, or a drag on a UI window
         // would also swing the camera behind it.
-        let _consumed = renderer.ui.on_window_event(renderer.gpu.window(), &event);
-
-        match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(_) => renderer.frames.invalidate(),
-            WindowEvent::RedrawRequested => {
-                if let Err(error) = renderer.render() {
-                    self.failure = Some(error);
-                    event_loop.exit();
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let Some(renderer) = self.renderer.as_ref() else {
-            return;
-        };
-
-        if let Some(limit) = self.frame_limit
-            && renderer.frames.frame_number() >= limit
-        {
-            println!("rendered {limit} frames; exiting");
-            self.frame_limit = None;
-            event_loop.exit();
-            return;
-        }
-
-        renderer.gpu.window().request_redraw();
+        self.ui.on_window_event(self.gpu.window(), event);
+        false
     }
 }
 
@@ -162,7 +107,9 @@ struct Renderer {
 }
 
 impl Renderer {
-    fn new(event_loop: &ActiveEventLoop) -> Result<Self, String> {
+    /// Build the window, device and scene. Named apart from
+    /// `Application::new` so neither shadows the other.
+    fn create(event_loop: &ActiveEventLoop) -> Result<Self, String> {
         let gpu = Gpu::new(
             event_loop,
             &GpuConfig {
@@ -255,7 +202,9 @@ impl Renderer {
         })
     }
 
-    fn render(&mut self) -> Result<(), String> {
+    /// Draw one frame. Named apart from `Application::render` so neither
+    /// shadows the other.
+    fn draw(&mut self) -> Result<(), String> {
         self.frame_times.tick();
 
         if let Some(extent) = self

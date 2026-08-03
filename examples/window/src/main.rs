@@ -18,23 +18,40 @@
 
 use slop_app::gpu::{Gpu, GpuConfig};
 use slop_app::window::{self, WindowConfig};
-use slop_app::winit::application::ApplicationHandler;
-use slop_app::winit::event::WindowEvent;
-use slop_app::winit::event_loop::{ActiveEventLoop, EventLoop};
-use slop_app::winit::window::WindowId;
+use slop_app::winit::event_loop::ActiveEventLoop;
+use slop_app::winit::window::Window as WinitWindow;
 use slop_rhi::{DeviceInfo, PresentMode, Surface, Swapchain, SwapchainConfig};
 
-fn main() {
-    slop_app::logging::init();
+fn main() -> ! {
+    slop_app::run::<Graphics>()
+}
 
-    let event_loop = EventLoop::new().expect("an event loop must be creatable");
-    let mut app = App::default();
+impl slop_app::Application for Graphics {
+    type Error = String;
 
-    event_loop.run_app(&mut app).expect("the event loop failed");
+    fn new(event_loop: &ActiveEventLoop) -> Result<Self, String> {
+        setup(event_loop)
+    }
 
-    if let Some(error) = app.failure {
-        eprintln!("setup failed: {error}");
-        std::process::exit(1);
+    fn window(&self) -> &WinitWindow {
+        self.gpu.window()
+    }
+
+    /// Nothing is drawn — see the module docs. The swapchain exists and is
+    /// never presented from, which is exactly M0 task E's scope.
+    fn render(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn frame_number(&self) -> u64 {
+        0
+    }
+
+    /// The one place this differs from the examples that draw. Asking for a
+    /// redraw that renders nothing would spin the CPU to no purpose, so the
+    /// window idles until it is closed.
+    fn redraws_continuously(&self) -> bool {
+        false
     }
 }
 
@@ -69,42 +86,14 @@ impl Drop for Graphics {
     }
 }
 
-#[derive(Default)]
-struct App {
-    graphics: Option<Graphics>,
-    failure: Option<String>,
-}
 
-impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        // `resumed` can fire more than once on some platforms.
-        if self.graphics.is_some() {
-            return;
-        }
-
-        match setup(event_loop) {
-            Ok(graphics) => self.graphics = Some(graphics),
-            Err(error) => {
-                self.failure = Some(error);
-                event_loop.exit();
-                return;
-            }
-        }
-
-        // The window stays open until it is closed. Nothing draws into the
-        // swapchain yet, so its contents are undefined — expect whatever the
-        // compositor had there, or black. That is correct for M0 task E; the
-        // first render is task F.
-        println!("\nwindow is open — close it to exit.");
-    }
-
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        if matches!(event, WindowEvent::CloseRequested) {
-            event_loop.exit();
-        }
-    }
-}
-
+/// Everything this example does, in the order Vulkan permits.
+///
+/// Reached only through `Application::new`, and so only from `main`. Cargo
+/// also builds this binary as a test harness, where `main` is not the entry
+/// point and both this and `report` are therefore genuinely unreachable —
+/// hence the attribute, which is scoped to that build rather than blanket.
+#[cfg_attr(test, allow(dead_code, reason = "unreachable without `main`"))]
 fn setup(event_loop: &ActiveEventLoop) -> Result<Graphics, String> {
     // Window, instance, surface, adapter selection and device, in the one order
     // Vulkan permits — see `slop_app::gpu`, which is where that order now lives
@@ -172,9 +161,16 @@ fn setup(event_loop: &ActiveEventLoop) -> Result<Graphics, String> {
 
     println!("\nwindow, surface, device and swapchain all created successfully.");
 
+    // The window stays open until it is closed. Nothing draws into the
+    // swapchain, so its contents are undefined — expect whatever the compositor
+    // had there, or black. That is correct for M0 task E; the first render is
+    // task F.
+    println!("\nwindow is open — close it to exit.");
+
     Ok(Graphics { swapchain, gpu })
 }
 
+#[cfg_attr(test, allow(dead_code, reason = "unreachable without `main`"))]
 fn report(devices: &[DeviceInfo], chosen: usize, surface: &Surface) {
     println!("\nadapters:");
     for (index, device) in devices.iter().enumerate() {
