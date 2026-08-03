@@ -1,6 +1,5 @@
 //! Everything needed to draw the cube into a caller-supplied target.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use slop_asset::{Assets, Mesh, Texture, Vfs};
@@ -205,9 +204,8 @@ impl Scene {
         // The registries are kept rather than dropped after upload, which is
         // what [`Scene::reload_changed`] needs: something to compare against,
         // and something to re-upload from.
-        let project = project_root();
-        let mut meshes = Assets::<Mesh>::for_project(&project);
-        let mut textures = Assets::<Texture>::for_project(&project);
+        let mut meshes = Assets::<Mesh>::new(assets());
+        let mut textures = Assets::<Texture>::new(assets());
 
         let mesh = meshes.load("meshes/cube.Cube.0.mesh").map_err(cook_first)?;
         let albedo = textures.load("textures/checker.tex").map_err(cook_first)?;
@@ -317,7 +315,7 @@ impl Scene {
     ///
     /// Exposed because the debug overlay's font atlas belongs in the *same*
     /// table as the scene's textures — that is what a bindless model is for —
-    /// while the overlay itself belongs to the application (`slop_app::debug_ui`)
+    /// while the overlay itself belongs to the application (`slop_editor::debug`)
     /// rather than in here. At M3 the renderer owns the heap and this accessor
     /// goes with it; see `docs/PLAN.md` §6.1.
     #[must_use]
@@ -485,7 +483,7 @@ impl Scene {
     /// Record one frame.
     ///
     /// Draws the scene and nothing else. The debug overlay is the application's,
-    /// drawn after this in a pass of its own — see `slop_app::debug_ui`.
+    /// drawn after this in a pass of its own — see `slop_editor::debug`.
     ///
     /// **Leaves the colour attachment in `COLOR_ATTACHMENT`, not in the frame's
     /// final state.** Only the last thing to draw may transition, and a scene
@@ -764,11 +762,16 @@ fn vulkan_format(format: slop_asset::Format) -> vk::Format {
     }
 }
 
-/// The project this example's assets were cooked into.
-fn project_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
+/// Cooked assets, found by walking up from wherever this was run.
+///
+/// Not `CARGO_MANIFEST_DIR`: that is baked in at compile time and points into a
+/// source tree, so it is correct only for a binary run from the build that
+/// produced it. Discovery works the same in a source tree and beside a shipped
+/// binary — see [`Vfs::discover`].
+fn assets() -> Vfs {
+    let here = std::env::current_dir().expect("the current directory must be readable");
+
+    Vfs::discover(&here).unwrap_or_else(|failure| panic!("{failure}"))
 }
 
 /// Turn a load failure into a message that says what to do about it.
@@ -810,7 +813,7 @@ fn load_reflection_at(logical: &str) -> Result<slop_asset::Reflection, String> {
 
 /// Read cooked bytes, with the hint that says what to do when they are absent.
 fn cooked(logical: &str) -> Result<Vec<u8>, String> {
-    Vfs::for_project(&project_root())
+    assets()
         .read(logical)
         .map_err(|error| format!("{error}. Run `cargo run -p slop-cli -- cook` first"))
 }

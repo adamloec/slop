@@ -284,7 +284,7 @@ struct Headless {
     pool: CommandPool,
     /// The overlay renderer, built here rather than taken from `slop-app`.
     ///
-    /// **This is the point of the split.** `slop_app::debug_ui::DebugUi` needs a
+    /// **This is the point of the split.** `slop_editor::DebugUi` needs a
     /// window — it owns the winit glue — and this test has none. `Overlay` is
     /// windowing-agnostic and takes tessellated triangles, so it can be driven
     /// with no event loop, no surface and no display at all. If the two halves
@@ -372,7 +372,7 @@ impl Headless {
     /// Apply egui's atlas changes, outside any recorded frame.
     ///
     /// Into the scene's heap, which is the same one the overlay was built
-    /// against — the arrangement `slop_app::debug_ui` produces in the real
+    /// against — the arrangement `slop_editor::debug` produces in the real
     /// application.
     fn upload_overlay(&mut self, delta: &egui::TexturesDelta) {
         self.overlay

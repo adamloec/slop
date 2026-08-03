@@ -23,7 +23,6 @@
 //! and a device, building one pipeline, and recording a draw into whatever
 //! target the frame renderer hands over.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use slop_asset::Vfs;
@@ -225,7 +224,7 @@ impl Renderer {
             gpu.window(),
             gpu.device(),
             &mut heap,
-            &Vfs::for_project(&project_root()),
+            &assets(),
             renderer.format(),
         )
         .map_err(|error| error.to_string())?;
@@ -375,18 +374,19 @@ impl Drop for Renderer {
 ///
 /// Through the asset VFS, so this names the shader rather than a path into the
 /// cache. Where cooked bytes live is `slop-asset`'s business.
-/// The repository root, which is where `.slop/cache` lives.
+/// Cooked assets, found by walking up from wherever this was run.
 ///
-/// `CARGO_MANIFEST_DIR` is example-grade and does not survive being installed —
-/// see `docs/PLAN.md` §6.1, which has the row for it.
-fn project_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
+/// An application's decision, which is why the starting directory is chosen here
+/// rather than inside `slop-asset` — `docs/CONVENTIONS.md` §5.1 keeps a library
+/// from reading the environment on its caller's behalf.
+fn assets() -> Vfs {
+    let here = std::env::current_dir().expect("the current directory must be readable");
+
+    Vfs::discover(&here).unwrap_or_else(|failure| panic!("{failure}"))
 }
 
 fn load_shader(device: &Arc<Device>) -> Result<ShaderModule, String> {
-    let bytes = Vfs::for_project(&project_root())
+    let bytes = assets()
         .read("shaders/passes/triangle.spv")
         .map_err(|error| format!("{error}. Run `cargo run -p slop-cli -- cook` first"))?;
 

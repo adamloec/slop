@@ -23,7 +23,6 @@
 //! agrees with it. Doing them the other way round draws one wrong frame after
 //! every resize.
 
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use example_cube::Scene;
@@ -39,14 +38,15 @@ use slop_core::diagnostics::tracing::{error, info};
 use slop_editor::{DebugUi, Declared};
 use slop_render::{FrameRenderer, FrameRendererConfig};
 
-/// The repository root, which is where `.slop/cache` lives.
+/// Cooked assets, found by walking up from wherever this was run.
 ///
-/// `CARGO_MANIFEST_DIR` is example-grade and does not survive being installed —
-/// `docs/PLAN.md` §6.1 has the row for it.
-fn project_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
+/// An application's decision, which is why the starting directory is chosen here
+/// rather than inside `slop-asset` — `docs/CONVENTIONS.md` §5.1 keeps a library
+/// from reading the environment on its caller's behalf.
+fn assets() -> Vfs {
+    let here = std::env::current_dir().expect("the current directory must be readable");
+
+    Vfs::discover(&here).unwrap_or_else(|failure| panic!("{failure}"))
 }
 
 /// How often to check whether a cooked asset has been rewritten.
@@ -163,9 +163,9 @@ struct Renderer {
     frame_times: FrameTimes,
     /// The debug UI — egui's state, the winit glue, and the overlay renderer.
     ///
-    /// In `slop-app` rather than here or in `slop-render`: the renderer stays
-    /// windowing-agnostic and only ever sees tessellated triangles, and the
-    /// wiring between the two is identical in every application.
+    /// In `slop-editor` rather than here: the wiring between the two halves is
+    /// identical in every application, and keeping it out of `slop-app` is what
+    /// stops a game linking a UI toolkit it never draws with.
     ui: DebugUi,
 }
 
@@ -212,7 +212,7 @@ impl Renderer {
             gpu.window(),
             gpu.device(),
             scene.heap_mut(),
-            &Vfs::for_project(&project_root()),
+            &assets(),
             renderer.format(),
         )
         .map_err(|error| error.to_string())?;

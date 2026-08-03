@@ -36,6 +36,19 @@ use thiserror::Error;
 /// Why an asset could not be read.
 #[derive(Debug, Error)]
 pub enum VfsError {
+    /// No ancestor of the starting directory holds a cooked cache.
+    ///
+    /// In a fresh clone this means nothing has been cooked yet, which is why the
+    /// message says so rather than only naming the directory searched from.
+    #[error(
+        "no cooked assets found in {from} or any parent; \
+         run `cargo run -p slop-cli -- cook` first"
+    )]
+    NoProject {
+        /// Where the search started.
+        from: PathBuf,
+    },
+
     /// Nothing is cooked at that path.
     ///
     /// Separate from a read failure because the fix is different: this almost
@@ -112,6 +125,44 @@ impl Vfs {
     /// A reader over the project at `project`.
     pub fn for_project(project: &Path) -> Self {
         Self::new(crate::cache_root(project))
+    }
+
+    /// Find the project containing `start`, by walking up for a cache directory.
+    ///
+    /// `start` is usually the current directory or the directory holding the
+    /// executable. **The caller chooses**, because which one is right depends on
+    /// how the program was launched, and `docs/CONVENTIONS.md` §5.1 puts that
+    /// decision in the application layer rather than in a library reading the
+    /// environment behind everyone's back.
+    ///
+    /// # Why this exists
+    ///
+    /// Every example used to compute its root from `CARGO_MANIFEST_DIR`, which
+    /// is baked in at compile time and points at a source tree — so it is
+    /// correct only when the binary is run from the build that produced it, and
+    /// wrong the moment anything is installed or copied. Four copies of that
+    /// expression is what made it worth fixing rather than deduplicating.
+    ///
+    /// Walking up is what every project-scoped tool does — `git`, `cargo`,
+    /// `node` — and it works the same in a source tree and beside a shipped
+    /// binary.
+    ///
+    /// # Errors
+    ///
+    /// [`VfsError::NoProject`] if no ancestor of `start` holds a cache
+    /// directory, which in a fresh clone means nothing has been cooked yet.
+    pub fn discover(start: &Path) -> Result<Self, VfsError> {
+        for directory in start.ancestors() {
+            let cache = crate::cache_root(directory);
+
+            if cache.is_dir() {
+                return Ok(Self::new(cache));
+            }
+        }
+
+        Err(VfsError::NoProject {
+            from: start.to_path_buf(),
+        })
     }
 
     /// The directory being read from.
@@ -202,6 +253,66 @@ impl Vfs {
             path,
             source,
         })
+    }
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+
+    /// A scratch project with a cache directory and a nested subdirectory.
+    ///
+    /// Named per test and cleared first, matching `registry.rs` — tests share
+    /// one temp directory and a fixed name would make them collide when run in
+    /// parallel.
+    fn project(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("slop-asset-discover-{name}"));
+        let _ = std::fs::remove_dir_all(&root);
+
+        std::fs::create_dir_all(crate::cache_root(&root)).expect("creating the cache");
+        std::fs::create_dir_all(root.join("src").join("deep")).expect("creating a subdirectory");
+
+        root
+    }
+
+    #[test]
+    fn discovery_walks_up_to_the_project() {
+        // The property that makes this work from anywhere inside a project,
+        // which is what a tool run from a subdirectory needs.
+        let root = project("walks-up");
+
+        let vfs = Vfs::discover(&root.join("src").join("deep")).expect("the cache is above `deep`");
+
+        assert_eq!(vfs.root(), crate::cache_root(&root));
+    }
+
+    #[test]
+    fn discovery_finds_a_cache_in_the_starting_directory() {
+        let root = project("right-here");
+
+        let vfs = Vfs::discover(&root).expect("the cache is right here");
+
+        assert_eq!(vfs.root(), crate::cache_root(&root));
+    }
+
+    #[test]
+    fn no_project_says_to_cook() {
+        // The first error a fresh clone hits. Naming only the directory would
+        // send someone looking for a path problem rather than a missing build
+        // step.
+        //
+        // Under the temp directory rather than at the filesystem root, and that
+        // matters: `ancestors` walks all the way up, so a scratch directory
+        // inside a *real* project would find that project's cache and pass for
+        // the wrong reason.
+        let empty = std::env::temp_dir().join("slop-asset-discover-empty");
+        let _ = std::fs::remove_dir_all(&empty);
+        std::fs::create_dir_all(&empty).expect("creating scratch");
+
+        let failure = Vfs::discover(&empty).expect_err("nothing is cooked here");
+
+        assert!(matches!(failure, VfsError::NoProject { .. }));
+        assert!(failure.to_string().contains("cook"), "{failure}");
     }
 }
 

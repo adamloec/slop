@@ -737,7 +737,7 @@ freely, never seams.
 | Mip generation is a box filter | `slop-cli/src/texture_import.rs` | A Kaiser or Mitchell kernel, per asset | **Replaced.** What hardware would do and what every pipeline starts with. Better kernels trade sharpness against ringing, which is a per-asset judgement — the same missing import settings. | M3 |
 | `Gpu` ties one window to one device | `slop-app/src/gpu.rs` | A device shared by several surfaces | **Extended.** Right for a game, which has one window; wrong for the editor (`DESIGN.md` §2.12), where a detached viewport is a second surface on the *same* device — re-running bring-up would create a second device and make sharing a texture between panels impossible. The split is `Gpu` keeping instance/device/allocator and handing out surfaces, and it is additive: `Gpu::new` stays the one-window path. Not done now because the editor does not exist and a two-window API designed without one is a guess. | M6 |
 | `FrameRenderer` has no automated test | `slop-render` | A smoke test that drives a real window, or a headless path that fakes a swapchain | **Extended.** Everything it does needs a surface, a surface needs a window, and a test harness has no event loop — the cube's golden renders headlessly and so covers `Scene`, not this. The check today is running both examples under `SLOP_FRAMES` with validation on, which is a command someone has to type. **The resize path has no coverage at all**, automated or otherwise, because `SLOP_FRAMES` never resizes the window. | M3 |
-| Scene setup — uploads, pipeline, draw recording | `examples/cube/src/scene.rs` | `slop-render` + `slop-asset` | **Rebuilt.** It proves the pieces fit together; it is not the shape an engine wants. One hard-coded pipeline, a raw sampler freed by hand, `CARGO_MANIFEST_DIR` in the load path, and push constants restated from the shader — all of it example-grade on purpose, none of it moves. | M3 |
+| Scene setup — uploads, pipeline, draw recording | `examples/cube/src/scene.rs` | `slop-render` + `slop-asset` | **Rebuilt.** It proves the pieces fit together; it is not the shape an engine wants. One hard-coded pipeline, a sampler and a heap owned by the scene, and push constants restated from the shader — all of it example-grade on purpose, none of it moves. (`CARGO_MANIFEST_DIR` is no longer among them: `Vfs::discover` walks up for a cooked cache, which works the same in a source tree and beside a shipped binary.) | M3 |
 | `VertexBinding` cannot express a buffer format that differs from the shader's type | `slop-render/src/vertex.rs` | A per-location format override | **Extended.** Reflection is a fact about the shader; the buffer format is a decision about memory. They coincide for every float attribute and diverge for a packed one — egui's four-byte colour read as a `float4`. The overlay states its layout and uses reflection to check the shader, which is correct and is not derivation. | M3 |
 | A glTF-referenced image is cooked separately from the same file under `assets/` | `slop-cli` | One artifact per distinct source image | **Replaced.** `assets/checker.png` cooks to `textures/checker.tex` *and*, because `cube.gltf` references it, to `textures/cube.0.tex`. Correct and wasteful. Deduplicating means keying artifacts by content rather than by name, which is a cache change rather than an importer one. | M2/M3 |
 | A cooked model is a flat list, not a hierarchy | `slop-asset/src/model.rs` | `slop-scene`'s runtime tree, once something articulates | **Joined by.** Right for a static level, which is drawn rather than posed, and wrong the moment a parent joint animates. The tree is a *runtime* structure `slop-scene` owns; this format records where things ended up. | M5 |
@@ -907,9 +907,15 @@ note above §6.1's table. The examples say what a frame loop must handle —
 swapchain recreation on resize and suboptimal acquire, a command pool reset per
 in-flight slot, timeline waits before touching one, semaphores per swapchain image
 rather than per frame. That knowledge transferred. The `String` errors, the
-hard-coded `FRAMES_IN_FLIGHT`, the `CARGO_MANIFEST_DIR` asset lookup and the
-panic-on-failure did not; they are example-grade on purpose, and lifting the files
-would have imported all of it under a better crate name.
+hard-coded `FRAMES_IN_FLIGHT` and the panic-on-failure did not; they are
+example-grade on purpose, and lifting the files would have imported all of it
+under a better crate name.
+
+The `CARGO_MANIFEST_DIR` asset lookup was on that list and is now gone entirely:
+four copies of it is what made it worth *fixing* rather than deduplicating, and
+`Vfs::discover` walks up for a cooked cache instead — which is what every
+project-scoped tool does, and works the same in a source tree and beside a
+shipped binary.
 
 **What is still in `examples/cube/src/scene.rs` comes out the same way**, and
 mostly with the material system: the hard-coded pipeline, push constants restated

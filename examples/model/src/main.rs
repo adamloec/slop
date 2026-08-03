@@ -21,7 +21,6 @@
 //!
 //! `SLOP_FRAMES=n` exits after n frames, as the other examples do.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use slop_app::gpu::{Gpu, GpuConfig};
@@ -50,7 +49,7 @@ const FIELD_OF_VIEW: f32 = 55.0;
 /// **In the world rather than in `Renderer`, so the inspector can edit it.**
 /// That is the point of putting it here: every field below appears in the debug
 /// UI without a line of UI code naming it, because `slop-reflect` describes the
-/// type and `slop_app::inspector` walks the description. Dragging `height` moves
+/// type and `slop_editor::inspector` walks the description. Dragging `height` moves
 /// the camera on the next frame.
 ///
 /// This is not the scene representation. `docs/DESIGN.md` gives `slop-scene` the
@@ -227,8 +226,7 @@ impl Renderer {
         let mut heap = BindlessHeap::new(gpu.device(), &BindlessHeapConfig::default())
             .map_err(|error| error.to_string())?;
 
-        let project = project_root();
-        let vfs = Vfs::for_project(&project);
+        let vfs = assets()?;
         let module = load_shader(gpu.device(), &vfs)?;
         let reflection = load_reflection(&vfs)?;
 
@@ -490,11 +488,15 @@ fn bounds(vfs: &Vfs, logical: &str) -> (Vec3, f32) {
     ((centre), (max - min).length() * 0.5)
 }
 
-/// Where this example's assets were cooked into.
-fn project_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
+/// Cooked assets, found by walking up from wherever this was run.
+///
+/// An application's decision, which is why the starting directory is chosen here
+/// rather than inside `slop-asset` — `docs/CONVENTIONS.md` §5.1 keeps a library
+/// from reading the environment on its caller's behalf.
+fn assets() -> Result<Vfs, String> {
+    let here = std::env::current_dir().map_err(|error| error.to_string())?;
+
+    Vfs::discover(&here).map_err(|error| error.to_string())
 }
 
 fn load_shader(device: &Arc<Device>, vfs: &Vfs) -> Result<ShaderModule, String> {
