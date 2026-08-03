@@ -579,6 +579,10 @@ fn upload_image(
             // expects, and an sRGB view would convert them a second time.
             format: vk::Format::R8G8B8A8_UNORM,
             usage: vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
+            // No chain. A UI is drawn at one texel per pixel by construction, so
+            // it never samples below level zero — and the font atlas would blur
+            // rather than sharpen if it did.
+            mip_levels: 1,
         },
     )?;
 

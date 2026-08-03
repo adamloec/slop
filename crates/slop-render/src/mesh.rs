@@ -441,6 +441,8 @@ impl MeshRenderer {
                 extent,
                 format: self.depth_format,
                 usage: vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+                // No chain: nothing samples a depth buffer at a distance.
+                mip_levels: 1,
             },
         )?);
 
@@ -669,25 +671,34 @@ fn upload_texture(
             },
             format: vulkan_format(texture.format),
             usage: vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
+            mip_levels: texture.mip_levels,
         },
     )?;
 
     slop_rhi::submit_and_wait(device, |command| {
+        // Covers every level: `transition_image` names the whole chain, which
+        // is what leaves no level behind in UNDEFINED.
         command.transition_image(
             image.handle(),
             image.aspect(),
             ImageState::UNDEFINED,
             ImageState::TRANSFER_DST,
         );
-        command.copy_buffer_to_image(
-            staging.handle(),
-            image.handle(),
-            image.aspect(),
-            vk::Extent2D {
-                width: texture.width,
-                height: texture.height,
-            },
-        );
+
+        // One copy per level, all out of the same staging buffer.
+        for (index, level) in texture.levels().enumerate() {
+            command.copy_buffer_to_image_level(
+                staging.handle(),
+                level.offset as u64,
+                image.handle(),
+                image.aspect(),
+                vk::Extent2D {
+                    width: level.width,
+                    height: level.height,
+                },
+                u32::try_from(index).expect("a mip chain is far shorter than u32::MAX"),
+            );
+        }
         command.transition_image(
             image.handle(),
             image.aspect(),

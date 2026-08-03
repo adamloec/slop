@@ -259,6 +259,7 @@ impl Scene {
                 extent,
                 format: depth_format,
                 usage: vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+                mip_levels: 1,
             },
         )
         .map_err(|error| error.to_string())?;
@@ -433,6 +434,7 @@ impl Scene {
                 extent,
                 format: self.depth.format(),
                 usage: vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+                mip_levels: 1,
             },
         )
         .map_err(|error| error.to_string())?;
@@ -705,6 +707,7 @@ fn upload_texture(
             // than the result of a colour space conversion.
             format: vulkan_format(cooked.format),
             usage: vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
+            mip_levels: cooked.mip_levels,
         },
     )
     .map_err(|error| error.to_string())?;
@@ -716,12 +719,21 @@ fn upload_texture(
             ImageState::UNDEFINED,
             ImageState::TRANSFER_DST,
         );
-        command.copy_buffer_to_image(
-            staging.handle(),
-            texture.handle(),
-            texture.aspect(),
-            texture.extent(),
-        );
+
+        // One copy per level, out of one staging buffer holding the chain.
+        for (index, level) in cooked.levels().enumerate() {
+            command.copy_buffer_to_image_level(
+                staging.handle(),
+                level.offset as u64,
+                texture.handle(),
+                texture.aspect(),
+                vk::Extent2D {
+                    width: level.width,
+                    height: level.height,
+                },
+                u32::try_from(index).expect("a mip chain is far shorter than u32::MAX"),
+            );
+        }
         command.transition_image(
             texture.handle(),
             texture.aspect(),

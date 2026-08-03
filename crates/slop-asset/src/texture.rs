@@ -9,11 +9,25 @@
 //! ```text
 //! magic      8 bytes  "SLOPTEX0"
 //! version    u32      VERSION
-//! width      u32      pixels
-//! height     u32      pixels
+//! width      u32      level zero, in pixels
+//! height     u32      level zero, in pixels
 //! format     u32      a Format discriminant
-//! pixel data          width × height × 4, tightly packed
+//! mip_levels u32      how many levels follow, including level zero
+//! pixel data          every level, largest first, tightly packed
 //! ```
+//!
+//! # Mip levels
+//!
+//! Level zero is the full-size image; each level after it is half the previous
+//! in each dimension, floored at one, down to 1×1. They are concatenated with no
+//! padding and no offset table — [`Texture::level`] walks the chain to find one,
+//! so a stored table cannot disagree with the payload it describes.
+//!
+//! The whole chain costs about a third more than level zero alone, which is the
+//! sum of a geometric series with ratio ¼ and the reason mips are affordable.
+//! They are generated at cook time rather than on the GPU because a
+//! block-compressed level cannot be filtered down after the fact — see
+//! `slop-cli`'s `texture_import::generate_mips`.
 //!
 //! Little-endian and decoded from bytes, for the reasons [`mesh`](crate::mesh)
 //! gives: `fs::read` returns a buffer aligned to 1, and byte order should be a
@@ -42,10 +56,15 @@ use thiserror::Error;
 const MAGIC: &[u8; 8] = b"SLOPTEX0";
 
 /// What this module knows how to read.
-pub const VERSION: u32 = 1;
+///
+/// Bumped to 2 when mip levels were added. The header grew rather than the
+/// meaning of a field changing, so a version 1 artifact is rejected outright
+/// instead of being read as a one-level version 2 — a cooked cache from before
+/// the change is regenerated, which is what the content hash already forces.
+pub const VERSION: u32 = 2;
 
 /// Bytes before the pixel data.
-const HEADER: usize = 24;
+const HEADER: usize = 28;
 
 /// How a cooked texture's pixels are stored.
 ///
@@ -125,6 +144,22 @@ impl Format {
 /// Why a cooked texture could not be read.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum TextureError {
+    /// The mip level count is zero, or more levels than the dimensions allow.
+    #[error(
+        "a {width}x{height} texture can have at most {possible} mip levels, and this claims \
+         {found}"
+    )]
+    MipLevels {
+        /// What the header says.
+        found: u32,
+        /// What a full chain down to 1x1 would be.
+        possible: u32,
+        /// Level zero's width.
+        width: u32,
+        /// Level zero's height.
+        height: u32,
+    },
+
     /// The bytes are not a cooked texture.
     #[error("not a cooked texture: expected magic {expected:?}, found {found:?}")]
     NotATexture {
@@ -178,8 +213,59 @@ pub struct Texture {
     pub height: u32,
     /// How the pixels are stored.
     pub format: Format,
-    /// Tightly packed pixel data, top row first.
+    /// How many mip levels [`pixels`](Self::pixels) holds, including level 0.
+    ///
+    /// One means no mips. Generated at cook time rather than on the GPU, because
+    /// a block-compressed texture cannot be filtered down after the fact: BC7
+    /// blocks would have to be decoded, halved and recompressed, which is both
+    /// slow and lossier than compressing each level from the original pixels.
+    pub mip_levels: u32,
+    /// Every level's pixels, largest first, tightly packed and concatenated.
+    ///
+    /// One allocation rather than a `Vec<Vec<u8>>` so an upload is one staging
+    /// buffer and one copy region per level, rather than one buffer per level.
+    /// Use [`level`](Self::level) to find a level within it.
     pub pixels: Vec<u8>,
+}
+
+/// Where one mip level lives, and how big it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Level {
+    /// Byte offset into [`Texture::pixels`].
+    pub offset: usize,
+    /// Length in bytes.
+    pub bytes: usize,
+    /// This level's width in texels. Never zero.
+    pub width: u32,
+    /// This level's height in texels. Never zero.
+    pub height: u32,
+}
+
+/// Halve a dimension, without ever reaching zero.
+///
+/// A 256×1 texture's chain is 128×1, 64×1 … 1×1: the short edge stops at one
+/// while the long edge keeps halving. Letting it reach zero would produce an
+/// empty level that Vulkan rejects.
+#[must_use]
+pub const fn halve(size: u32) -> u32 {
+    if size > 1 { size / 2 } else { 1 }
+}
+
+/// How many levels a full chain down to 1×1 has.
+///
+/// The count Vulkan calls `VK_REMAINING_MIP_LEVELS` resolves to: one level per
+/// halving of the *longer* edge, plus the original.
+#[must_use]
+pub const fn full_mip_chain(width: u32, height: u32) -> u32 {
+    let mut longest = if width > height { width } else { height };
+    let mut levels = 1;
+
+    while longest > 1 {
+        longest /= 2;
+        levels += 1;
+    }
+
+    levels
 }
 
 impl Texture {
@@ -192,9 +278,50 @@ impl Texture {
         out.extend_from_slice(&self.width.to_le_bytes());
         out.extend_from_slice(&self.height.to_le_bytes());
         out.extend_from_slice(&self.format.code().to_le_bytes());
+        out.extend_from_slice(&self.mip_levels.to_le_bytes());
         out.extend_from_slice(&self.pixels);
 
         out
+    }
+
+    /// Where level `index` lives within [`pixels`](Self::pixels).
+    ///
+    /// Returns `None` past the last level. Computed by walking the chain rather
+    /// than stored, so an offset table cannot disagree with the payload it
+    /// describes.
+    #[must_use]
+    pub fn level(&self, index: u32) -> Option<Level> {
+        if index >= self.mip_levels {
+            return None;
+        }
+
+        let mut offset = 0;
+        let mut width = self.width;
+        let mut height = self.height;
+
+        for _ in 0..index {
+            offset += self.format.payload_bytes(width, height);
+            width = halve(width);
+            height = halve(height);
+        }
+
+        Some(Level {
+            offset,
+            bytes: self.format.payload_bytes(width, height),
+            width,
+            height,
+        })
+    }
+
+    /// Every level, largest first.
+    pub fn levels(&self) -> impl Iterator<Item = Level> + '_ {
+        (0..self.mip_levels).filter_map(|index| self.level(index))
+    }
+
+    /// Bytes every level together occupies.
+    #[must_use]
+    pub fn payload_bytes(&self) -> usize {
+        self.levels().map(|level| level.bytes).sum()
     }
 
     /// Decode cooked bytes.
@@ -222,6 +349,7 @@ impl Texture {
         let width = read_u32(bytes, 12);
         let height = read_u32(bytes, 16);
         let code = read_u32(bytes, 20);
+        let mip_levels = read_u32(bytes, 24);
 
         let format = Format::from_code(code).ok_or(TextureError::UnknownFormat { code })?;
 
@@ -229,7 +357,30 @@ impl Texture {
             return Err(TextureError::Empty { width, height });
         }
 
-        let expected = HEADER + format.payload_bytes(width, height);
+        // Checked before the payload size is computed from it: a corrupt count
+        // would otherwise drive the loop below, and a very large one would spend
+        // a long time summing levels that cannot exist.
+        let possible = full_mip_chain(width, height);
+        if mip_levels == 0 || mip_levels > possible {
+            return Err(TextureError::MipLevels {
+                found: mip_levels,
+                possible,
+                width,
+                height,
+            });
+        }
+
+        // Built without its pixels so `payload_bytes` can walk the chain, then
+        // filled in. The alternative is duplicating the walk here.
+        let mut texture = Self {
+            width,
+            height,
+            format,
+            mip_levels,
+            pixels: Vec::new(),
+        };
+
+        let expected = HEADER + texture.payload_bytes();
         if bytes.len() < expected {
             return Err(TextureError::Truncated {
                 expected,
@@ -237,12 +388,9 @@ impl Texture {
             });
         }
 
-        Ok(Self {
-            width,
-            height,
-            format,
-            pixels: bytes[HEADER..expected].to_vec(),
-        })
+        texture.pixels = bytes[HEADER..expected].to_vec();
+
+        Ok(texture)
     }
 
     /// Bytes one row of pixels occupies.
@@ -261,15 +409,121 @@ impl Texture {
 
         self.width as usize * 4
     }
-
-    /// How many bytes this texture's payload should be.
-    pub const fn payload_bytes(&self) -> usize {
-        self.format.payload_bytes(self.width, self.height)
-    }
 }
 
 fn read_u32(bytes: &[u8], at: usize) -> u32 {
     u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes"))
+}
+
+#[cfg(test)]
+mod mip_tests {
+    use super::*;
+
+    fn chained(width: u32, height: u32, format: Format) -> Texture {
+        let levels = full_mip_chain(width, height);
+
+        let mut texture = Texture {
+            width,
+            height,
+            format,
+            mip_levels: levels,
+            pixels: Vec::new(),
+        };
+        texture.pixels = vec![7; texture.payload_bytes()];
+
+        texture
+    }
+
+    #[test]
+    fn a_square_chain_ends_at_one_by_one() {
+        assert_eq!(full_mip_chain(256, 256), 9, "256 halves nine times to 1");
+        assert_eq!(full_mip_chain(1, 1), 1);
+    }
+
+    #[test]
+    fn a_long_thin_chain_follows_the_longer_edge() {
+        // 256x1 must keep halving the long edge while the short one stays at 1.
+        // Following the *shorter* edge would stop after one level and leave a
+        // 128-wide texture with no mips, which is exactly where aliasing shows.
+        assert_eq!(full_mip_chain(256, 1), 9);
+        assert_eq!(halve(1), 1, "a dimension never reaches zero");
+    }
+
+    #[test]
+    fn levels_tile_the_payload_without_gaps_or_overlap() {
+        // The property `level` exists to guarantee: every level's bytes sit end
+        // to end, so one staging buffer and one copy per level covers exactly
+        // the payload. An off-by-one here uploads garbage into a level and shows
+        // as a texture that is right up close and wrong at distance.
+        for (width, height) in [(256, 256), (64, 32), (5, 5), (1, 1), (256, 1)] {
+            for format in [Format::Rgba8, Format::Bc7] {
+                let texture = chained(width, height, format);
+
+                let mut expected_offset = 0;
+                for level in texture.levels() {
+                    assert_eq!(
+                        level.offset, expected_offset,
+                        "{width}x{height} {format:?} has a gap"
+                    );
+                    expected_offset += level.bytes;
+                }
+
+                assert_eq!(
+                    expected_offset,
+                    texture.pixels.len(),
+                    "{width}x{height} {format:?} levels must cover the payload exactly"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_chain_round_trips_through_write_and_read() {
+        let texture = chained(64, 32, Format::Bc7);
+        let decoded = Texture::read(&texture.write()).expect("a written texture must read back");
+
+        assert_eq!(decoded, texture);
+        assert_eq!(decoded.mip_levels, 7);
+    }
+
+    #[test]
+    fn more_levels_than_the_dimensions_allow_is_rejected() {
+        // Rather than trusted and used to walk off the end of the payload.
+        let mut texture = chained(4, 4, Format::Rgba8);
+        texture.mip_levels = 9;
+
+        let failure = Texture::read(&texture.write()).expect_err("an impossible chain is invalid");
+
+        assert!(
+            matches!(failure, TextureError::MipLevels { possible: 3, .. }),
+            "{failure:?}"
+        );
+    }
+
+    #[test]
+    fn zero_levels_is_rejected() {
+        let mut texture = chained(4, 4, Format::Rgba8);
+        texture.mip_levels = 0;
+
+        assert!(matches!(
+            Texture::read(&texture.write()),
+            Err(TextureError::MipLevels { found: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn a_truncated_chain_is_caught() {
+        // Level zero present, later levels missing. Reading only level zero's
+        // size would accept this and leave the rest of the chain uninitialised.
+        let texture = chained(64, 64, Format::Bc7);
+        let mut bytes = texture.write();
+        bytes.truncate(HEADER + texture.format.payload_bytes(64, 64));
+
+        assert!(matches!(
+            Texture::read(&bytes),
+            Err(TextureError::Truncated { .. })
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -280,6 +534,7 @@ mod tests {
         Texture {
             width: 2,
             height: 2,
+            mip_levels: 1,
             format: Format::Rgba8,
             pixels: vec![
                 255, 0, 0, 255, //
@@ -314,6 +569,7 @@ mod tests {
         Texture {
             width,
             height,
+            mip_levels: 1,
             format: Format::Bc7,
             pixels: (0..Format::Bc7.payload_bytes(width, height))
                 .map(|index| index as u8)
@@ -447,6 +703,7 @@ mod tests {
         let texture = Texture {
             width: 0,
             height: 4,
+            mip_levels: 1,
             format: Format::Rgba8,
             pixels: Vec::new(),
         };

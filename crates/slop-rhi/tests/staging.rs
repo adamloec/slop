@@ -163,6 +163,7 @@ fn a_texture_uploads_and_reads_back_unchanged() {
             },
             format: vk::Format::R8G8B8A8_UNORM,
             usage: vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::TRANSFER_SRC,
+            mip_levels: 1,
         },
     )
     .expect("texture creation");
@@ -282,6 +283,7 @@ fn a_depth_image_clears_to_the_far_plane_at_zero() {
             format,
             usage: vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
                 | vk::ImageUsageFlags::TRANSFER_SRC,
+            mip_levels: 1,
         },
     )
     .expect("depth image creation");

@@ -62,15 +62,44 @@ fn the_albedo_is_a_quarter_the_size_of_raw_pixels() {
     // The reason block compression exists, asserted rather than assumed. The
     // saving is in VRAM and sample bandwidth rather than on disk: the GPU never
     // expands these bytes.
+    //
+    // Measured on **level zero**, because the payload now carries a mip chain
+    // too. Comparing the whole payload against raw level-zero pixels would be
+    // comparing two different things, and the answer would drift every time the
+    // chain changed.
     let Some(texture) = cooked() else { return };
 
     let raw = texture.width as usize * texture.height as usize * 4;
+    let level_zero = texture.level(0).expect("every texture has a level zero");
 
-    assert_eq!(texture.pixels.len(), raw / 4);
+    assert_eq!(level_zero.bytes, raw / 4);
+    assert_eq!(level_zero.bytes, 16 * 16 * 16, "16x16 blocks of 16 bytes");
+}
+
+#[test]
+fn the_albedo_carries_a_full_mip_chain() {
+    // Mips are what stop a surface drawn smaller than its texture from
+    // shimmering, and a texture cooked without them fails silently — it looks
+    // right up close and aliases at distance, which no unit test sees.
+    let Some(texture) = cooked() else { return };
+
     assert_eq!(
-        texture.pixels.len(),
-        16 * 16 * 16,
-        "16x16 blocks of 16 bytes"
+        texture.mip_levels, 7,
+        "64x64 halves down to 1x1 in seven levels"
+    );
+
+    let smallest = texture
+        .level(texture.mip_levels - 1)
+        .expect("the last level exists");
+    assert_eq!((smallest.width, smallest.height), (1, 1));
+
+    // A third larger than level zero alone, which is the geometric-series bound
+    // every mip chain pays and the reason mips are affordable at all.
+    let level_zero = texture.level(0).expect("level zero").bytes;
+    assert!(
+        texture.pixels.len() < level_zero * 3 / 2,
+        "a chain costs about a third more, not half again: {} over {level_zero}",
+        texture.pixels.len()
     );
 }
 

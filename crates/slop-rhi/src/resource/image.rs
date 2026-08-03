@@ -24,6 +24,24 @@ pub struct ImageConfig<'a> {
     pub format: vk::Format,
     /// How the image will be used.
     pub usage: vk::ImageUsageFlags,
+    /// How many mip levels to allocate, including level zero.
+    ///
+    /// One means no mips, which is right for a render target or a depth buffer:
+    /// nothing samples them at a distance. Sampled textures want the full chain,
+    /// because a surface drawn smaller than its texture aliases badly without
+    /// one — that shimmer on a distant floor is undersampling, and mips are the
+    /// prefiltered answer to it.
+    pub mip_levels: u32,
+}
+
+impl ImageConfig<'_> {
+    /// Levels, floored at one.
+    ///
+    /// Zero is meaningless to Vulkan and would be rejected at creation with a
+    /// message about the image rather than about the caller.
+    fn levels(&self) -> u32 {
+        self.mip_levels.max(1)
+    }
 }
 
 /// A GPU image, the memory backing it, and a view covering all of it.
@@ -70,7 +88,7 @@ impl Image {
                 height: config.extent.height,
                 depth: 1,
             })
-            .mip_levels(1)
+            .mip_levels(config.levels())
             .array_layers(1)
             .samples(vk::SampleCountFlags::TYPE_1)
             // OPTIMAL, not LINEAR. Linear tiling is mappable and is the reason
@@ -127,7 +145,7 @@ impl Image {
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: aspect_of(config.format),
                 base_mip_level: 0,
-                level_count: 1,
+                level_count: config.levels(),
                 base_array_layer: 0,
                 layer_count: 1,
             });

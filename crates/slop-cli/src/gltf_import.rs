@@ -579,10 +579,15 @@ fn cook_image(
         width: image.width,
         height: image.height,
         format: Format::Rgba8,
+        mip_levels: 1,
         pixels: to_rgba8(image)?,
     };
 
-    let compressed = crate::texture_import::compress(decoded);
+    // Mips first, then compression: every level is compressed from filtered
+    // RGBA8 rather than from a decoded parent, which is both faster and less
+    // lossy. See `texture_import::generate_mips`.
+    let compressed =
+        crate::texture_import::compress(crate::texture_import::generate_mips(&decoded));
 
     cache.prepare(&artifact)?;
     std::fs::write(&artifact, compressed.write())

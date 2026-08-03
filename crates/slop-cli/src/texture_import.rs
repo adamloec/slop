@@ -102,7 +102,8 @@ pub(crate) fn textures(root: &Path, force: bool) -> Result<Summary> {
 
         let decoded = decode(&bytes).with_context(|| format!("decoding {}", source.display()))?;
         let uncompressed = decoded.pixels.len();
-        let texture = compress(decoded);
+        // Mips before compression — see `generate_mips`.
+        let texture = compress(generate_mips(&decoded));
 
         cache.prepare(&artifact)?;
         std::fs::write(&artifact, texture.write())
@@ -150,8 +151,99 @@ fn decode(bytes: &[u8]) -> Result<Texture> {
         width: info.width,
         height: info.height,
         format: Format::Rgba8,
+        mip_levels: 1,
         pixels,
     })
+}
+
+/// Build the full mip chain from an RGBA8 texture's level zero.
+///
+/// # Why this happens at cook time
+///
+/// A block-compressed texture cannot be filtered down after the fact: halving
+/// BC7 would mean decoding blocks, averaging, and recompressing, which is slow
+/// and lossier than compressing each level from the original pixels. So the
+/// chain is built here, in RGBA8, and every level is compressed separately.
+///
+/// # Why a box filter
+///
+/// Each output texel is the mean of the four it covers, in **linear-ish**
+/// terms — see the caveat below. A box filter is what hardware would do and what
+/// every offline pipeline starts with; better kernels (Kaiser, Mitchell) trade
+/// sharpness against ringing and are a per-asset decision, which is import
+/// settings, which do not exist yet.
+///
+/// **The averaging is done on the stored values, not on decoded light.** For an
+/// albedo those values are sRGB-encoded, and averaging sRGB is not the same as
+/// averaging the light it represents — it biases dark. The visible effect is
+/// distant surfaces darkening slightly. Doing it properly means knowing which
+/// textures are colour and which are data, and that is the same missing per-asset
+/// import settings; `docs/PLAN.md` §6.1 carries the row.
+pub(crate) fn generate_mips(texture: &Texture) -> Texture {
+    debug_assert_eq!(texture.format, Format::Rgba8, "mips are built in RGBA8");
+
+    let levels = slop_asset::texture::full_mip_chain(texture.width, texture.height);
+    let mut pixels = texture.pixels.clone();
+
+    let mut previous = texture.pixels.clone();
+    let mut width = texture.width;
+    let mut height = texture.height;
+
+    for _ in 1..levels {
+        let next_width = slop_asset::texture::halve(width);
+        let next_height = slop_asset::texture::halve(height);
+        let level = downsample(&previous, width, height, next_width, next_height);
+
+        pixels.extend_from_slice(&level);
+        previous = level;
+        width = next_width;
+        height = next_height;
+    }
+
+    Texture {
+        width: texture.width,
+        height: texture.height,
+        format: Format::Rgba8,
+        mip_levels: levels,
+        pixels,
+    }
+}
+
+/// Halve an RGBA8 image with a 2×2 box filter.
+///
+/// Handles odd dimensions by clamping the sample coordinates, so a 5-wide image
+/// halving to 2 reads columns 0–1 and 2–3 and never runs off the end. The last
+/// column is dropped rather than weighted, which is what makes this a box filter
+/// and not a proper resample — visible only on textures that are not powers of
+/// two, which are rare in shipped content and never in Sponza.
+fn downsample(pixels: &[u8], width: u32, height: u32, to_width: u32, to_height: u32) -> Vec<u8> {
+    let mut out = vec![0u8; to_width as usize * to_height as usize * 4];
+
+    for y in 0..to_height {
+        for x in 0..to_width {
+            // Clamped rather than wrapped: at the edge of an odd-sized level the
+            // second sample would otherwise read the opposite side of the image.
+            let x0 = (x * 2).min(width - 1) as usize;
+            let x1 = (x * 2 + 1).min(width - 1) as usize;
+            let y0 = (y * 2).min(height - 1) as usize;
+            let y1 = (y * 2 + 1).min(height - 1) as usize;
+
+            let stride = width as usize * 4;
+            for channel in 0..4 {
+                // u16 accumulation: four u8 values sum to at most 1020, which
+                // overflows a u8 and would wrap to a wildly wrong colour.
+                let total = u16::from(pixels[y0 * stride + x0 * 4 + channel])
+                    + u16::from(pixels[y0 * stride + x1 * 4 + channel])
+                    + u16::from(pixels[y1 * stride + x0 * 4 + channel])
+                    + u16::from(pixels[y1 * stride + x1 * 4 + channel]);
+
+                out[(y as usize * to_width as usize + x as usize) * 4 + channel] =
+                    u8::try_from(total / 4).expect("a mean of four u8 values fits in a u8");
+            }
+        }
+    }
+
+    out
 }
 
 /// Compress an RGBA8 texture to BC7.
@@ -161,9 +253,33 @@ fn decode(bytes: &[u8]) -> Result<Texture> {
 pub(crate) fn compress(texture: Texture) -> Texture {
     debug_assert_eq!(texture.format, Format::Rgba8, "only RGBA8 is compressible");
 
-    let padded_width = texture.width.div_ceil(BLOCK) * BLOCK;
-    let padded_height = texture.height.div_ceil(BLOCK) * BLOCK;
-    let padded = pad_to_blocks(&texture, padded_width, padded_height);
+    // Every level compressed separately and concatenated in the same order, so
+    // `Texture::level` finds them where it expects. Levels are compressed from
+    // the *filtered RGBA8*, never from a decoded parent level — that is the
+    // whole reason mips are generated before this runs rather than after.
+    let mut pixels = Vec::new();
+    for level in texture.levels() {
+        pixels.extend_from_slice(&compress_level(
+            &texture.pixels[level.offset..level.offset + level.bytes],
+            level.width,
+            level.height,
+        ));
+    }
+
+    Texture {
+        width: texture.width,
+        height: texture.height,
+        format: Format::Bc7,
+        mip_levels: texture.mip_levels,
+        pixels,
+    }
+}
+
+/// Compress one RGBA8 level to BC7 blocks.
+fn compress_level(pixels: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let padded_width = width.div_ceil(BLOCK) * BLOCK;
+    let padded_height = height.div_ceil(BLOCK) * BLOCK;
+    let padded = pad_to_blocks(pixels, width, height, padded_width, padded_height);
 
     // `alpha` rather than `opaque`: the opaque modes ignore the alpha channel
     // entirely and reconstruct it as 255. That is right for an albedo with no
@@ -188,18 +304,10 @@ pub(crate) fn compress(texture: Texture) -> Texture {
     // two blocks where four are needed. Padding first is what makes its
     // arithmetic and this crate's agree; passing an unpadded surface would
     // under-allocate and lose the last row of blocks.
-    let pixels = intel_tex_2::bc7::compress_blocks(&settings, &surface);
-    debug_assert_eq!(
-        pixels.len(),
-        Format::Bc7.payload_bytes(texture.width, texture.height)
-    );
+    let blocks = intel_tex_2::bc7::compress_blocks(&settings, &surface);
+    debug_assert_eq!(blocks.len(), Format::Bc7.payload_bytes(width, height));
 
-    Texture {
-        width: texture.width,
-        height: texture.height,
-        format: Format::Bc7,
-        pixels,
-    }
+    blocks
 }
 
 /// Grow an RGBA8 image to `width × height` by repeating its edge pixels.
@@ -208,21 +316,27 @@ pub(crate) fn compress(texture: Texture) -> Texture {
 /// other texels *are* sampled, and BC7 fits one pair of endpoints per block — so
 /// filling with black drags those endpoints toward black and dims the real
 /// texels beside it. Repeating the edge costs the fit nothing.
-fn pad_to_blocks(texture: &Texture, width: u32, height: u32) -> Vec<u8> {
-    if texture.width == width && texture.height == height {
-        return texture.pixels.clone();
+fn pad_to_blocks(
+    pixels: &[u8],
+    from_width: u32,
+    from_height: u32,
+    width: u32,
+    height: u32,
+) -> Vec<u8> {
+    if from_width == width && from_height == height {
+        return pixels.to_vec();
     }
 
     let mut padded = Vec::with_capacity(width as usize * height as usize * 4);
 
     for y in 0..height {
-        let source_y = y.min(texture.height - 1);
+        let source_y = y.min(from_height - 1);
 
         for x in 0..width {
-            let source_x = x.min(texture.width - 1);
-            let at = ((source_y * texture.width + source_x) * 4) as usize;
+            let source_x = x.min(from_width - 1);
+            let at = ((source_y * from_width + source_x) * 4) as usize;
 
-            padded.extend_from_slice(&texture.pixels[at..at + 4]);
+            padded.extend_from_slice(&pixels[at..at + 4]);
         }
     }
 
@@ -389,6 +503,7 @@ mod tests {
             width,
             height,
             format: Format::Rgba8,
+            mip_levels: 1,
             pixels,
         }
     }
@@ -471,7 +586,7 @@ mod tests {
         // drags the endpoints of an edge block toward black and dims the real
         // texels beside it. Repeating the edge costs the fit nothing.
         let texture = sample(2, 2);
-        let padded = pad_to_blocks(&texture, 4, 4);
+        let padded = pad_to_blocks(&texture.pixels, texture.width, texture.height, 4, 4);
 
         assert_eq!(padded.len(), 4 * 4 * 4);
 
@@ -486,7 +601,7 @@ mod tests {
     #[test]
     fn padding_an_already_aligned_image_changes_nothing() {
         let texture = sample(8, 8);
-        let padded = pad_to_blocks(&texture, 8, 8);
+        let padded = pad_to_blocks(&texture.pixels, texture.width, texture.height, 8, 8);
 
         assert_eq!(padded, texture.pixels);
     }

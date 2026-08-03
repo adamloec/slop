@@ -333,6 +333,7 @@ impl Headless {
                 extent,
                 format: FORMAT,
                 usage: vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
+                mip_levels: 1,
             },
         )
         .map_err(|error| error.to_string())?;

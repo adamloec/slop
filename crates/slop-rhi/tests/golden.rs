@@ -338,6 +338,7 @@ fn colour_target(allocator: &Arc<Allocator>) -> Image {
             // TRANSFER_SRC is what makes it readable; without it the copy is a
             // validation error rather than a wrong result.
             usage: vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
+            mip_levels: 1,
         },
     )
     .expect("the colour target must be creatable")

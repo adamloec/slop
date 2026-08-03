@@ -381,7 +381,12 @@ impl CommandBuffer {
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: aspect,
                 base_mip_level: 0,
-                level_count: 1,
+                // Every level, not just level zero. A barrier names a
+                // *subresource range*, and layout is tracked per level — so a
+                // transition covering one level leaves the rest of a mip chain
+                // in UNDEFINED, and sampling those is undefined behaviour that
+                // validation reports as a layout mismatch far from here.
+                level_count: vk::REMAINING_MIP_LEVELS,
                 base_array_layer: 0,
                 layer_count: 1,
             });
@@ -468,13 +473,35 @@ impl CommandBuffer {
         aspect: vk::ImageAspectFlags,
         extent: vk::Extent2D,
     ) {
+        self.copy_buffer_to_image_level(buffer, 0, image, aspect, extent, 0);
+    }
+
+    /// Copy one mip level out of a buffer holding a whole chain.
+    ///
+    /// `buffer_offset` is where this level's bytes start, and `extent` is *this
+    /// level's* size rather than level zero's — Vulkan validates the copy
+    /// against the level's real dimensions, so passing the base extent for level
+    /// three is rejected rather than silently scaled.
+    ///
+    /// The whole chain is one buffer and one copy per level, rather than a
+    /// staging buffer each. Levels are tiny after the first two: a full chain is
+    /// only a third larger than level zero alone.
+    pub fn copy_buffer_to_image_level(
+        &self,
+        buffer: vk::Buffer,
+        buffer_offset: u64,
+        image: vk::Image,
+        aspect: vk::ImageAspectFlags,
+        extent: vk::Extent2D,
+        level: u32,
+    ) {
         let regions = [vk::BufferImageCopy::default()
-            .buffer_offset(0)
+            .buffer_offset(buffer_offset)
             .buffer_row_length(0)
             .buffer_image_height(0)
             .image_subresource(vk::ImageSubresourceLayers {
                 aspect_mask: aspect,
-                mip_level: 0,
+                mip_level: level,
                 base_array_layer: 0,
                 layer_count: 1,
             })

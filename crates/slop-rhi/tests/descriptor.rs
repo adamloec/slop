@@ -274,6 +274,7 @@ fn texture(allocator: &Arc<slop_rhi::Allocator>) -> Image {
             },
             format: vk::Format::R8G8B8A8_UNORM,
             usage: vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
+            mip_levels: 1,
         },
     )
     .expect("the texture must be creatable")
