@@ -11,6 +11,7 @@ publish = false
 slop-app = { workspace = true }
 slop-asset = { workspace = true }
 slop-core.workspace = true
+slop-editor = { workspace = true }
 slop-render = { workspace = true }
 slop-rhi = { workspace = true }
 

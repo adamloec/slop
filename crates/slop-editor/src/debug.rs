@@ -4,26 +4,23 @@
 //! state, which is what immediate mode means: there is no widget tree to keep
 //! synchronised, so it cannot fall out of sync with the engine it reports on.
 //!
-//! # Why this is in `slop-app` and not `slop-render`
+//! # Two halves, one type
 //!
-//! The overlay is two things that must not be one. [`slop_render::Overlay`] is a
-//! renderer: it takes tessellated triangles and a texture atlas and draws them,
-//! and it knows nothing about windows. What feeds it — reading window events,
-//! turning them into egui input, handing egui's platform output back to the
-//! window — is pure windowing glue, and `slop-app` is already the one layer that
-//! knows both a windowing library and the GPU exist (see [`crate::window`]).
+//! The overlay is two things that must not be one. [`Overlay`]
+//! is a renderer: it takes tessellated triangles and a texture atlas and draws
+//! them, and it knows nothing about windows. What feeds it — reading window
+//! events, turning them into egui input, handing egui's platform output back to
+//! the window — is pure windowing glue.
 //!
-//! Keeping that line is what lets the overlay be drawn by something with no
-//! window at all, which is exactly what the cube's headless golden test does.
+//! Keeping those as separate *types* is what lets the overlay be drawn by
+//! something with no window at all, which is exactly what the cube's headless
+//! golden test does: it drives `Overlay` directly, with no event loop and no
+//! display.
 //!
-//! # Why it owns both anyway
-//!
-//! The halves are separate *types*, but every application needs them wired
-//! together the same way: create the atlas in the bindless heap, upload texture
-//! deltas before the frame opens, tessellate, draw last. That wiring was written
-//! once in `examples/cube` and would have been copied into every other example.
-//! `DebugUi` is the wiring, and it is why an example needs four calls rather
-//! than forty lines.
+//! But every application wires them together identically — atlas into the
+//! bindless heap, upload deltas before the frame opens, tessellate, draw last.
+//! `DebugUi` is that wiring, and it is why an application needs four calls
+//! rather than forty lines.
 //!
 //! # The one ordering rule
 //!
@@ -37,43 +34,12 @@
 use std::sync::Arc;
 
 use slop_asset::Vfs;
-use slop_render::{Frame, Overlay, RenderError};
-use slop_rhi::{Allocator, BindlessHeap, Device, RhiError, ShaderModule, vk};
-use thiserror::Error;
+use slop_render::Frame;
+use slop_rhi::{Allocator, BindlessHeap, Device, ShaderModule, vk};
 use winit::event::WindowEvent;
 use winit::window::Window;
 
-/// Failures building or driving the debug UI.
-#[derive(Debug, Error)]
-pub enum DebugUiError {
-    /// The overlay's cooked shader or reflection could not be read.
-    ///
-    /// Almost always means nothing has been cooked yet.
-    #[error("{what} could not be read: {why}. Run `cargo run -p slop-cli -- cook` first")]
-    NotCooked {
-        /// The logical path that was missing.
-        what: String,
-        /// What the VFS said.
-        why: String,
-    },
-
-    /// The cooked bytes were read but are not what they claim to be.
-    #[error("{what} is cooked but malformed: {why}")]
-    Malformed {
-        /// The logical path.
-        what: String,
-        /// What the decoder said.
-        why: String,
-    },
-
-    /// The shader module could not be created.
-    #[error(transparent)]
-    Rhi(#[from] RhiError),
-
-    /// The overlay renderer rejected the shader, or failed to draw.
-    #[error(transparent)]
-    Render(#[from] RenderError),
-}
+use crate::{EditorError, Overlay};
 
 /// Where the overlay's cooked shader lives.
 const SHADER: &str = "shaders/passes/overlay.spv";
@@ -128,21 +94,19 @@ impl DebugUi {
         heap: &mut BindlessHeap,
         vfs: &Vfs,
         color_format: vk::Format,
-    ) -> Result<Self, DebugUiError> {
-        let bytes = vfs.read(SHADER).map_err(|why| DebugUiError::NotCooked {
+    ) -> Result<Self, EditorError> {
+        let bytes = vfs.read(SHADER).map_err(|why| EditorError::NotCooked {
             what: String::from(SHADER),
             why: why.to_string(),
         })?;
         let module = ShaderModule::from_bytes(device, &bytes)?;
 
-        let bytes = vfs
-            .read(REFLECTION)
-            .map_err(|why| DebugUiError::NotCooked {
-                what: String::from(REFLECTION),
-                why: why.to_string(),
-            })?;
+        let bytes = vfs.read(REFLECTION).map_err(|why| EditorError::NotCooked {
+            what: String::from(REFLECTION),
+            why: why.to_string(),
+        })?;
         let reflection =
-            slop_asset::Reflection::read(&bytes).map_err(|why| DebugUiError::Malformed {
+            slop_asset::Reflection::read(&bytes).map_err(|why| EditorError::Malformed {
                 what: String::from(REFLECTION),
                 why: why.to_string(),
             })?;
@@ -218,7 +182,7 @@ impl DebugUi {
         heap: &mut BindlessHeap,
         allocator: &Arc<Allocator>,
         declared: &Declared,
-    ) -> Result<(), DebugUiError> {
+    ) -> Result<(), EditorError> {
         self.overlay
             .update_textures(heap, allocator, &declared.textures)?;
 
@@ -239,7 +203,7 @@ impl DebugUi {
         allocator: &Arc<Allocator>,
         frame: &Frame<'_>,
         declared: &Declared,
-    ) -> Result<(), DebugUiError> {
+    ) -> Result<(), EditorError> {
         self.overlay.draw(
             heap,
             allocator,
@@ -277,7 +241,7 @@ mod tests {
 
     #[test]
     fn a_missing_shader_says_what_to_run() {
-        let failure = DebugUiError::NotCooked {
+        let failure = EditorError::NotCooked {
             what: String::from(SHADER),
             why: String::from("no such file"),
         };

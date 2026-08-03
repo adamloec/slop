@@ -25,7 +25,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use example_cube::Scene;
-use slop_render::{Overlay, Target};
+// `egui` through `slop-editor` rather than as a dependency of its own, so this
+// test cannot end up on a different version than the overlay it drives.
+use slop_editor::{Overlay, egui};
+use slop_render::Target;
 use slop_rhi::{
     Allocator, Buffer, BufferConfig, CommandPool, Device, DeviceSelection, Image, ImageConfig,
     ImageState, Instance, InstanceConfig, MemoryLocation, RhiError, ShaderModule,

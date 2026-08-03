@@ -26,14 +26,18 @@ pub enum RenderError {
     #[error("frames_in_flight must be at least one")]
     NoFramesInFlight,
 
-    /// The overlay shader does not describe what the overlay writes.
+    /// A shader does not describe what the renderer writes.
     ///
-    /// Reflection checks the shader side; the buffer formats are stated in
-    /// `overlay.rs`. This is the two disagreeing, or the bindless heap being
-    /// full — both of which produce an interface that is present and wrong
-    /// rather than an error, if left unchecked.
-    #[error("the debug overlay could not be set up: {what}")]
-    OverlayLayout {
+    /// Reflection checks the shader side; the buffer formats are stated in Rust.
+    /// This is the two disagreeing, or the bindless heap being full — both of
+    /// which produce a picture that is present and wrong rather than an error,
+    /// if left unchecked.
+    ///
+    /// Was `OverlayLayout`, which was a misnomer well before the overlay moved
+    /// to `slop-editor`: `MeshRenderer` had been raising it for its own layout
+    /// mismatches, so the name described one caller out of two.
+    #[error("the renderer could not be set up: {what}")]
+    Layout {
         /// What was wrong.
         what: &'static str,
     },

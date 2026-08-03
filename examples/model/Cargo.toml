@@ -16,6 +16,7 @@ slop-app = { workspace = true }
 slop-asset = { workspace = true }
 slop-core = { workspace = true, features = ["subscriber"] }
 slop-ecs = { workspace = true }
+slop-editor = { workspace = true }
 slop-math = { workspace = true }
 slop-reflect = { workspace = true }
 slop-render = { workspace = true }

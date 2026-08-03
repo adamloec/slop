@@ -680,11 +680,10 @@ name = "example-cube"
 version = "0.0.0"
 dependencies = [
  "bytemuck",
- "egui",
- "egui-winit",
  "slop-app",
  "slop-asset",
  "slop-core",
+ "slop-editor",
  "slop-math",
  "slop-render",
  "slop-rhi",
@@ -699,6 +698,7 @@ dependencies = [
  "slop-asset",
  "slop-core",
  "slop-ecs",
+ "slop-editor",
  "slop-math",
  "slop-reflect",
  "slop-render",
@@ -712,6 +712,7 @@ dependencies = [
  "slop-app",
  "slop-asset",
  "slop-core",
+ "slop-editor",
  "slop-render",
  "slop-rhi",
 ]
@@ -2093,14 +2094,8 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 name = "slop-app"
 version = "0.0.0"
 dependencies = [
- "egui",
- "egui-winit",
- "slop-asset",
  "slop-core",
- "slop-ecs",
  "slop-math",
- "slop-reflect",
- "slop-render",
  "slop-rhi",
  "thiserror 2.0.19",
  "winit",
@@ -2149,6 +2144,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "slop-editor"
+version = "0.0.0"
+dependencies = [
+ "bytemuck",
+ "egui",
+ "egui-winit",
+ "slop-asset",
+ "slop-core",
+ "slop-ecs",
+ "slop-reflect",
+ "slop-render",
+ "slop-rhi",
+ "thiserror 2.0.19",
+ "winit",
+]
+
+[[package]]
 name = "slop-math"
 version = "0.0.0"
 dependencies = [
@@ -2179,7 +2191,6 @@ name = "slop-render"
 version = "0.0.0"
 dependencies = [
  "bytemuck",
- "egui",
  "slop-asset",
  "slop-core",
  "slop-math",

@@ -8,7 +8,8 @@ repository.workspace = true
 
 [dependencies]
 bytemuck.workspace = true
-egui = { workspace = true }
+# No `egui`. The overlay that needed it is `slop-editor`'s, which is what keeps
+# this crate free of any opinion about UI toolkits.
 slop-asset = { workspace = true }
 slop-core = { workspace = true }
 slop-math = { workspace = true }

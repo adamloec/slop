@@ -14,18 +14,23 @@
 //! Keeping that line is what allows a game, the editor, a test harness, and
 //! headless CI to each configure the same engine differently without any of them
 //! fighting over ambient state.
+//!
+//! # What is deliberately *not* here
+//!
+//! **No user interface.** The debug overlay, its renderer and the entity
+//! inspector are `slop-editor`'s. They were briefly here, and the cost showed
+//! immediately: this crate has no features and every game depends on it, so a
+//! game wanting a window and a device also linked egui, `egui-winit`, `slop-ecs`
+//! and `slop-reflect` whether it drew an interface or not.
+//!
+//! It also had the dependency backwards. `docs/DESIGN.md` §2.12 says the editor
+//! embeds this crate exactly as a shipping game does, which cannot be true while
+//! the editor's own code is inside it.
 
-pub mod debug_ui;
 pub mod gpu;
-pub mod inspector;
 pub mod logging;
 pub mod timing;
 pub mod window;
-
-/// Re-exported for the same reason as [`winit`]: consumers declare their debug
-/// UI with `egui` types, and two versions of it in one binary would produce type
-/// mismatches that read as nonsense.
-pub use egui;
 
 /// Re-exported so consumers need no `winit` dependency of their own, and so the
 /// engine cannot end up split across two versions of it — which would make the

@@ -149,7 +149,7 @@ impl MeshRenderer {
         let push_constant_bytes = reflection.push_constant_bytes;
 
         if push_constant_bytes as usize > size_of::<PushConstants>() {
-            return Err(RenderError::OverlayLayout {
+            return Err(RenderError::Layout {
                 what: "the model shader's push constant block is larger than the renderer writes",
             });
         }
@@ -198,11 +198,11 @@ impl MeshRenderer {
                 ..SamplerConfig::default()
             },
         )?;
-        let sampler_slot =
-            heap.insert_sampler(sampler.handle())
-                .ok_or(RenderError::OverlayLayout {
-                    what: "the bindless heap had no room for the model sampler",
-                })?;
+        let sampler_slot = heap
+            .insert_sampler(sampler.handle())
+            .ok_or(RenderError::Layout {
+                what: "the bindless heap had no room for the model sampler",
+            })?;
 
         Ok(Self {
             pipeline,
@@ -408,11 +408,11 @@ impl MeshRenderer {
 
         buffer.mapped_mut()?[..bytes.len()].copy_from_slice(bytes);
 
-        let slot =
-            heap.insert_storage_buffer(buffer.handle())
-                .ok_or(RenderError::OverlayLayout {
-                    what: "the bindless heap had no room for the material buffer",
-                })?;
+        let slot = heap
+            .insert_storage_buffer(buffer.handle())
+            .ok_or(RenderError::Layout {
+                what: "the bindless heap had no room for the material buffer",
+            })?;
 
         self.materials_slot = Some(slot);
         self.materials = Some(buffer);
@@ -452,7 +452,7 @@ impl MeshRenderer {
     /// Open a pass over the frame's target and record every draw.
     ///
     /// Owns the pass rather than joining the caller's, for the same reason
-    /// [`Overlay`](crate::Overlay) does: the attachments and their formats are
+    /// `slop_editor::Overlay` does: the attachments and their formats are
     /// this renderer's business, and a caller assembling them would be
     /// duplicating what the pipeline already declares.
     ///

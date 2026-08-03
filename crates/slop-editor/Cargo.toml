@@ -1,0 +1,33 @@
+[package]
+name = "slop-editor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The overlay writes push constants and vertex buffers as bytes, and `Pod`
+# refuses to compile a struct with padding -- see the workspace manifest on why
+# that guarantee is not optional.
+bytemuck = { workspace = true }
+# The immediate-mode UI library, and the winit half that feeds it input. Both
+# live here rather than in slop-app, so a shipping game that wants only the main
+# loop and device bring-up does not link a UI toolkit -- see the crate docs.
+egui = { workspace = true }
+egui-winit = { workspace = true }
+slop-asset = { workspace = true }
+slop-core = { workspace = true }
+# The inspector reads and writes components through reflection, which is what
+# lets it show a type this crate was never compiled against.
+slop-ecs = { workspace = true }
+slop-reflect = { workspace = true }
+# For `Frame` and the pass it draws into. The editor's overlay is a renderer;
+# it is not itself part of the renderer.
+slop-render = { workspace = true }
+slop-rhi = { workspace = true }
+thiserror = { workspace = true }
+winit = { workspace = true }
+
+[lints]
+workspace = true

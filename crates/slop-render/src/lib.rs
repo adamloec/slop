@@ -52,11 +52,9 @@
 mod error;
 mod frame;
 mod mesh;
-mod overlay;
 mod vertex;
 
 pub use error::RenderError;
 pub use frame::{Frame, FrameOutcome, FrameRenderer, FrameRendererConfig, Target};
 pub use mesh::MeshRenderer;
-pub use overlay::Overlay;
 pub use vertex::VertexBinding;

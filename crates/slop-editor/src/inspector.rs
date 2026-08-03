@@ -31,7 +31,7 @@ use slop_reflect::{TypeId, Value};
 /// Which entity the inspector is showing, and which are expanded.
 ///
 /// Kept by the caller across frames because immediate mode means this function
-/// runs from scratch every frame — see [`crate::debug_ui`]. Selection is state
+/// runs from scratch every frame — see [`crate::debug`]. Selection is state
 /// about the *interface*, not about the world, so it lives here rather than
 /// being invented from what the world happens to contain.
 #[derive(Debug, Default)]

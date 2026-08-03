@@ -7,20 +7,14 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-# The debug UI's two halves. `egui` is the immediate-mode library, `egui-winit`
-# turns raw window events into its input. Both live here rather than in
-# slop-render, which stays windowing-agnostic and only ever sees tessellated
-# triangles -- see `debug_ui`.
-egui = { workspace = true }
-egui-winit = { workspace = true }
+# No `egui`, no `slop-ecs`, no `slop-reflect`, no `slop-render`. Every game
+# depends on this crate, so anything it links, every game links -- the interface
+# code that needed those is `slop-editor`'s. See the crate docs.
+#
 # `subscriber` is enabled here rather than in slop-core: this is the application
 # layer, and installing a process-wide subscriber is an application's decision.
-slop-asset = { workspace = true }
 slop-core = { workspace = true, features = ["subscriber"] }
-slop-ecs = { workspace = true }
 slop-math = { workspace = true }
-slop-reflect = { workspace = true }
-slop-render = { workspace = true }
 slop-rhi = { workspace = true }
 thiserror.workspace = true
 winit = { workspace = true }

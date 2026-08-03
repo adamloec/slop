@@ -29,7 +29,6 @@ use std::sync::Arc;
 use slop_asset::Vfs;
 use slop_core::diagnostics::tracing::{error, info};
 
-use slop_app::debug_ui::DebugUi;
 use slop_app::gpu::{Gpu, GpuConfig};
 use slop_app::timing::FrameTimes;
 use slop_app::window::WindowConfig;
@@ -37,6 +36,7 @@ use slop_app::winit::application::ApplicationHandler;
 use slop_app::winit::event::WindowEvent;
 use slop_app::winit::event_loop::{ActiveEventLoop, EventLoop};
 use slop_app::winit::window::WindowId;
+use slop_editor::DebugUi;
 use slop_render::{Frame, FrameRenderer, FrameRendererConfig, Target};
 use slop_rhi::{
     Attachments, BindlessHeap, BindlessHeapConfig, Blend, ClearValue, ColorAttachment, Device,
@@ -272,7 +272,7 @@ impl Renderer {
         let frames = self.renderer.frame_number();
 
         let declared = self.ui.run(self.gpu.window(), |context| {
-            slop_app::egui::Window::new("slop").show(context, |ui| {
+            slop_editor::egui::Window::new("slop").show(context, |ui| {
                 ui.label(format!("{:.2} ms  ({:.0} fps)", timing.last, timing.fps()));
                 ui.label(format!(
                     "{:.2} ms  worst of last {}",

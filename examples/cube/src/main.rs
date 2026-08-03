@@ -27,7 +27,6 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use example_cube::Scene;
-use slop_app::debug_ui::{DebugUi, Declared};
 use slop_app::gpu::{Gpu, GpuConfig};
 use slop_app::timing::FrameTimes;
 use slop_app::window::WindowConfig;
@@ -37,6 +36,7 @@ use slop_app::winit::event_loop::{ActiveEventLoop, EventLoop};
 use slop_app::winit::window::WindowId;
 use slop_asset::Vfs;
 use slop_core::diagnostics::tracing::{error, info};
+use slop_editor::{DebugUi, Declared};
 use slop_render::{FrameRenderer, FrameRendererConfig};
 
 /// The repository root, which is where `.slop/cache` lives.
@@ -316,7 +316,7 @@ impl Renderer {
         let timing = self.frame_times.summary();
 
         let declared = self.ui.run(self.gpu.window(), |context| {
-            slop_app::egui::Window::new("slop").show(context, |ui| {
+            slop_editor::egui::Window::new("slop").show(context, |ui| {
                 // Milliseconds, not frames per second. See `slop_app::timing`.
                 ui.label(format!("{:.2} ms  ({:.0} fps)", timing.last, timing.fps()));
                 ui.label(format!(

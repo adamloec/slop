@@ -19,8 +19,10 @@ repository = "https://github.com/adamloec/slop"
 # hoisted here so every crate resolves to one version.
 slop-app = { path = "crates/slop-app" }
 slop-asset = { path = "crates/slop-asset" }
+slop-cook = { path = "crates/slop-cook" }
 slop-core = { path = "crates/slop-core" }
 slop-ecs = { path = "crates/slop-ecs" }
+slop-editor = { path = "crates/slop-editor" }
 slop-math = { path = "crates/slop-math" }
 slop-reflect = { path = "crates/slop-reflect" }
 slop-reflect-derive = { path = "crates/slop-reflect-derive" }

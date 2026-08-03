@@ -24,9 +24,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use slop_app::debug_ui::DebugUi;
 use slop_app::gpu::{Gpu, GpuConfig};
-use slop_app::inspector::InspectorState;
 use slop_app::timing::FrameTimes;
 use slop_app::window::WindowConfig;
 use slop_app::winit::application::ApplicationHandler;
@@ -36,6 +34,7 @@ use slop_app::winit::window::WindowId;
 use slop_asset::Vfs;
 use slop_core::diagnostics::tracing::{error, info};
 use slop_ecs::{Entity, World};
+use slop_editor::{DebugUi, InspectorState};
 use slop_math::{Mat4, Quat, Vec3};
 use slop_render::{FrameRenderer, FrameRendererConfig, MeshRenderer};
 use slop_rhi::{BindlessHeap, BindlessHeapConfig, Device, ShaderModule};
@@ -375,7 +374,7 @@ impl Renderer {
     /// Re-declared every frame from current state, which is what immediate mode
     /// means (`docs/DESIGN.md` §10.2): there is no widget tree to keep in sync,
     /// so it cannot disagree with the engine it is reporting on.
-    fn declare_ui(&mut self) -> slop_app::debug_ui::Declared {
+    fn declare_ui(&mut self) -> slop_editor::Declared {
         let timing = self.frame_times.summary();
         let extent = self.frames.extent();
         let frames = self.frames.frame_number();
@@ -389,7 +388,7 @@ impl Renderer {
         let inspector = &mut self.inspector;
 
         self.ui.run(self.gpu.window(), |context| {
-            slop_app::egui::Window::new("slop").show(context, |ui| {
+            slop_editor::egui::Window::new("slop").show(context, |ui| {
                 // Milliseconds first. See `slop_app::timing`.
                 ui.label(format!("{:.2} ms  ({:.0} fps)", timing.last, timing.fps()));
                 ui.label(format!(
@@ -406,14 +405,14 @@ impl Renderer {
 
             // A second window rather than a section of the first, because it is
             // the one thing here that is worth resizing and scrolling.
-            slop_app::egui::Window::new("inspector")
+            slop_editor::egui::Window::new("inspector")
                 .default_open(false)
                 .show(context, |ui| {
                     // Nothing reacts to the return value yet. The camera is read
                     // fresh every frame, so an edit is picked up without needing
                     // to be told about — a system that had to be re-run would
                     // use this.
-                    let _changed = slop_app::inspector::inspector(ui, world, inspector);
+                    let _changed = slop_editor::inspector(ui, world, inspector);
                 });
         })
     }

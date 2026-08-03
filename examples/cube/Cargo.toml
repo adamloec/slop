@@ -21,11 +21,12 @@ path = "src/main.rs"
 
 [dependencies]
 bytemuck.workspace = true
-egui = { workspace = true }
-egui-winit = { workspace = true }
 slop-app = { workspace = true }
 slop-asset = { workspace = true }
 slop-core = { workspace = true, features = ["subscriber"] }
+# The debug overlay, and `egui` re-exported through it so this example cannot
+# end up on a different version than the crate that draws its interface.
+slop-editor = { workspace = true }
 slop-math = { workspace = true }
 slop-render = { workspace = true }
 slop-rhi = { workspace = true }

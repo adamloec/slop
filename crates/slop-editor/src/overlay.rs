@@ -33,7 +33,7 @@
 //! egui's vertex is `[f32; 2]` position, `[f32; 2]` UV, and **four normalized
 //! bytes** of colour, which the shader reads as a `float4`. Reflection reports
 //! what the *shader* reads, so it says `Float32x4` — the buffer format is a
-//! separate decision. See [`crate::vertex`] on why that split is real rather
+//! separate decision. See [`slop_render::VertexBinding`] on why that split is real rather
 //! than a gap, and why this module states its layout explicitly.
 
 use std::sync::Arc;
@@ -46,7 +46,7 @@ use slop_rhi::{
     TextureSampler, VertexLayout, vk,
 };
 
-use crate::RenderError;
+use crate::EditorError;
 
 /// Bytes one egui vertex occupies: two floats, two floats, four bytes.
 const VERTEX_STRIDE: u32 = 20;
@@ -116,8 +116,8 @@ impl Overlay {
     ///
     /// # Errors
     ///
-    /// [`RenderError::Rhi`] if a GPU object cannot be created,
-    /// [`RenderError::OverlayLayout`] if the cooked shader does not describe the
+    /// [`EditorError::Rhi`] if a GPU object cannot be created,
+    /// [`EditorError::Layout`] if the cooked shader does not describe the
     /// vertex format this module writes.
     pub fn new(
         device: &Arc<Device>,
@@ -125,12 +125,12 @@ impl Overlay {
         module: &ShaderModule,
         reflection: &Reflection,
         color_format: vk::Format,
-    ) -> Result<Self, RenderError> {
+    ) -> Result<Self, EditorError> {
         check_layout(reflection)?;
 
         let push_constant_bytes = reflection.push_constant_bytes;
         if push_constant_bytes as usize > size_of::<PushConstants>() {
-            return Err(RenderError::OverlayLayout {
+            return Err(EditorError::Layout {
                 what: "the shader's push constant block is larger than the overlay writes",
             });
         }
@@ -180,11 +180,11 @@ impl Overlay {
                 ..SamplerConfig::default()
             },
         )?;
-        let sampler_slot =
-            heap.insert_sampler(sampler.handle())
-                .ok_or(RenderError::OverlayLayout {
-                    what: "the bindless heap had no room for the overlay's sampler",
-                })?;
+        let sampler_slot = heap
+            .insert_sampler(sampler.handle())
+            .ok_or(EditorError::Layout {
+                what: "the bindless heap had no room for the overlay's sampler",
+            })?;
 
         Ok(Self {
             pipeline,
@@ -204,13 +204,13 @@ impl Overlay {
     ///
     /// # Errors
     ///
-    /// [`RenderError::Rhi`] if an image cannot be created or uploaded.
+    /// [`EditorError::Rhi`] if an image cannot be created or uploaded.
     pub fn update_textures(
         &mut self,
         heap: &mut slop_rhi::BindlessHeap,
         allocator: &Arc<slop_rhi::Allocator>,
         delta: &egui::TexturesDelta,
-    ) -> Result<(), RenderError> {
+    ) -> Result<(), EditorError> {
         for (id, image) in &delta.set {
             self.set_texture(heap, allocator, *id, image)?;
         }
@@ -240,7 +240,7 @@ impl Overlay {
         allocator: &Arc<slop_rhi::Allocator>,
         id: egui::TextureId,
         delta: &egui::epaint::ImageDelta,
-    ) -> Result<(), RenderError> {
+    ) -> Result<(), EditorError> {
         let egui::epaint::ImageData::Color(source) = &delta.image;
 
         let [patch_width, patch_height] = source.size;
@@ -253,12 +253,9 @@ impl Overlay {
         let (width, height, pixels) = match delta.pos {
             None => (patch_width as u32, patch_height as u32, patch),
             Some([x, y]) => {
-                let existing = self
-                    .textures
-                    .get(&key(id))
-                    .ok_or(RenderError::OverlayLayout {
-                        what: "a patch arrived for a texture that was never set",
-                    })?;
+                let existing = self.textures.get(&key(id)).ok_or(EditorError::Layout {
+                    what: "a patch arrived for a texture that was never set",
+                })?;
 
                 let (width, height) = (existing.width, existing.height);
                 let mut whole = existing.pixels.clone();
@@ -278,7 +275,7 @@ impl Overlay {
         let image = upload_image(&self.device, allocator, width, height, &pixels)?;
         let slot = heap
             .insert_sampled_image(image.view(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            .ok_or(RenderError::OverlayLayout {
+            .ok_or(EditorError::Layout {
                 what: "the bindless heap had no room for an overlay texture",
             })?;
 
@@ -311,15 +308,15 @@ impl Overlay {
     ///
     /// # Errors
     ///
-    /// [`RenderError::Rhi`] if this frame's buffers cannot be allocated.
+    /// [`EditorError::Rhi`] if this frame's buffers cannot be allocated.
     pub fn draw(
         &mut self,
         heap: &slop_rhi::BindlessHeap,
         allocator: &Arc<slop_rhi::Allocator>,
-        frame: &crate::Frame<'_>,
+        frame: &slop_render::Frame<'_>,
         primitives: &[egui::ClippedPrimitive],
         pixels_per_point: f32,
-    ) -> Result<(), RenderError> {
+    ) -> Result<(), EditorError> {
         let command = frame.command;
         // One set of buffers per in-flight slot. Writing a single shared buffer
         // would corrupt the frame still reading it — see `Frame::slot`.
@@ -460,7 +457,7 @@ impl MeshBuffers {
         allocator: &Arc<slop_rhi::Allocator>,
         vertices: &[u8],
         indices: &[u32],
-    ) -> Result<(), RenderError> {
+    ) -> Result<(), EditorError> {
         let index_bytes: Vec<u8> = indices
             .iter()
             .flat_map(|index| index.to_ne_bytes())
@@ -502,7 +499,7 @@ fn grow(
     name: &str,
     needed: usize,
     usage: vk::BufferUsageFlags,
-) -> Result<(), RenderError> {
+) -> Result<(), EditorError> {
     if slot
         .as_ref()
         .is_some_and(|buffer| buffer.size() >= needed as u64)
@@ -557,7 +554,7 @@ fn upload_image(
     width: u32,
     height: u32,
     pixels: &[u8],
-) -> Result<Image, RenderError> {
+) -> Result<Image, EditorError> {
     let mut staging = Buffer::new(
         allocator,
         &BufferConfig {
@@ -628,7 +625,7 @@ fn key(id: egui::TextureId) -> u64 {
 /// but it can check that there are three inputs at locations 0, 1 and 2 reading
 /// two, two and four components. A shader that gained an input, or reordered
 /// them, fails here rather than reading the wrong bytes per vertex.
-fn check_layout(reflection: &Reflection) -> Result<(), RenderError> {
+fn check_layout(reflection: &Reflection) -> Result<(), EditorError> {
     use slop_asset::shader::VertexFormat;
 
     let expected = [
@@ -638,14 +635,14 @@ fn check_layout(reflection: &Reflection) -> Result<(), RenderError> {
     ];
 
     if reflection.vertex_inputs.len() != expected.len() {
-        return Err(RenderError::OverlayLayout {
+        return Err(EditorError::Layout {
             what: "the overlay shader does not read exactly three vertex inputs",
         });
     }
 
     for (index, input) in reflection.vertex_inputs.iter().enumerate() {
         if input.location != index as u32 || input.format != expected[index] {
-            return Err(RenderError::OverlayLayout {
+            return Err(EditorError::Layout {
                 what: "the overlay shader's vertex inputs are not position, uv and colour",
             });
         }
