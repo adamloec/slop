@@ -230,7 +230,7 @@ impl Renderer {
         // before the first frame because the atlas arrives in the *first*
         // texture delta — a UI wired up mid-frame draws nothing at all.
         let ui = DebugUi::new(gpu.window(), gpu.device(), &mut heap, &vfs, frames.format())
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("{error}. Run `cargo run -p slop-cli -- cook` first"))?;
 
         info!(
             model = logical,

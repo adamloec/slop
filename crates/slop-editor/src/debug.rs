@@ -95,20 +95,20 @@ impl DebugUi {
         vfs: &Vfs,
         color_format: Format,
     ) -> Result<Self, EditorError> {
-        let bytes = vfs.read(SHADER).map_err(|why| EditorError::NotCooked {
-            what: String::from(SHADER),
-            why: why.to_string(),
+        let bytes = vfs.read(SHADER).map_err(|source| EditorError::NotCooked {
+            logical: String::from(SHADER),
+            source,
         })?;
         let module = ShaderModule::from_bytes(device, &bytes)?;
 
-        let bytes = vfs.read(REFLECTION).map_err(|why| EditorError::NotCooked {
-            what: String::from(REFLECTION),
-            why: why.to_string(),
+        let bytes = vfs.read(REFLECTION).map_err(|source| EditorError::NotCooked {
+            logical: String::from(REFLECTION),
+            source,
         })?;
         let reflection =
-            slop_asset::Reflection::read(&bytes).map_err(|why| EditorError::Malformed {
-                what: String::from(REFLECTION),
-                why: why.to_string(),
+            slop_asset::Reflection::read(&bytes).map_err(|source| EditorError::Malformed {
+                logical: String::from(REFLECTION),
+                source: Box::new(source),
             })?;
 
         let overlay = Overlay::new(device, heap, &module, &reflection, color_format)?;
@@ -240,15 +240,31 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_shader_says_what_to_run() {
+    fn a_missing_shader_names_the_path_and_keeps_its_cause() {
         let failure = EditorError::NotCooked {
-            what: String::from(SHADER),
-            why: String::from("no such file"),
+            logical: String::from(SHADER),
+            source: slop_asset::VfsError::Missing {
+                logical: String::from(SHADER),
+                path: std::path::PathBuf::from(".slop/cache").join(SHADER),
+            },
         };
 
-        // The remedy belongs in the message: this is the first error a fresh
-        // clone hits, and "no such file" alone does not say that a build step
-        // was skipped.
-        assert!(failure.to_string().contains("cook"), "{failure}");
+        // The path, because "not found" with no path is unactionable — the same
+        // reason `RenderError::Asset` names one.
+        assert!(failure.to_string().contains(SHADER), "{failure}");
+
+        // And the cause, still typed. This test previously asserted the message
+        // contained "cook", because the variant's `Display` ended with
+        // ``Run `cargo run -p slop-cli -- cook` first``. That is a library crate
+        // naming a binary and an invocation — the `CONVENTIONS.md` §5.1 line
+        // crossed inside an error message — and it becomes wrong as soon as
+        // `DESIGN.md` §2.12's editor cooks assets itself rather than telling a
+        // person to run a command. The remedy moved to the examples, which are
+        // the layer that knows how they were launched.
+        let source = std::error::Error::source(&failure).expect("the cause is kept, not flattened");
+        assert!(
+            source.downcast_ref::<slop_asset::VfsError>().is_some(),
+            "the cause should still be a VfsError, not prose"
+        );
     }
 }

@@ -227,7 +227,7 @@ impl Renderer {
             &assets(),
             renderer.format(),
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("{error}. Run `cargo run -p slop-cli -- cook` first"))?;
 
         info!(
             width = renderer.extent().width,

@@ -83,21 +83,38 @@ pub enum EditorError {
     /// A cooked artifact the interface needs could not be read.
     ///
     /// Almost always means nothing has been cooked yet.
-    #[error("{what} could not be read: {why}. Run `cargo run -p slop-cli -- cook` first")]
+    ///
+    /// Names the logical path and keeps the cause typed, which is
+    /// [`slop_render::RenderError::Asset`]'s shape and was already the right one
+    /// when this was written. It previously flattened a [`slop_asset::VfsError`]
+    /// through `to_string()` — the same loss `CONVENTIONS.md` §6 rules out,
+    /// except that §6 does not bite in an example and this is a library.
+    ///
+    /// Its `Display` also used to end with ``Run `cargo run -p slop-cli --
+    /// cook` first``. A library crate naming a binary and an invocation is the
+    /// §5.1 line — only the application layer knows how it was launched —
+    /// crossed inside an error message, and it becomes wrong the moment
+    /// `DESIGN.md` §2.12's editor cooks assets itself, which is the whole
+    /// reason `slop-cook` was extracted. Telling a person what to run is the
+    /// caller's business, and the caller can still do it: the logical path is
+    /// right here on the variant.
+    #[error("'{logical}' could not be read; it may not be cooked yet")]
     NotCooked {
         /// The logical path that was missing.
-        what: String,
-        /// What the VFS said.
-        why: String,
+        logical: String,
+        /// Why the read failed.
+        #[source]
+        source: slop_asset::VfsError,
     },
 
     /// The cooked bytes were read but are not what they claim to be.
-    #[error("{what} is cooked but malformed: {why}")]
+    #[error("'{logical}' is cooked but malformed")]
     Malformed {
         /// The logical path.
-        what: String,
+        logical: String,
         /// What the decoder said.
-        why: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
 
     /// A GPU object could not be created, or an upload failed.

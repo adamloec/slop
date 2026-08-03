@@ -40,10 +40,17 @@ pub enum VfsError {
     ///
     /// In a fresh clone this means nothing has been cooked yet, which is why the
     /// message says so rather than only naming the directory searched from.
-    #[error(
-        "no cooked assets found in {from} or any parent; \
-         run `cargo run -p slop-cli -- cook` first"
-    )]
+    ///
+    /// It says so *without naming a command*. This message used to end with
+    /// ``run `cargo run -p slop-cli -- cook` first``, which is a library crate
+    /// naming a binary and an invocation — the `CONVENTIONS.md` §5.1 line, that
+    /// only the application layer knows how it was launched, crossed inside an
+    /// error message. It also becomes wrong the moment `DESIGN.md` §2.12's
+    /// editor cooks assets itself rather than telling a person to run
+    /// something, which is the whole reason `slop-cook` was extracted from the
+    /// CLI. Naming the condition is this crate's job; prescribing the remedy is
+    /// the caller's, and every caller in the tree already does it.
+    #[error("no cooked assets found in {from} or any parent; nothing has been cooked yet")]
     NoProject {
         /// Where the search started.
         from: PathBuf,
@@ -296,10 +303,17 @@ mod discovery_tests {
     }
 
     #[test]
-    fn no_project_says_to_cook() {
+    fn no_project_says_nothing_is_cooked_without_naming_a_command() {
         // The first error a fresh clone hits. Naming only the directory would
         // send someone looking for a path problem rather than a missing build
-        // step.
+        // step — so the condition has to be in the message.
+        //
+        // The *remedy* must not be. This message used to end with
+        // ``run `cargo run -p slop-cli -- cook` first``, which is a library
+        // naming a binary: the `CONVENTIONS.md` §5.1 line crossed inside an
+        // error, and wrong as soon as `DESIGN.md` §2.12's editor cooks assets
+        // itself instead of telling a person to run something. Every caller
+        // already appends its own remedy, which is the layer that knows one.
         //
         // Under the temp directory rather than at the filesystem root, and that
         // matters: `ancestors` walks all the way up, so a scratch directory
@@ -312,7 +326,16 @@ mod discovery_tests {
         let failure = Vfs::discover(&empty).expect_err("nothing is cooked here");
 
         assert!(matches!(failure, VfsError::NoProject { .. }));
-        assert!(failure.to_string().contains("cook"), "{failure}");
+
+        let message = failure.to_string();
+        assert!(
+            message.contains("cooked"),
+            "the condition must be named: {message}"
+        );
+        assert!(
+            !message.contains("cargo run") && !message.contains("slop-cli"),
+            "a library must not prescribe a command: {message}"
+        );
     }
 }
 
