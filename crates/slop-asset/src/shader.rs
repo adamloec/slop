@@ -46,10 +46,17 @@ use thiserror::Error;
 const MAGIC: &[u8; 8] = b"SLOPREFL";
 
 /// What this module knows how to read.
-pub const VERSION: u32 = 1;
+///
+/// Version 2 added the compute thread-group size. Cooked artifacts regenerate
+/// from source, so a format change costs a `COOKER_VERSION` bump and nothing
+/// else — which is the whole reason the cooked formats are allowed to be rigid.
+pub const VERSION: u32 = 2;
 
 /// Bytes before the input array.
-const HEADER: usize = 20;
+///
+/// Magic (8), version (4), push constant bytes (4), input count (4), then the
+/// three thread-group dimensions (12).
+const HEADER: usize = 32;
 
 /// Bytes per input entry.
 const INPUT: usize = 8;
@@ -188,6 +195,15 @@ pub struct Reflection {
     pub push_constant_bytes: u32,
     /// Vertex inputs, in ascending location order.
     pub vertex_inputs: Vec<VertexInput>,
+    /// The compute entry point's `[numthreads(x, y, z)]`, or `None` for a shader
+    /// with no compute stage.
+    ///
+    /// **Carried so a dispatch does not restate it.** A caller must divide the
+    /// work by exactly these numbers and round up; naming them a second time in
+    /// Rust means the two can disagree, and disagreeing dispatches too few groups
+    /// and silently leaves the tail of the work undone. That is not a crash — it
+    /// is a cropped image or a half-filled buffer.
+    pub thread_group: Option<[u32; 3]>,
 }
 
 impl Reflection {
@@ -199,6 +215,13 @@ impl Reflection {
         out.extend_from_slice(&VERSION.to_le_bytes());
         out.extend_from_slice(&self.push_constant_bytes.to_le_bytes());
         out.extend_from_slice(&(self.vertex_inputs.len() as u32).to_le_bytes());
+
+        // All zeroes when there is no compute stage. A zero-sized workgroup is
+        // meaningless, so it doubles as the absent marker without costing a
+        // separate flag.
+        for axis in self.thread_group.unwrap_or([0; 3]) {
+            out.extend_from_slice(&axis.to_le_bytes());
+        }
 
         for input in &self.vertex_inputs {
             out.extend_from_slice(&input.location.to_le_bytes());
@@ -233,6 +256,19 @@ impl Reflection {
         let push_constant_bytes = read_u32(bytes, 12);
         let count = read_u32(bytes, 16) as usize;
 
+        let thread_group = [
+            read_u32(bytes, 20),
+            read_u32(bytes, 24),
+            read_u32(bytes, 28),
+        ];
+        // Any zero axis means no compute stage — see `write`. A partially zero
+        // group would be a cooker bug rather than a shader, so it reads as
+        // absent rather than being trusted.
+        let thread_group = thread_group
+            .iter()
+            .all(|axis| *axis > 0)
+            .then_some(thread_group);
+
         let expected = HEADER + count * INPUT;
         if bytes.len() < expected {
             return Err(ReflectionError::Truncated {
@@ -257,7 +293,24 @@ impl Reflection {
         Ok(Self {
             push_constant_bytes,
             vertex_inputs,
+            thread_group,
         })
+    }
+
+    /// How many workgroups cover `extent` items along `axis`.
+    ///
+    /// Integer ceiling division against the shader's own declared group size, so
+    /// a dispatch cannot disagree with `[numthreads(..)]` — the disagreement
+    /// this field exists to prevent.
+    ///
+    /// `None` when the shader has no compute stage, or `axis` is not 0, 1 or 2.
+    #[must_use]
+    pub fn workgroups(&self, axis: usize, extent: u32) -> Option<u32> {
+        let group = *self.thread_group?.get(axis)?;
+
+        // Written out rather than `(extent + group - 1) / group`, which overflows
+        // for an extent near `u32::MAX`.
+        Some(extent / group + u32::from(!extent.is_multiple_of(group)))
     }
 
     /// Place every input in one tightly packed, interleaved vertex.
@@ -312,7 +365,65 @@ mod tests {
                     format: VertexFormat::Float32x2,
                 },
             ],
+            // A graphics shader, so no compute stage.
+            thread_group: None,
         }
+    }
+
+    /// A compute shader's reflection: no vertex inputs, a thread group.
+    fn compute_sample() -> Reflection {
+        Reflection {
+            push_constant_bytes: 16,
+            vertex_inputs: Vec::new(),
+            thread_group: Some([8, 8, 1]),
+        }
+    }
+
+    #[test]
+    fn a_thread_group_round_trips() {
+        let reflection = compute_sample();
+
+        assert_eq!(Reflection::read(&reflection.write()), Ok(reflection));
+    }
+
+    /// Absence is spelled as zeroes and must come back as `None`, not as a group
+    /// of zero — which would divide by zero, or dispatch nothing and look fine.
+    #[test]
+    fn no_compute_stage_round_trips_as_absent() {
+        let bytes = sample().write();
+
+        assert_eq!(
+            Reflection::read(&bytes).expect("valid").thread_group,
+            None,
+            "a graphics shader must report no thread group rather than zeroes"
+        );
+    }
+
+    #[test]
+    fn workgroups_rounds_up_against_the_shaders_own_size() {
+        let reflection = compute_sample();
+
+        // Exact, and one texel over — the case rounding down drops.
+        assert_eq!(reflection.workgroups(0, 16), Some(2));
+        assert_eq!(reflection.workgroups(0, 17), Some(3));
+        assert_eq!(reflection.workgroups(0, 0), Some(0));
+
+        // The z axis is 1, so every extent needs that many groups.
+        assert_eq!(reflection.workgroups(2, 5), Some(5));
+
+        // No fourth axis, and no compute stage at all.
+        assert_eq!(reflection.workgroups(3, 8), None);
+        assert_eq!(sample().workgroups(0, 8), None);
+    }
+
+    /// The overflow the naive `(extent + group - 1) / group` has: it wraps and
+    /// dispatches nothing for the largest possible extent.
+    #[test]
+    fn an_extent_near_the_maximum_does_not_overflow() {
+        let reflection = compute_sample();
+
+        assert_eq!(reflection.workgroups(2, u32::MAX), Some(u32::MAX));
+        assert_eq!(reflection.workgroups(0, u32::MAX), Some(536_870_912));
     }
 
     #[test]

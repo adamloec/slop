@@ -675,6 +675,8 @@ mod tests {
                     format: *format,
                 })
                 .collect(),
+            // The overlay is vertex and fragment; nothing here dispatches.
+            thread_group: None,
         }
     }
 

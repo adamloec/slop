@@ -112,6 +112,8 @@ mod tests {
                     format: VertexFormat::Float32x2,
                 },
             ],
+            // A graphics shader: vertex and fragment, no compute stage.
+            thread_group: None,
         }
     }
 
@@ -159,6 +161,7 @@ mod tests {
                     format: VertexFormat::Float32x2,
                 },
             ],
+            thread_group: None,
         };
 
         assert!(matches!(

@@ -52,17 +52,24 @@
 // Offsets are in bytes and must be a multiple of four.
 [[vk::binding(3, 0)]] ByteAddressBuffer g_buffers[];
 
-// The same binding again, writable.
+// The same binding again, writable, for compute.
 //
 // Not a second descriptor and not a second slot: binding 3 is already
-// VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, which permits writes -- it is the shader's
-// declaration above that makes it read-only. Aliasing one binding with two views
-// is legal in Vulkan and is how a compute pass writes the same buffer a fragment
-// shader later reads, using the same heap index for both.
+// VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, which permits writes -- only the read-only
+// declaration above decides otherwise. Aliasing one binding with two views is
+// legal, and is how a compute pass writes the buffer a fragment shader later
+// reads through the same heap index.
 //
-// Declared separately rather than making `g_buffers` writable everywhere,
-// because a fragment shader that can write its material table is a fragment
-// shader that eventually does.
+// **The split is a hard requirement, not tidiness.** Declaring one writable view
+// for everyone was tried, and it makes every fragment shader that touches a
+// storage buffer declare write access -- which Vulkan only permits under the
+// `fragmentStoresAndAtomics` device feature. The model shader's pipeline was
+// rejected outright: "uses descriptor [Set 0, Binding 3] which is not marked
+// with NonWritable, but fragmentStoresAndAtomics was not enabled". Reading
+// through the read-only view is what keeps that feature unnecessary.
+//
+// Slang warns "explicit binding overlap" on this pair. The cooker disables that
+// one warning by id, deliberately and narrowly -- see `shader_import.rs`.
 [[vk::binding(3, 0)]] RWByteAddressBuffer g_rw_buffers[];
 
 // A texture slot. Mirrors `Handle<SampledImage>::index()` on the CPU side; the

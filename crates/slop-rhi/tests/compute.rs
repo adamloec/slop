@@ -17,22 +17,15 @@ use slop_asset::Vfs;
 use slop_rhi::{
     BindlessHeap, BindlessHeapConfig, Buffer, BufferConfig, BufferState, ComputePipeline, Extent2D,
     Format, Image, ImageConfig, ImageState, ImageUsage, MemoryLocation, PipelineLayout,
-    PipelineLayoutConfig, ShaderModule, ShaderStage, workgroups,
+    PipelineLayoutConfig, ShaderModule, ShaderStage,
 };
 
-/// Matches `[numthreads(8, 8, 1)]` in `shaders/passes/fill.slang`.
-///
-/// Nothing checks that these agree — the same ABI-by-convention the shader's own
-/// comment names. Dividing by the wrong number here dispatches too few groups
-/// and leaves part of the image unwritten, which the per-texel assertions below
-/// would catch.
-const GROUP: u32 = 8;
-
-/// Deliberately not a multiple of [`GROUP`].
+/// Deliberately not a multiple of `fill.slang`'s 8×8 workgroup.
 ///
 /// 20 is two full groups plus four texels, so the last group along each axis
 /// runs half outside the image. That exercises the shader's bounds check and the
-/// round-up in [`workgroups`] together; a 16 or 32 would let both bugs pass.
+/// round-up in `Reflection::workgroups` together; a 16 or 32 would let both bugs
+/// pass.
 const SIZE: u32 = 20;
 
 /// Written into the red channel, so a shader that never ran is distinguishable
@@ -50,8 +43,15 @@ struct PushConstants {
     height: u32,
 }
 
-/// One cooked shader, or `None` when nothing has been cooked yet.
-fn module(device: &Arc<slop_rhi::Device>, logical: &str) -> Option<ShaderModule> {
+/// One cooked shader and what it says about itself, or `None` when nothing has
+/// been cooked yet.
+///
+/// The reflection comes back alongside the module because the dispatch needs it:
+/// the workgroup size is the shader's own, not a number restated here.
+fn module(
+    device: &Arc<slop_rhi::Device>,
+    name: &str,
+) -> Option<(ShaderModule, slop_asset::Reflection)> {
     let vfs = match Vfs::discover(&std::env::current_dir().expect("a working directory")) {
         Ok(vfs) => vfs,
         Err(error) => {
@@ -60,11 +60,21 @@ fn module(device: &Arc<slop_rhi::Device>, logical: &str) -> Option<ShaderModule>
         }
     };
 
-    let bytes = vfs.read(logical).unwrap_or_else(|_| {
-        panic!("{logical} must be cooked; run `cargo run -p slop-cli -- cook`")
-    });
+    let spirv = format!("shaders/tests/{name}.spv");
+    let bytes = vfs
+        .read(&spirv)
+        .unwrap_or_else(|_| panic!("{spirv} must be cooked; run `cargo run -p slop-cli -- cook`"));
 
-    Some(ShaderModule::from_bytes(device, &bytes).expect("the cooked module must be valid SPIR-V"))
+    let reflection = vfs
+        .read(&format!("shaders/tests/{name}.refl"))
+        .expect("cooked reflection must sit beside the module");
+    let reflection =
+        slop_asset::Reflection::read(&reflection).expect("the cooked reflection must be valid");
+
+    Some((
+        ShaderModule::from_bytes(device, &bytes).expect("the cooked module must be valid SPIR-V"),
+        reflection,
+    ))
 }
 
 /// The whole point: dispatch, then check every texel the shader was supposed to
@@ -79,7 +89,7 @@ fn a_compute_shader_writes_every_texel_it_was_dispatched_for() {
     let Some((device, allocator)) = support::device_and_allocator() else {
         return;
     };
-    let Some(module) = module(&device, "shaders/passes/fill.spv") else {
+    let Some((module, reflection)) = module(&device, "fill") else {
         return;
     };
 
@@ -167,7 +177,17 @@ fn a_compute_shader_writes_every_texel_it_was_dispatched_for() {
             width: SIZE,
             height: SIZE,
         }));
-        compute.dispatch(workgroups(SIZE, GROUP), workgroups(SIZE, GROUP), 1);
+        // Divided by what the shader declared, read out of its cooked
+        // reflection. Nothing here restates `[numthreads(..)]`.
+        compute.dispatch(
+            reflection
+                .workgroups(0, SIZE)
+                .expect("fill is a compute shader"),
+            reflection
+                .workgroups(1, SIZE)
+                .expect("fill is a compute shader"),
+            1,
+        );
     }
 
     command.transition_image(
@@ -262,11 +282,8 @@ fn a_format_that_cannot_be_stored_to_is_refused() {
     }
 }
 
-/// Matches `[numthreads(64, 1, 1)]` in `shaders/passes/accumulate.slang`.
-const LINEAR_GROUP: u32 = 64;
-
-/// Deliberately not a multiple of [`LINEAR_GROUP`], for the reason [`SIZE`] is
-/// not a multiple of [`GROUP`].
+/// Deliberately not a multiple of `accumulate.slang`'s 64-wide workgroup, for
+/// the reason [`SIZE`] is not a multiple of `fill.slang`'s.
 const COUNT: u32 = 100;
 
 /// Push constants, matching `PushConstants` in `accumulate.slang`.
@@ -293,7 +310,7 @@ fn a_compute_shader_writes_a_storage_buffer_the_cpu_can_then_read() {
     let Some((device, allocator)) = support::device_and_allocator() else {
         return;
     };
-    let Some(module) = module(&device, "shaders/passes/accumulate.spv") else {
+    let Some((module, reflection)) = module(&device, "accumulate") else {
         return;
     };
 
@@ -368,7 +385,13 @@ fn a_compute_shader_writes_a_storage_buffer_the_cpu_can_then_read() {
             target: slot.index(),
             count: COUNT,
         }));
-        compute.dispatch(workgroups(COUNT, LINEAR_GROUP), 1, 1);
+        compute.dispatch(
+            reflection
+                .workgroups(0, COUNT)
+                .expect("accumulate is a compute shader"),
+            1,
+            1,
+        );
     }
 
     // The barrier this test exists for: the compute write must be visible to
@@ -399,4 +422,64 @@ fn a_compute_shader_writes_a_storage_buffer_the_cpu_can_then_read() {
             "element {index} is wrong; the shader wrote elsewhere or not at all"
         );
     }
+}
+
+/// The cooked reflection reports the size the shader source declares.
+///
+/// This is the whole point of carrying it: a dispatch divides by these numbers,
+/// and if the cooker reported the wrong ones the division would be wrong in a
+/// way no amount of care at the call site could catch. Asserted against the
+/// literals in the two `.slang` files, which is the one place the pair can be
+/// compared without the reflection being both sides of the comparison.
+#[test]
+fn the_cooked_thread_group_matches_what_the_shader_declares() {
+    let Some(device) = support::device() else {
+        return;
+    };
+
+    let Some((_, fill)) = module(&device, "fill") else {
+        return;
+    };
+    let Some((_, accumulate)) = module(&device, "accumulate") else {
+        return;
+    };
+
+    assert_eq!(
+        fill.thread_group,
+        Some([8, 8, 1]),
+        "shaders/tests/fill.slang declares [numthreads(8, 8, 1)]"
+    );
+    assert_eq!(
+        accumulate.thread_group,
+        Some([64, 1, 1]),
+        "shaders/tests/accumulate.slang declares [numthreads(64, 1, 1)]"
+    );
+
+    // The round-up, against a size the shader owns. 20 over 8 is three groups,
+    // and rounding down would leave the last four texels of each axis unwritten.
+    assert_eq!(fill.workgroups(0, 20), Some(3));
+    assert_eq!(fill.workgroups(0, 16), Some(2));
+    assert_eq!(accumulate.workgroups(0, 100), Some(2));
+
+    // A graphics shader has no compute stage and says so, rather than reporting
+    // a group of one and letting a dispatch look reasonable.
+    let Some((_, model)) = graphics_reflection(&device) else {
+        return;
+    };
+    assert_eq!(model.thread_group, None);
+    assert_eq!(model.workgroups(0, 100), None);
+}
+
+/// A cooked graphics shader, for the negative half of the test above.
+fn graphics_reflection(
+    device: &Arc<slop_rhi::Device>,
+) -> Option<(ShaderModule, slop_asset::Reflection)> {
+    let vfs = Vfs::discover(&std::env::current_dir().expect("a working directory")).ok()?;
+    let bytes = vfs.read("shaders/passes/model.spv").ok()?;
+    let reflection = vfs.read("shaders/passes/model.refl").ok()?;
+
+    Some((
+        ShaderModule::from_bytes(device, &bytes).expect("valid SPIR-V"),
+        slop_asset::Reflection::read(&reflection).expect("valid reflection"),
+    ))
 }

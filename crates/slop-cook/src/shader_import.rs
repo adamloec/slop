@@ -52,7 +52,7 @@ use slop_core::diagnostics::tracing::{debug, info, warn};
 /// Any change to how cooking works — different compiler flags, a different
 /// output layout, a bug fix in this file — must bump this, or existing caches
 /// keep serving artifacts produced by the old rules.
-const COOKER_VERSION: u32 = 4;
+const COOKER_VERSION: u32 = 6;
 
 /// Extension of the shader sources this cooks.
 const SHADER_SOURCE_EXTENSION: &str = "slang";
@@ -245,6 +245,19 @@ fn compile(
         // Found by the first compute shader, which was the first file in the
         // tree with a single entry point.
         .arg("-fvk-use-entrypoint-name")
+        // **One warning, disabled by id, and only this one.**
+        //
+        // 39001 is "explicit binding overlap". `lib/bindless.slang` aliases the
+        // storage-buffer binding with a read-only and a writable view on
+        // purpose: reading through the writable one would make every fragment
+        // shader declare write access, which Vulkan permits only under the
+        // `fragmentStoresAndAtomics` feature the engine does not enable.
+        //
+        // Disabled here rather than at the include, so that the reason is next
+        // to the compiler invocation and a second overlap somewhere else still
+        // warns — it would be the same mistake in a place nobody has thought
+        // about.
+        .args(["-warnings-disable", "39001"])
         .arg("-reflection-json")
         .arg(&reflection)
         .arg("-o")
@@ -252,17 +265,30 @@ fn compile(
         .output()
         .with_context(|| format!("running {}", compiler.path.display()))?;
 
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    let stdout = String::from_utf8_lossy(&result.stdout);
+
     if !result.status.success() {
         // Compiler diagnostics are the whole value of a failed compile, so they
         // are surfaced rather than replaced by an exit code.
-        let stderr = String::from_utf8_lossy(&result.stderr);
-        let stdout = String::from_utf8_lossy(&result.stdout);
-
         bail!(
             "compiling {} failed:\n{}{}",
             source.display(),
             stdout.trim(),
             stderr.trim()
+        );
+    }
+
+    // **Warnings on a successful compile were being discarded**, which is how a
+    // binding-overlap warning went unnoticed on every shader in the tree for as
+    // long as it existed. A compiler that has something to say about code that
+    // compiled is saying the more interesting half of what it knows.
+    let diagnostics = format!("{}{}", stdout.trim(), stderr.trim());
+
+    if !diagnostics.is_empty() {
+        warn!(
+            source = %source.display(),
+            "{diagnostics}"
         );
     }
 

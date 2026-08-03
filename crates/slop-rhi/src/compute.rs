@@ -219,53 +219,14 @@ impl Compute<'_> {
     }
 }
 
-/// How many workgroups cover `extent` items at `group` items per group.
-///
-/// Integer ceiling division. Written out because the alternative spelling
-/// — `(extent + group - 1) / group` — overflows for an `extent` near `u32::MAX`,
-/// and because getting it wrong by rounding *down* leaves the last strip of an
-/// image unwritten, which looks like a cropped result rather than a maths error.
-///
-/// # Panics
-///
-/// If `group` is zero, which is a shader declaring a zero-sized workgroup and
-/// cannot be recovered from.
-#[must_use]
-pub fn workgroups(extent: u32, group: u32) -> u32 {
-    assert!(group > 0, "a workgroup size of zero covers nothing");
-
-    extent / group + u32::from(!extent.is_multiple_of(group))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn an_exact_multiple_needs_no_extra_group() {
-        assert_eq!(workgroups(64, 8), 8);
-        assert_eq!(workgroups(8, 8), 1);
-    }
-
-    /// The case rounding down gets wrong. A 1920-wide image at 16 per group is
-    /// exact; 1921 is not, and the last pixel is what a floor would drop.
-    #[test]
-    fn a_remainder_gets_its_own_group() {
-        assert_eq!(workgroups(65, 8), 9);
-        assert_eq!(workgroups(1, 8), 1);
-        assert_eq!(workgroups(1921, 16), 121);
-    }
-
-    #[test]
-    fn nothing_needs_no_groups() {
-        assert_eq!(workgroups(0, 8), 0);
-    }
-
-    /// The overflow the naive spelling has. `(u32::MAX + 8 - 1)` wraps, and the
-    /// result is 0 — dispatching nothing for the largest possible extent.
-    #[test]
-    fn an_extent_near_the_maximum_does_not_overflow() {
-        assert_eq!(workgroups(u32::MAX, 1), u32::MAX);
-        assert_eq!(workgroups(u32::MAX, 8), 536_870_912);
-    }
-}
+// **There is deliberately no `workgroups(extent, group)` helper here.**
+//
+// There was, briefly, and it was the wrong place for it: a caller reaching for
+// it has to supply the group size, which means typing `[numthreads(..)]` a
+// second time in Rust. The two disagreeing dispatches too few groups and leaves
+// the tail of the work undone — a cropped image, not a crash.
+//
+// `slop_asset::Reflection::workgroups` divides by the size the *shader* declared,
+// read out of the cooked artifact, so the disagreement is unrepresentable. It
+// cannot live here because `slop-rhi` does not depend on `slop-asset` and should
+// not: the RHI takes bytes and knows nothing about where they came from.

@@ -30,7 +30,67 @@ pub(crate) fn parse(json: &str) -> Result<Reflection> {
     Ok(Reflection {
         push_constant_bytes: push_constant_bytes(&root)?,
         vertex_inputs: vertex_inputs(&root)?,
+        thread_group: thread_group(&root)?,
     })
+}
+
+/// The compute entry point's `[numthreads(x, y, z)]`, or `None` for a shader
+/// with no compute stage.
+///
+/// Carried into the cooked artifact so a dispatch divides by the shader's own
+/// numbers rather than by a constant restated in Rust. The two disagreeing
+/// dispatches too few groups, which leaves the tail of the work undone and looks
+/// like a cropped result rather than a mistake.
+fn thread_group(root: &Value) -> Result<Option<[u32; 3]>> {
+    let Some(entry_points) = root.get("entryPoints").and_then(Value::as_array) else {
+        return Ok(None);
+    };
+
+    let compute: Vec<&Value> = entry_points
+        .iter()
+        .filter(|entry| {
+            entry
+                .get("stage")
+                .and_then(Value::as_str)
+                .is_some_and(|stage| stage == "compute")
+        })
+        .collect();
+
+    let entry = match compute.as_slice() {
+        [] => return Ok(None),
+        [only] => only,
+        // The same restriction the vertex side has, and for the same reason: the
+        // cooked artifact carries one group size, so two would silently pick one.
+        several => bail!(
+            "{} compute entry points in one file; only one is supported, and the \
+             cooked reflection carries a single thread group size",
+            several.len()
+        ),
+    };
+
+    let Some(size) = entry.get("threadGroupSize").and_then(Value::as_array) else {
+        bail!("a compute entry point with no threadGroupSize");
+    };
+
+    let mut group = [0_u32; 3];
+
+    for (axis, slot) in group.iter_mut().enumerate() {
+        let value = size
+            .get(axis)
+            .and_then(Value::as_u64)
+            .with_context(|| format!("threadGroupSize is missing axis {axis}"))?;
+
+        // Zero is how the cooked format spells "no compute stage", so a shader
+        // genuinely declaring it would read back as absent. Slang rejects it
+        // anyway; refusing here keeps the format's marker unambiguous.
+        if value == 0 {
+            bail!("a thread group size of zero covers nothing");
+        }
+
+        *slot = u32::try_from(value).context("a thread group axis above 4 billion")?;
+    }
+
+    Ok(Some(group))
 }
 
 /// The size of the push constant block, or zero if the shader has none.
@@ -325,11 +385,51 @@ mod tests {
 
     #[test]
     fn a_shader_with_no_vertex_stage_reflects_nothing() {
-        let json = r#"{"entryPoints": [{"name": "main", "stage": "compute", "parameters": []}]}"#;
+        let json = r#"{"entryPoints": [
+            {"name": "main", "stage": "compute", "parameters": [],
+             "threadGroupSize": [64, 1, 1]}
+        ]}"#;
         let reflection = parse(json).expect("valid");
 
         assert!(reflection.vertex_inputs.is_empty());
         assert_eq!(reflection.push_constant_bytes, 0);
+        assert_eq!(reflection.thread_group, Some([64, 1, 1]));
+    }
+
+    /// A compute entry point without a group size is refused rather than
+    /// reported as absent.
+    ///
+    /// Slang always emits `threadGroupSize` for a compute stage, so its absence
+    /// means the JSON is not what this parser thinks it is. Returning `None`
+    /// would push the failure to whichever dispatch later unwrapped it, a long
+    /// way from the cause.
+    #[test]
+    fn a_compute_entry_point_without_a_group_size_is_an_error() {
+        let json = r#"{"entryPoints": [{"name": "main", "stage": "compute", "parameters": []}]}"#;
+
+        assert!(parse(json).is_err());
+    }
+
+    /// Two compute entry points cannot share one cooked group size.
+    #[test]
+    fn two_compute_entry_points_in_one_file_are_refused() {
+        let json = r#"{"entryPoints": [
+            {"name": "a", "stage": "compute", "parameters": [], "threadGroupSize": [8, 8, 1]},
+            {"name": "b", "stage": "compute", "parameters": [], "threadGroupSize": [64, 1, 1]}
+        ]}"#;
+
+        assert!(parse(json).is_err());
+    }
+
+    /// A graphics shader reports no group at all, rather than a group of one.
+    #[test]
+    fn a_graphics_shader_has_no_thread_group() {
+        let json = r#"{"entryPoints": [
+            {"name": "vertexMain", "stage": "vertex", "parameters": []},
+            {"name": "fragmentMain", "stage": "fragment", "parameters": []}
+        ]}"#;
+
+        assert_eq!(parse(json).expect("valid").thread_group, None);
     }
 
     #[test]

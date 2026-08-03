@@ -4,8 +4,12 @@
 // Writes a known pattern into a storage image so a test can read it back and
 // check every texel. Not a rendering technique — `docs/PLAN.md` §9.5 E1b needs
 // something that dispatches, reaches the bindless heap from a compute stage, and
-// produces a result the CPU can verify. The cluster build at E4 is the first
-// shader here that does real work.
+// produces a result the CPU can verify.
+//
+// Lives in `shaders/tests/` rather than `shaders/passes/`: this is a fixture,
+// and a fixture sitting among the real passes reads as one. It is cooked the
+// same way — the cooker mirrors the directory into the logical path — so the
+// only difference is that the tree says what it is.
 
 #include "lib/bindless.slang"
 

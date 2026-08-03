@@ -231,9 +231,12 @@ impl Image {
 /// rejection that was going to happen anyway. It is the only thing that
 /// rejects it.
 ///
-/// The query is a driver-side table lookup with no device round trip, so doing
-/// it per image is not worth caching. That would change if image creation ever
-/// moved into a frame; it is startup and resize work today.
+/// Queried per image rather than cached. `vkGetPhysicalDeviceFormatProperties`
+/// is widely understood to be a host-side lookup, but that is **not measured
+/// here** and this comment does not claim it is. What makes it a safe default is
+/// where image creation happens: at startup and on resize, never inside a frame.
+/// If that changes — a render graph allocating transients per frame is the
+/// obvious way — this wants measuring before it wants caching.
 fn check_format_support(
     device: &Arc<crate::Device>,
     format: Format,
