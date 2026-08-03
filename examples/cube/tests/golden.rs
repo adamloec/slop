@@ -31,8 +31,7 @@ use slop_editor::{Overlay, egui};
 use slop_render::Target;
 use slop_rhi::{
     Allocator, Buffer, BufferConfig, CommandPool, Device, DeviceSelection, Image, ImageConfig,
-    ImageState, Instance, InstanceConfig, MemoryLocation, RhiError, ShaderModule,
-    TimelineSemaphore, vk,
+    ImageState, Instance, InstanceConfig, MemoryLocation, RhiError, ShaderModule, vk,
 };
 use slop_verify::{Golden, Mode, Rgba8, Tolerance};
 
@@ -446,7 +445,8 @@ impl Headless {
         command.make_visible_to_host(self.readback.handle());
         command.end().expect("end");
 
-        submit_and_wait(&self.device, command.handle());
+        slop_rhi::submit_recorded_and_wait(&self.device, &command)
+            .expect("the capture submission must complete");
 
         let bytes = self
             .readback
@@ -468,36 +468,6 @@ impl Drop for Headless {
     }
 }
 
-/// Submit and block. Tests only — a frame loop waits on a *previous* frame's
-/// value so the CPU can run ahead.
-fn submit_and_wait(device: &Arc<Device>, command: vk::CommandBuffer) {
-    let timeline = TimelineSemaphore::new(device, 0).expect("semaphore");
-
-    let commands = [vk::CommandBufferSubmitInfo::default().command_buffer(command)];
-    let signals = [vk::SemaphoreSubmitInfo::default()
-        .semaphore(timeline.handle())
-        .value(1)
-        .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)];
-    let submits = [vk::SubmitInfo2::default()
-        .command_buffer_infos(&commands)
-        .signal_semaphore_infos(&signals)];
-
-    // SAFETY: the buffer is recorded and not pending, the timeline belongs to
-    // this device, and every borrowed array outlives the call.
-    unsafe {
-        device
-            .raw()
-            .queue_submit2(device.queues().graphics, &submits, vk::Fence::null())
-    }
-    .expect("submission must succeed");
-
-    assert!(
-        timeline
-            .wait(1, std::time::Duration::from_secs(5))
-            .expect("waiting must not fail"),
-        "the GPU did not finish within five seconds"
-    );
-}
 
 /// The approved reference, committed to the repository.
 fn reference_path() -> PathBuf {

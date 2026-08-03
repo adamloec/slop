@@ -1,11 +1,8 @@
-| `slop-reflect` | [slop-reflect/](slop-reflect/) | Type model, registry, derive, value and text format landed |
-| `slop-ecs` | [slop-ecs/](slop-ecs/) | Data model, scheduler, resources and world serialization landed |
-| `slop-asset` | [slop-asset/](slop-asset/) | Cook cache and VFS landed; glTF and streaming outstanding |
 # Slop Engine — Documentation
 
-**Last updated:** 2026-08-01
+**Last updated:** 2026-08-03
 
-## The four documents
+## The documents
 
 | Document | Answers | Authoritative for |
 |---|---|---|
@@ -13,8 +10,14 @@
 | [PLAN.md](PLAN.md) | **When** | Milestones, task breakdown, environment, invariants |
 | [CONVENTIONS.md](CONVENTIONS.md) | **How** code is written | Layout, naming, errors, `unsafe`, testing, logging |
 | [architecture.md](architecture.md) | **How the pieces fit** | Cross-crate diagrams — layering, frame flow, data movement |
+| [../CONSIDERATIONS.md](../CONSIDERATIONS.md) | **What we might change** | Ideas not committed to, and debt found by review |
 
 Read `DESIGN.md` first and in full before writing any code.
+
+`CONSIDERATIONS.md` sits at the repository root rather than here because it is
+not authoritative for anything — it is the holding pen for technology worth
+revisiting and for problems found in code that already exists. Nothing in it is
+a decision until it moves into `DESIGN.md` or `PLAN.md`.
 
 ## Per-crate documentation
 
@@ -22,19 +25,28 @@ One directory per crate, named exactly as the crate is.
 
 | Crate | Docs | Status |
 |---|---|---|
-| `slop-core` | [slop-core/](slop-core/) | Handles, storage, arena, time, determinism primitives landed |
 | `slop-math` | [slop-math/](slop-math/) | Transforms, projections, portable scalars landed |
+| `slop-core` | [slop-core/](slop-core/) | Handles, storage, arena, time, jobs, determinism primitives landed |
 | `slop-reflect` | [slop-reflect/](slop-reflect/) | Type model, registry, derive, value and text format landed |
 | `slop-ecs` | [slop-ecs/](slop-ecs/) | Data model, scheduler, resources and world serialization landed |
-| `slop-asset` | [slop-asset/](slop-asset/) | Cook cache and VFS landed; glTF and streaming outstanding |
+| `slop-asset` | [slop-asset/](slop-asset/) | Cook cache, VFS, the cooked formats and hot reload landed; async streaming outstanding |
+| `slop-cook` | [slop-cook/](slop-cook/) | glTF, PNG and Slang importers landed; never linked by a game |
 | `slop-rhi` | [slop-rhi/](slop-rhi/) | Vulkan backend through the bindless heap landed |
-| `slop-app` | [slop-app/](slop-app/) | Window and surface only — the frame loop is M3 |
+| `slop-render` | [slop-render/](slop-render/) | Frame loop and `MeshRenderer` landed; the render graph is M3 |
+| `slop-editor` | [slop-editor/](slop-editor/) | Debug overlay, frame timing and the entity inspector landed; §10.1's editor is M6 |
+| `slop-app` | [slop-app/](slop-app/) | Window, surface, device bring-up, timing and logging landed |
 | `slop-verify` | [slop-verify/](slop-verify/) | Golden-image harness landed |
-| `slop-cli` | — | The cook step; documented in `PLAN.md` §6.1 as provisional |
+| `slop-cli` | — | A thin front end over `slop-cook`; its behaviour is documented there |
 | `slop-reflect-derive` | — | Covered by [slop-reflect/](slop-reflect/); a proc macro must be its own crate |
 
 Crates from `DESIGN.md` §4 that do not exist yet get a directory when they do,
 not before.
+
+**A crate document is not optional once the crate exists.** `slop-cook` and
+`slop-editor` were created during M2 and went four commits without one, which is
+how [architecture.md](architecture.md)'s layering diagram came to describe a
+dependency graph that no longer existed. The two crates without a directory are
+the two deliberate exceptions above, each with a stated reason.
 
 ## Conventions for these documents
 

@@ -631,24 +631,34 @@ pub fn submit_and_wait(
     record(&command);
     command.end()?;
 
+    submit_recorded_and_wait(device, &command)
+}
+
+/// Submit an already-recorded command buffer and wait for it to finish.
+///
+/// The same blocking one-off as [`submit_and_wait`], for callers that own their
+/// command pool rather than wanting one allocated per submission — a test that
+/// resets and reuses one pool across captured frames, most typically.
+///
+/// Prefer [`submit_and_wait`] unless the pool is genuinely being reused: it
+/// closes over recording, so the buffer cannot be submitted un-ended.
+///
+/// # Errors
+///
+/// [`RhiError`] if the timeline cannot be created, the submission is rejected,
+/// or the work does not complete within ten seconds.
+pub fn submit_recorded_and_wait(
+    device: &Arc<Device>,
+    command: &CommandBuffer,
+) -> Result<(), RhiError> {
     let timeline = TimelineSemaphore::new(device, 0)?;
 
-    let commands = [vk::CommandBufferSubmitInfo::default().command_buffer(command.handle())];
-    let signals = [vk::SemaphoreSubmitInfo::default()
-        .semaphore(timeline.handle())
-        .value(1)
-        .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)];
-    let submits = [vk::SubmitInfo2::default()
-        .command_buffer_infos(&commands)
-        .signal_semaphore_infos(&signals)];
-
-    // SAFETY: the buffer is recorded and not pending, the timeline belongs to
-    // this device, and every borrowed array outlives the call.
-    unsafe {
-        device
-            .raw()
-            .queue_submit2(device.queues().graphics, &submits, vk::Fence::null())
-    }?;
+    device.submit_graphics(&Submission {
+        wait: &[],
+        signal: &[],
+        signal_timeline: &[(timeline.handle(), 1)],
+        command,
+    })?;
 
     if !timeline.wait(1, ONE_SHOT_TIMEOUT)? {
         return Err(RhiError::Timeout {

@@ -1,6 +1,6 @@
 # Architecture
 
-**Last updated:** 2026-08-02
+**Last updated:** 2026-08-03
 
 Cross-crate structure and data flow. Decisions and their reasoning live in
 [DESIGN.md](DESIGN.md); this document shows how the pieces relate.
@@ -13,13 +13,111 @@ Crates depend only downward. Cargo enforces this — a cycle is a build error, n
 a review comment — which is why the engine's layering lives in the crate graph
 rather than in directory names (`CONVENTIONS.md` §2).
 
-Solid arrows are dependencies that exist or are planned. Dashed boxes are crates
-from `DESIGN.md` §4 that do not exist yet.
+### 1.1 What exists today
+
+Read off the manifests, not from intent. Solid arrows are `[dependencies]`,
+dashed arrows are `[dev-dependencies]`.
+
+**Edges into `slop-core` are omitted for legibility.** Every crate depends on it
+except `slop-math`, `slop-verify` and `slop-reflect-derive`, which are leaves.
 
 ```mermaid
 flowchart TD
+    ex["examples/ — cube, model, triangle, window"]
     cli["slop-cli"]
+    cook["slop-cook"]
     editor["slop-editor"]
+    app["slop-app"]
+    render["slop-render"]
+    rhi["slop-rhi"]
+    ecs["slop-ecs"]
+    asset["slop-asset"]
+    reflect["slop-reflect"]
+    derive["slop-reflect-derive"]
+    math["slop-math"]
+    verify["slop-verify"]
+
+    ex --> app
+    ex --> editor
+    ex --> render
+    ex --> rhi
+    ex --> asset
+    ex --> ecs
+    ex --> reflect
+    ex --> math
+
+    cli --> cook
+    cook --> asset
+
+    editor --> render
+    editor --> rhi
+    editor --> asset
+    editor --> ecs
+    editor --> reflect
+
+    app --> rhi
+    app --> math
+
+    render --> rhi
+    render --> asset
+    render --> math
+
+    ecs --> reflect
+    reflect --> derive
+
+    ex -.-> verify
+    rhi -.-> verify
+    rhi -.-> asset
+```
+
+Four properties of this graph are load-bearing, and each is enforced by Cargo
+rather than by review:
+
+- **`slop-cli` depends on `slop-cook`, not on `slop-app`.** The cooker is a
+  library and the CLI is one front end over it; `DESIGN.md` §2.12's editor is the
+  other. Nothing in the cook path links a renderer or a window.
+- **Nothing but `slop-cli` depends on `slop-cook`.** That is what makes §2.8's
+  "a shipping build never parses a glTF" a property of the dependency graph
+  rather than a habit — `gltf`, `png`, `intel_tex_2` and `serde_json` cannot
+  reach a game because no edge exists to carry them.
+- **`slop-editor` does not depend on `slop-app`.** §2.12 says the editor embeds
+  the application layer exactly as a game does; today it sits *beside* it, and an
+  example wires the two together. Neither depends on the other, which is what
+  keeps that claim available.
+- **`slop-app` depends on neither `slop-render` nor `slop-ecs`.** Device
+  bring-up, windowing and configuration are genuinely independent of what is
+  drawn or simulated.
+
+One absent edge is worth stating, because the layering in `DESIGN.md` §4 implies
+it: **`slop-core` does not depend on `slop-math`.** §4 lists math first because
+it is conceptually the lowest layer, but the two are siblings and neither
+includes the other.
+
+The two dashed edges out of `slop-rhi` are both test-only and both deliberate.
+`slop-asset` is there because the golden and shader tests load cooked SPIR-V —
+**the RHI itself takes bytes and knows nothing about where assets live**, which
+is what keeps the headless path free of a file system. `slop-verify` is the
+golden-image harness (`DESIGN.md` §5). Dev-dependencies run upward against the
+layering without breaking it: nothing they contain reaches a shipped game, and
+neither depends on the crates that depend on them.
+
+`slop-render` still has no direct golden coverage — everything it does needs a
+surface, so the coverage sits in `examples/cube` and `examples/model` instead
+(`docs/slop-render/README.md` §6).
+
+**A crate existing is not a crate being finished.** `slop-ecs` and `slop-reflect`
+are complete for M1. `slop-asset` and `slop-cook` carry M2 in full — cook cache,
+VFS, glTF and PNG import, BC7 with mip chains, materials, tangents, the registry
+and hot reload — and still want async streaming. `slop-render` holds the frame
+loop and `MeshRenderer`; the render graph and the passes are M3. What each crate
+lacks is listed in its own document rather than implied by this diagram.
+
+### 1.2 Where the unbuilt crates attach
+
+From `DESIGN.md` §4. None of these exist; the diagram is the plan, not the tree.
+
+```mermaid
+flowchart TD
     app["slop-app"]
     host["slop-host"]
     abi["slop-abi"]
@@ -27,68 +125,25 @@ flowchart TD
     physics["slop-physics"]
     scene["slop-scene"]
     render["slop-render"]
-    rhi["slop-rhi"]
-    asset["slop-asset"]
     ecs["slop-ecs"]
-    reflect["slop-reflect"]
-    core["slop-core"]
-    math["slop-math"]
-    verify["slop-verify"]
-    derive["slop-reflect-derive"]
 
-    cli --> app
-    editor --> app
-    app --> host
-    app --> scene
-    app --> physics
-    app --> audio
-    host --> abi
-    host --> ecs
-    abi --> core
-    audio --> core
-    physics --> scene
-    scene --> render
-    scene --> ecs
-    render --> rhi
-    render --> asset
-    rhi --> core
-    asset --> reflect
-    asset --> core
-    ecs --> reflect
-    reflect --> core
-    core --> math
-
-    rhi -.-> verify
-    render -.-> verify
-    reflect -.-> derive
-
-    classDef planned stroke-dasharray: 5 5
-    class editor,host,abi,audio,physics,scene planned
+    app -.-> host
+    app -.-> scene
+    app -.-> physics
+    app -.-> audio
+    host -.-> abi
+    host -.-> ecs
+    physics -.-> scene
+    scene -.-> render
+    scene -.-> ecs
 ```
 
-`slop-math`, `slop-core`, `slop-reflect`, `slop-reflect-derive`, `slop-ecs`,
-`slop-asset`, `slop-rhi`, `slop-render`, `slop-app`, `slop-cli` and `slop-verify`
-exist today. The rest land at the milestones in `DESIGN.md` §6.
-
-`slop-ecs` and `slop-reflect` are drawn solid as of M1 and are finished for that
-milestone. `slop-asset` is solid as of M2 and is not — it has the cook cache, the
-VFS, glTF and PNG import, BC7 compression, the asset registry and hot reload, and
-still wants mipmaps, materials and streaming. What each crate still lacks is
-listed in its own document rather than implied by the diagram; a crate existing
-is not a crate being finished.
-
-**`slop-render` exists as of M2 and holds one thing: the frame loop.** It arrived
-before the rest of M2 rather than at M3 because that loop existed twice, copied
-between `examples/cube` and `examples/triangle`, and everything M2 still owes —
-the debug UI, materials, Sponza — would have been the third copy. The render
-graph and the passes follow at M3. `PLAN.md` §9 has the ordering.
-
-The dashed arrows into `slop-verify` are **dev-dependencies**, which is why they
-run upward against the layering without breaking it: nothing it contains reaches
-a shipped game, and it depends on none of the crates that depend on it. It is
-the golden-image harness (`DESIGN.md` §5). `slop-render` picks it up once it has
-something to compare — its frame loop needs a window, so today the coverage sits
-in the examples instead (`docs/slop-render/README.md` §6).
+`slop-scene` is the runtime spatial structure — hierarchy, transform
+propagation, culling — and sits between the ECS and the renderer. Whether the
+gameplay layer above it is WASM or something else is an open question rather
+than a settled one; `CONSIDERATIONS.md` records the C# proposal, which `DESIGN.md`
+§2.3 does not yet reflect and which wants deciding before M4 builds the WASM
+gameplay ABI.
 
 ---
 

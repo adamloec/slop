@@ -14,11 +14,9 @@
 #![allow(dead_code, reason = "each test binary uses a different subset")]
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use slop_rhi::{
     Allocator, CommandBuffer, Device, DeviceSelection, Instance, InstanceConfig, RhiError,
-    TimelineSemaphore, vk,
 };
 
 /// A headless device, or `None` when the machine genuinely has no Vulkan loader.
@@ -64,41 +62,16 @@ pub(crate) fn device_and_allocator() -> Option<(Arc<Device>, Arc<Allocator>)> {
 
 /// Submit one recorded command buffer and block until the GPU finishes it.
 ///
-/// Only correct in tests. A frame loop waits on the timeline value for a
-/// *previous* frame so the CPU can run ahead; waiting on the submission just
-/// made discards the pipelining entirely.
+/// Thin wrapper over [`slop_rhi::submit_recorded_and_wait`] that panics instead
+/// of returning, because a test cannot report anything meaningful past a failed
+/// submission. The blocking itself is only correct here: a frame loop waits on
+/// the timeline value for a *previous* frame so the CPU can run ahead, and
+/// waiting on the submission just made discards the pipelining entirely.
 ///
 /// # Panics
 ///
-/// Panics if submission fails or the GPU does not finish within five seconds,
-/// since either means the test cannot report anything meaningful.
+/// Panics if submission fails or the GPU does not finish in time.
 pub(crate) fn submit_and_wait(device: &Arc<Device>, command: &CommandBuffer) {
-    let timeline = TimelineSemaphore::new(device, 0).expect("semaphore creation must succeed");
-
-    let commands = [vk::CommandBufferSubmitInfo::default().command_buffer(command.handle())];
-    let signals = [vk::SemaphoreSubmitInfo::default()
-        .semaphore(timeline.handle())
-        .value(1)
-        .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)];
-
-    let submits = [vk::SubmitInfo2::default()
-        .command_buffer_infos(&commands)
-        .signal_semaphore_infos(&signals)];
-
-    // SAFETY: the buffer is recorded and not pending, the timeline belongs to
-    // this device, and every borrowed array outlives the call. `synchronization2`
-    // is in the required feature tier, so `queue_submit2` is available.
-    unsafe {
-        device
-            .raw()
-            .queue_submit2(device.queues().graphics, &submits, vk::Fence::null())
-    }
-    .expect("submission must succeed");
-
-    assert!(
-        timeline
-            .wait(1, Duration::from_secs(5))
-            .expect("waiting must not fail"),
-        "the GPU did not finish within five seconds"
-    );
+    slop_rhi::submit_recorded_and_wait(device, command)
+        .expect("the submission must complete within the one-shot timeout");
 }

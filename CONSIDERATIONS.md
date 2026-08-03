@@ -71,6 +71,12 @@ the fast path is out of preview.
 Read of the tree at `e9fe35f`, at the M2/M3 boundary. Ordered by what gets more
 expensive to fix the longer it waits, not by severity.
 
+**Re-validated at `a6bdf18`** — code identical, every item checked against the
+source rather than re-derived. All eight held. Three were understated, one has a
+cheaper fix than was proposed, and one had already gotten worse. Those amendments
+are folded into the items themselves rather than appended as a second review,
+because two reviews of the same tree is how a review stops being read.
+
 **Calibration first, because it changes how the rest should be read.** The Rust
 is strong. `slop-ecs/src/column.rs` is disciplined type-erased storage — numbered
 invariants on the type, every `unsafe` block justified against one of them, ZSTs
@@ -80,6 +86,15 @@ an unguaranteed `Vec` implementation detail, is a higher standard than most
 shipped engines hold. The `slop-cook` / `slop-asset` split genuinely makes "no
 glTF parser in a shipping build" a property of the dependency graph. The crate
 layering is acyclic and the layers are the right ones.
+
+**And one thing worth stating as a result rather than an absence: there is no
+ambient mutable state anywhere in the tree.** Zero `static mut`, zero `OnceLock`,
+zero `LazyLock`, zero `thread_local!`. Every atomic in the repository is inside a
+test. That did not happen by accident — `clippy.toml` disallows `rand::thread_rng`
+*before* `rand` is a dependency, closing the most common way global state arrives.
+Thirteen lint escapes across 45k lines, none of them blanket. The package
+splitting is fundamentally correct; item 5 is the one boundary in the wrong place,
+and it is a naming and feature-gating problem rather than a layering one.
 
 None of what follows is sloppiness. It is one recurring pattern: **a decision
 argued carefully once, then not enforced at the boundary where it would have
@@ -110,9 +125,25 @@ pub fn new(..., color_format: vk::Format, depth_format: vk::Format)
 pub fn extent(&self) -> vk::Extent2D
 ```
 
-45 `vk::` references in `slop-render`, 21 in `slop-editor`, 37 across `examples/`.
+113 `vk::` references above `slop-rhi`: 46 in `slop-render`, 35 in
+`examples/cube`, 23 in `slop-editor`, 6 in `examples/model`, 2 in `slop-app`,
+1 in `examples/triangle`.
 
-**Why this is the top item.** `DESIGN.md` §2.2 bought the owned RHI — at an
+**They are four type names, not an API surface.** Counted by name:
+
+```
+vk::Format            36
+vk::BufferUsageFlags  21
+vk::Extent2D          20
+vk::ImageUsageFlags   13   → 90 of the 113
+```
+
+The remaining 23 are raw handles (`vk::Image`, `vk::ImageView`) and
+`vk::ImageLayout`. This is the single most important correction to this review:
+the first pass framed the fix as a sweep across every call site, which reads as a
+project. It is four newtypes and a mechanical rename, which is an afternoon.
+
+**Why this is the highest-leverage item.** `DESIGN.md` §2.2 bought the owned RHI — at an
 explicitly accepted cost of 8–15k lines before a first triangle — on the promise
 that *"a DX12 backend then slots in cleanly."* It cannot. Every consumer above
 `slop-rhi`, including all four examples, names Vulkan types in its own public
@@ -130,7 +161,9 @@ image/view handles, which are the ones that escaped. Closing it is mechanical
 while there is one renderer and four examples. After M3's render graph, shadow
 atlas, and post stack it is every pass.
 
-**Verdict:** fix before M3 starts. Highest leverage item in the tree.
+**Verdict:** fix before M3 starts. Highest leverage item in the tree — the
+`resize` hazard above it in the order is higher *risk*, not higher leverage, and
+is half an hour's work rather than a competing priority.
 
 ## 2. `MeshRenderer` is a god object, and it is the shape M3 has to demolish
 
@@ -146,7 +179,8 @@ reads files. Two locked decisions say it should not — §2.9's snapshot boundar
 render graph owning passes and barriers. Today `MeshRenderer` *is* the scene
 database, the loader and the pass.
 
-Three concrete defects fall out of that shape rather than being independent bugs:
+Five concrete defects fall out of that shape rather than being independent bugs.
+The first three were found on the first read; the last two on re-validation:
 
 - **Two-phase init through `Option`.** `materials: Option<Buffer>`,
   `depth: Option<Image>`, and `record()` at `mesh.rs:462` silently returns when
@@ -165,10 +199,33 @@ Three concrete defects fall out of that shape rather than being independent bugs
   `index_of` hits a bare `continue` — no `warn!`, nothing. Missing *textures* at
   least log (`mesh.rs:357`). For a cooked artifact a dangling mesh reference is a
   cooker bug and should be loud.
+- **`resize()` destroys a possibly-in-flight image.** `mesh.rs:437` assigns
+  `self.depth = Some(Image::new(..))`, which drops the old `Image` and calls
+  `vkDestroyImage`. That is safe **only** because `FrameRenderer::prepare` →
+  `Swapchain::recreate` (`swapchain.rs:160`) calls `wait_idle` immediately
+  before. Nothing in `resize`'s documentation states that dependency — it says
+  only "must be called before the first frame and after every resize." Correct
+  today by coincidence of call order, with no diagnostic if that order changes.
+  **Fix this one first**, because it is the only item here that is currently
+  right for a reason nothing records.
+- **A full device stall per resource at load.** `upload_buffer` (`mesh.rs:638`)
+  and `upload_texture` (`mesh.rs:678`) each call `slop_rhi::submit_and_wait` —
+  a queue submit and a `wait_idle` per vertex buffer, per index buffer and per
+  texture, each with its own staging allocation created and freed. Two stalls
+  per mesh plus one per texture, where one batched transfer would do. Not a
+  correctness bug; it is the shape that becomes a loading screen, and it is
+  invisible because nothing measures load time.
 
-**Verdict:** the three defects are worth fixing on their own terms now. The
+**Verdict:** the five defects are worth fixing on their own terms now. The
 decomposition is M3 work, but note that the material system landing *into* this
 type rather than beside it is how it gets worse.
+
+One smaller tell, not a defect: `resolve_textures` returns
+`impl Fn(MaterialGpu) -> MaterialGpu + use<>` (`mesh.rs:336`) to dodge a borrow
+conflict. It works and it is documented. The conflict exists only because the
+material table is a local `Vec` threaded through `&mut` while `self` is also
+borrowed mutably — a table that owned itself needs no closure. The god-object
+shape producing contortions in code that is otherwise clean.
 
 ## 3. `examples/cube/src/scene.rs` is a second renderer, not an example
 
@@ -177,15 +234,39 @@ type rather than beside it is how it gets worse.
 own pipeline creation, bindless heap ownership, hot reload, resize and draw
 recording.
 
-Both paths are golden-tested, so both are load-bearing and will drift
-independently until M3 absorbs one. `PLAN.md` §6.1 describes this as
-"example-grade on purpose, none of it moves" — that is accurate about intent and
-does not address the consequence, which is a parallel implementation of the crate
-that was extracted specifically to stop parallel implementations.
+Both paths are golden-tested, so both are load-bearing. `PLAN.md` §6.1 describes
+this as "example-grade on purpose, none of it moves" — that is accurate about
+intent and does not address the consequence, which is a parallel implementation
+of the crate that was extracted specifically to stop parallel implementations.
+
+**They have already drifted, and the drift is a barrier.** Diffing the two
+`upload_buffer` bodies:
+
+```rust
+// examples/cube/src/scene.rs:620 — emits this
+command.barrier_buffer(staging.handle(),
+    BufferState::HOST_WRITE, BufferState::TRANSFER_SRC);
+command.copy_buffer(..);
+
+// crates/slop-render/src/mesh.rs:608 — does not
+command.copy_buffer(..);
+```
+
+`mesh.rs` is almost certainly still correct: Vulkan's queue-submit host-write
+guarantee covers coherent memory written before the submit. **The problem is
+that nothing in the tree says which one is right.** Both pass their golden
+tests, so the suite cannot tell "belt and braces" from "missing barrier." That is
+the failure mode of a duplicated implementation in its exact form — the copies
+disagree about a correctness question and the tests are silent on it.
+
+Worth one measurement alongside: `examples/cube` is **2,497 lines**, larger than
+`slop-render` (1,566) and the fifth-largest crate in the workspace. The example
+demonstrating the renderer is bigger than the renderer.
 
 **Verdict:** resolves itself when the material system lands, *provided* the
 material system absorbs it rather than becoming a third copy. Worth stating as
-an explicit exit condition on that work.
+an explicit exit condition on that work — and reconciling the staging barrier as
+part of it, recording which copy was right rather than picking one.
 
 ## 4. The application shell is duplicated four times, and the project's own rule already fired
 
@@ -219,9 +300,21 @@ Two costs:
 - **Later.** When the real editor arrives as a binary, its name is taken by a
   library that games link.
 
-**Verdict:** rename to `slop-debug` while it is cheap, leaving `slop-editor`
-free for what §2.12 says it is. Optionally gate it behind a feature so a game
-opts in.
+**The dependency half is two lines, and does not need the rename.** Only
+`inspector.rs` imports `slop-ecs` and `slop-reflect`; `overlay.rs` and `debug.rs`
+import neither, and `slop-editor/src/lib.rs:32-39` already states the internal
+layering is a strict chain. So `features = ["inspector"]` drops two crates from
+`examples/triangle`'s graph today, independent of any rename and of M6.
+
+**Verdict:** gate `inspector` behind a feature now — it is cheap and immediate.
+Rename to `slop-debug` at a natural moment, leaving `slop-editor` free for what
+§2.12 says it is. The two were one item on the first read; they are separable,
+and separating them is what makes the cheap half happen.
+
+One measurement that argues the same way: `slop-editor` is 1,582 lines against
+`slop-render`'s 1,566. The debug-UI crate outweighs the renderer. That is a fact
+about M3 not having happened yet rather than a defect, but a crate named for the
+editor being larger than the thing it draws over is worth not getting used to.
 
 ## 6. `Reflect` has no `Send + Sync` bound, but `Column` asserts both unconditionally
 
@@ -284,6 +377,8 @@ keeping "temporary" honest — cites `slop-cli/src/texture_import.rs`,
 `DESIGN.md` §2.11 cites `slop-cli/src/reflection.rs`, now
 `slop-cook/src/reflection.rs`.
 
+Counted on re-validation: **10 stale paths in `PLAN.md`, 1 in `DESIGN.md`.**
+
 A register that cannot name the file has stopped being a control.
 
 **Verdict:** the docs are an asset and the reasoning in them is the most valuable
@@ -293,13 +388,111 @@ and want checking whenever a crate boundary moves.
 
 ---
 
+*Items 9 through 12 were found on re-validation at `a6bdf18` and are numbered
+after the original eight so the earlier numbering keeps meaning what it did.*
+
+## 9. Two sibling crates disagree about what an error is
+
+`RenderError::Asset` (`slop-render/src/error.rs:64-72`) names the logical path
+and keeps the cause typed:
+
+```rust
+Asset { logical: String, #[source] source: Box<dyn Error + Send + Sync> }
+```
+
+`EditorError::NotCooked` (`slop-editor/src/lib.rs:78-83`), written the same week
+for the same failure, flattens it:
+
+```rust
+NotCooked { what: String, why: String }
+```
+
+`why` is a `VfsError` that has been through `to_string()`. That is the same
+flattening item 7 notes in `scene.rs:784` — except that one is in an example,
+where `CONVENTIONS.md` §6 does not bite, and this is in a library, where it does.
+
+Worse, that error's `Display` embeds ``Run `cargo run -p slop-cli -- cook`
+first``. A library crate is naming a binary and an invocation. It is the §5.1
+line — only the application layer knows how it was launched — crossed inside an
+error message, and it becomes wrong the moment §2.12's editor cooks assets
+itself, which is the whole reason `slop-cook` was extracted.
+
+**Verdict:** small and worth doing with item 2, since both are error-shape work.
+The general point is the one to keep: `RenderError` is the pattern, and it was
+already right when `EditorError` was written.
+
+## 10. An `unsafe` raw Vulkan submit in an example's test
+
+`examples/cube/tests/golden.rs:473-491` hand-rolls `queue_submit2` —
+`vk::SubmitInfo2`, `vk::CommandBufferSubmitInfo`, `vk::SemaphoreSubmitInfo`, a
+raw `vk::Fence::null()` and an `unsafe` block — while `examples/cube/src/
+scene.rs:657`, the same crate, calls `slop_rhi::submit_and_wait`.
+
+Two things at once. It is **the only `unsafe` outside `CONVENTIONS.md` §7's three
+sanctioned homes**, which is a rule the tree otherwise keeps perfectly. And it
+duplicates a function the crate already links — `slop-rhi/tests/support/mod.rs:75`
+is a third copy of the same helper.
+
+**Verdict:** delete it and call the RHI's. Ten minutes, and it restores §7 to
+being true rather than nearly true.
+
+## 11. `slop-cook`'s `anyhow` deviation is argued, but has no recorded expiry
+
+`slop-cook` uses `anyhow` in a library against `CONVENTIONS.md` §6, and its crate
+docs argue the case from the rule's own reason rather than claiming an exemption:
+a cook failure is diagnosed by a human, not matched by a caller. That is correct
+for today's only caller, `slop-cli`, which prints and exits.
+
+It stops being correct when `DESIGN.md` §2.12's editor embeds the cooker and has
+to tell *"shader compile error — show it in the shader panel"* from *"source
+asset missing — offer to re-fetch."* `anyhow::Error` cannot be matched on, so
+that distinction has to be reconstructed by string inspection or the error type
+has to change.
+
+**Verdict:** do not reverse it. The reasoning is sound for the current caller.
+Add a `PLAN.md` §6.1 row so the decision is re-read when the editor arrives
+rather than inherited, which is the difference between a judgement and a default.
+
+## 12. `docs/` has a README per crate for 9 of 13
+
+`docs/` mirrors the crate list with a per-crate README. Missing:
+`slop-cli`, `slop-cook`, `slop-editor`, `slop-reflect-derive` — precisely the
+four crates created most recently.
+
+The same root cause as item 8, in a different medium: crate boundaries moved and
+the documentation layout did not follow. Cheap to notice, cheap to fix, and the
+one of these findings that gets worse purely with time rather than with code.
+
+---
+
 ## Suggested order
 
-1. **The `vk::` leak (item 1).** Cheap today, structural after M3.
-2. **`MeshRenderer`'s three defects (item 2).** Small fixes; each is also a
+Revised after re-validation. The shape is unchanged; what moved is that item 1 is
+smaller than it looked, item 2 grew a defect that should go first, and item 5
+split into a cheap half and a slow half.
+
+1. **`MeshRenderer::resize`'s in-flight destroy (item 2, defect 4).** Promoted to
+   the top for one reason: it is the only finding here that is currently correct
+   by coincidence rather than by construction. Everything else is a cost; this is
+   a hazard with no diagnostic.
+2. **The `vk::` leak (item 1).** Four newtypes — `Format`, `Extent2D`,
+   `BufferUsageFlags`, `ImageUsageFlags` — cover 90 of 113 sites. Cheap today,
+   structural after M3.
+3. **`MeshRenderer`'s remaining defects (item 2).** Small fixes; each is also a
    signal about the decomposition M3 needs.
-3. **`Reflect`'s missing bound (item 6).** One line now, an audit later.
-4. **App-shell extraction and the `slop-editor` rename (items 4, 5).** An
+4. **`Reflect`'s missing bound (item 6).** One line now, an audit later. Cheaper
+   than it reads, because `Reflect` is *already* an `unsafe trait` — the safety
+   contract exists and is simply missing this clause.
+5. **The quick sweep: items 5 (feature gate only), 10, 12.** A feature gate, a
+   deleted `unsafe` block, four READMEs. An hour together, and each removes a
+   thing that only gets more expensive to notice.
+6. **App-shell extraction (item 4) and the `slop-editor` rename (item 5).** An
    afternoon each, and both cheaper the sooner they happen.
-5. **`scene.rs` (item 3)** resolves with the material system, if that work takes
-   absorbing it as an exit condition.
+7. **Error shapes (item 9)** alongside whichever of item 2 lands first, since
+   both are error-shape work in the same two crates.
+8. **`scene.rs` (item 3)** resolves with the material system, if that work takes
+   absorbing it as an exit condition — and reconciles the staging barrier rather
+   than picking a copy.
+9. **`PLAN.md` §6.1 rows (items 8, 11).** The stale paths, and `slop-cook`'s
+   `anyhow` expiry. Bookkeeping, but it is the bookkeeping that keeps the
+   register a control.
