@@ -36,10 +36,10 @@ use slop_core::diagnostics::tracing::warn;
 use slop_math::Mat4;
 use slop_rhi::{
     Allocator, Attachments, BindlessHeap, Blend, Buffer, BufferConfig, BufferState, BufferUsage,
-    ClearValue, ColorAttachment, DepthAttachment, Device, Extent2D, Format, GraphicsPipeline,
-    GraphicsPipelineConfig, Image, ImageAspect, ImageConfig, ImageState, ImageUsage, Load,
-    MemoryLocation, PipelineLayout, PipelineLayoutConfig, SampledImage, Sampler, SamplerConfig,
-    ShaderModule, ShaderStage, StorageBuffer, TextureSampler,
+    ClearValue, ColorAttachment, CommandBuffer, CommandPool, DepthAttachment, Device, Extent2D,
+    Format, GraphicsPipeline, GraphicsPipelineConfig, Image, ImageAspect, ImageConfig, ImageState,
+    ImageUsage, Load, MemoryLocation, PipelineLayout, PipelineLayoutConfig, SampledImage, Sampler,
+    SamplerConfig, ShaderModule, ShaderStage, StorageBuffer, TextureSampler,
 };
 
 use crate::{RenderError, VertexBinding};
@@ -231,10 +231,21 @@ impl MeshRenderer {
         self.meshes.len()
     }
 
-    /// Load everything a cooked model names and upload it.
+    /// Load everything a cooked model names and upload it, replacing whatever
+    /// was loaded before.
     ///
     /// Each distinct mesh, material and texture is uploaded once however many
-    /// times the model places it.
+    /// times the model places it, and all of them travel in a single transfer
+    /// rather than one submit-and-block each.
+    ///
+    /// **Replaces rather than adds.** Calling this twice leaves the second
+    /// model loaded and nothing of the first. That is worth stating because the
+    /// previous behaviour was neither: meshes accumulated while material rows
+    /// restarted at zero, so the first model's meshes ended up pointing at the
+    /// second model's material rows — or past the end of the buffer — and the
+    /// superseded heap slot leaked. Loading a second model beside a first is a
+    /// real thing to want, but it needs the material table to own itself, which
+    /// is M3's decomposition rather than this function's job.
     ///
     /// # Errors
     ///
@@ -248,6 +259,10 @@ impl MeshRenderer {
         logical: &str,
     ) -> Result<(), RenderError> {
         let model: Model = read_asset(vfs, logical)?;
+
+        self.unload(heap)?;
+
+        let mut uploads = Uploads::new(&self.device)?;
 
         // Meshes first, in first-seen order, so the index a placement stores is
         // stable and matches the order the model lists them.
@@ -264,8 +279,14 @@ impl MeshRenderer {
                     Some(row) => *row,
                     None => {
                         let material: Material = read_asset(vfs, path)?;
-                        let resolved =
-                            self.resolve_textures(allocator, heap, vfs, &material, path)?;
+                        let resolved = self.resolve_textures(
+                            allocator,
+                            heap,
+                            &mut uploads,
+                            vfs,
+                            &material,
+                            path,
+                        )?;
                         let row = self.material_row(&mut materials, &material);
 
                         materials[row as usize] = resolved(materials[row as usize]);
@@ -278,11 +299,20 @@ impl MeshRenderer {
 
             index_of.insert(name.to_owned(), self.meshes.len());
             self.meshes
-                .push(upload_mesh(&self.device, allocator, &mesh, material)?);
+                .push(upload_mesh(allocator, &mut uploads, &mesh, material)?);
         }
 
         for instance in &model.instances {
             let Some(mesh) = index_of.get(&instance.mesh) else {
+                // A cooked model naming a mesh it does not contain is a cooker
+                // bug, and dropping the instance silently is how it stays one.
+                // Loud rather than fatal, for the same reason a missing texture
+                // is: the rest of the level is still worth drawing.
+                warn!(
+                    model = logical,
+                    mesh = instance.mesh,
+                    "a placement names a mesh this model does not contain; skipping it"
+                );
                 continue;
             };
 
@@ -293,6 +323,38 @@ impl MeshRenderer {
         }
 
         self.upload_materials(allocator, heap, &materials)?;
+
+        // After every copy above is recorded, and before the first frame that
+        // reads any of it.
+        uploads.finish(&self.device)?;
+
+        Ok(())
+    }
+
+    /// Drop everything a previous [`load`](Self::load) uploaded.
+    ///
+    /// Waits for the device first: the resources being freed here are ones a
+    /// frame in flight may still be reading, and that is the same hazard
+    /// [`resize`](Self::resize) documents.
+    fn unload(&mut self, heap: &mut BindlessHeap) -> Result<(), RenderError> {
+        if self.meshes.is_empty() && self.materials.is_none() {
+            return Ok(());
+        }
+
+        self.device.wait_idle()?;
+
+        for slot in self.texture_slots.drain(..) {
+            heap.remove_sampled_image(slot);
+        }
+
+        if let Some(slot) = self.materials_slot.take() {
+            heap.remove_storage_buffer(slot);
+        }
+
+        self.meshes.clear();
+        self.placements.clear();
+        self.images.clear();
+        self.materials = None;
 
         Ok(())
     }
@@ -330,6 +392,7 @@ impl MeshRenderer {
         &mut self,
         allocator: &Arc<Allocator>,
         heap: &mut BindlessHeap,
+        uploads: &mut Uploads,
         vfs: &Vfs,
         material: &Material,
         name: &str,
@@ -359,7 +422,7 @@ impl MeshRenderer {
                 }
             };
 
-            let image = upload_texture(&self.device, allocator, &texture)?;
+            let image = upload_texture(allocator, uploads, &texture)?;
             let Some(handle) = heap.insert_sampled_image(image.view(), ImageState::SHADER_READ)
             else {
                 warn!(material = name, "the bindless heap is full");
@@ -473,9 +536,23 @@ impl MeshRenderer {
     /// this renderer's business, and a caller assembling them would be
     /// duplicating what the pipeline already declares.
     ///
-    /// Does nothing if no model is loaded or [`MeshRenderer::resize`] has not
-    /// run.
+    /// Does nothing if no model is loaded, which is a legitimate state — a
+    /// renderer that has been constructed but not given anything to draw.
+    ///
+    /// A model *with* no depth buffer is not legitimate, and is the one this
+    /// asserts on: it means [`resize`](Self::resize) was never called, whose
+    /// only symptom is otherwise a black screen with no log, no error and no
+    /// panic. That is the failure mode `docs/PLAN.md` §3.1 already records
+    /// learning once from golden tests that skipped on setup failure, and a
+    /// `debug_assert` puts the complaint where the mistake is rather than
+    /// leaving it to be diagnosed from an empty window.
     pub fn record(&self, heap: &BindlessHeap, frame: &crate::Frame<'_>, view_projection: Mat4) {
+        debug_assert!(
+            !(self.materials_slot.is_some() && self.depth.is_none()),
+            "a model is loaded but `MeshRenderer::resize` has never run, so there is \
+             no depth buffer and nothing will be drawn"
+        );
+
         let (Some(materials), Some(depth)) = (self.materials_slot, self.depth.as_ref()) else {
             return;
         };
@@ -589,24 +666,100 @@ fn read_asset<T: slop_asset::Asset>(vfs: &Vfs, logical: &str) -> Result<T, Rende
     })
 }
 
+/// Every transfer for one [`MeshRenderer::load`], recorded into one command
+/// buffer and submitted once.
+///
+/// The shape this replaces submitted and blocked *per resource*: a queue submit
+/// and a full `wait_idle` for each vertex buffer, each index buffer and each
+/// texture, with a staging allocation created and freed around every one. Sponza
+/// is 103 primitives and 25 materials, so that was several hundred round trips
+/// to the GPU to move data that could travel together.
+///
+/// Staging buffers live in `staging` rather than being freed at the end of the
+/// call that made them, because the copies reading them have not run yet. That
+/// is the whole reason the per-resource version had to block: it had nowhere to
+/// keep them.
+///
+/// Still one blocking submit at the end. `docs/PLAN.md` §6.1 records the real
+/// answer — an async transfer queue with a staging ring — and this is not it;
+/// it is the same blunt instrument used once instead of hundreds of times.
+struct Uploads {
+    command: CommandBuffer,
+    staging: Vec<Buffer>,
+    /// Declared after `command`, since the pool must outlive the buffer it
+    /// allocated.
+    _pool: CommandPool,
+}
+
+impl Uploads {
+    /// Open a batch and begin recording.
+    fn new(device: &Arc<Device>) -> Result<Self, RenderError> {
+        let pool = CommandPool::new(device, device.queue_families().graphics)?;
+        let command = pool
+            .allocate(1)?
+            .pop()
+            .expect("one command buffer was requested");
+
+        command.begin()?;
+
+        Ok(Self {
+            command,
+            staging: Vec::new(),
+            _pool: pool,
+        })
+    }
+
+    /// Copy `bytes` into a fresh host-visible buffer and keep it alive.
+    fn stage(&mut self, allocator: &Arc<Allocator>, bytes: &[u8]) -> Result<&Buffer, RenderError> {
+        let mut staging = Buffer::new(
+            allocator,
+            &BufferConfig {
+                name: "model staging",
+                size: bytes.len() as u64,
+                usage: BufferUsage::TRANSFER_SRC,
+                location: MemoryLocation::Upload,
+            },
+        )?;
+
+        staging.mapped_mut()?[..bytes.len()].copy_from_slice(bytes);
+        self.staging.push(staging);
+
+        Ok(self
+            .staging
+            .last()
+            .expect("a staging buffer was just pushed"))
+    }
+
+    /// Submit everything recorded and block until the GPU has it.
+    ///
+    /// Consumes the batch, so the staging buffers are freed after the wait and
+    /// not before it.
+    fn finish(self, device: &Arc<Device>) -> Result<(), RenderError> {
+        self.command.end()?;
+        slop_rhi::submit_recorded_and_wait(device, &self.command)?;
+
+        Ok(())
+    }
+}
+
 /// Upload one mesh's vertex and index buffers.
 fn upload_mesh(
-    device: &Arc<Device>,
     allocator: &Arc<Allocator>,
+    uploads: &mut Uploads,
     mesh: &Mesh,
     material: u32,
 ) -> Result<GpuMesh, RenderError> {
     let vertices = upload_buffer(
-        device,
         allocator,
+        uploads,
         "model vertices",
         bytemuck::cast_slice(&mesh.vertices),
         BufferUsage::VERTEX,
         BufferState::VERTEX_INPUT,
     )?;
     let indices = upload_buffer(
-        device,
         allocator,
+        uploads,
         "model indices",
         bytemuck::cast_slice(&mesh.indices),
         BufferUsage::INDEX,
@@ -621,27 +774,15 @@ fn upload_mesh(
     })
 }
 
-/// Stage bytes into a device-local buffer and wait for the copy.
+/// Record a staged copy into a device-local buffer.
 fn upload_buffer(
-    device: &Arc<Device>,
     allocator: &Arc<Allocator>,
+    uploads: &mut Uploads,
     name: &str,
     bytes: &[u8],
     usage: BufferUsage,
     state: BufferState,
 ) -> Result<Buffer, RenderError> {
-    let mut staging = Buffer::new(
-        allocator,
-        &BufferConfig {
-            name: "model staging",
-            size: bytes.len() as u64,
-            usage: BufferUsage::TRANSFER_SRC,
-            location: MemoryLocation::Upload,
-        },
-    )?;
-
-    staging.mapped_mut()?[..bytes.len()].copy_from_slice(bytes);
-
     let buffer = Buffer::new(
         allocator,
         &BufferConfig {
@@ -652,32 +793,24 @@ fn upload_buffer(
         },
     )?;
 
-    slop_rhi::submit_and_wait(device, |command| {
-        command.copy_buffer(staging.handle(), buffer.handle(), bytes.len() as u64);
-        command.barrier_buffer(buffer.handle(), BufferState::TRANSFER_DST, state);
-    })?;
+    let staging = uploads.stage(allocator, bytes)?.handle();
+
+    uploads
+        .command
+        .copy_buffer(staging, buffer.handle(), bytes.len() as u64);
+    uploads
+        .command
+        .barrier_buffer(buffer.handle(), BufferState::TRANSFER_DST, state);
 
     Ok(buffer)
 }
 
-/// Upload a cooked texture into a sampled image.
+/// Record a staged upload of a cooked texture into a sampled image.
 fn upload_texture(
-    device: &Arc<Device>,
     allocator: &Arc<Allocator>,
+    uploads: &mut Uploads,
     texture: &slop_asset::Texture,
 ) -> Result<Image, RenderError> {
-    let mut staging = Buffer::new(
-        allocator,
-        &BufferConfig {
-            name: "model texture staging",
-            size: texture.pixels.len() as u64,
-            usage: BufferUsage::TRANSFER_SRC,
-            location: MemoryLocation::Upload,
-        },
-    )?;
-
-    staging.mapped_mut()?[..texture.pixels.len()].copy_from_slice(&texture.pixels);
-
     let image = Image::new(
         allocator,
         &ImageConfig {
@@ -692,37 +825,38 @@ fn upload_texture(
         },
     )?;
 
-    slop_rhi::submit_and_wait(device, |command| {
-        // Covers every level: `transition_image` names the whole chain, which
-        // is what leaves no level behind in UNDEFINED.
-        command.transition_image(
-            image.handle(),
-            image.aspect(),
-            ImageState::UNDEFINED,
-            ImageState::TRANSFER_DST,
-        );
+    let staging = uploads.stage(allocator, &texture.pixels)?.handle();
 
-        // One copy per level, all out of the same staging buffer.
-        for (index, level) in texture.levels().enumerate() {
-            command.copy_buffer_to_image_level(
-                staging.handle(),
-                level.offset as u64,
-                image.handle(),
-                image.aspect(),
-                Extent2D {
-                    width: level.width,
-                    height: level.height,
-                },
-                u32::try_from(index).expect("a mip chain is far shorter than u32::MAX"),
-            );
-        }
-        command.transition_image(
+    // Covers every level: `transition_image` names the whole chain, which
+    // is what leaves no level behind in UNDEFINED.
+    uploads.command.transition_image(
+        image.handle(),
+        image.aspect(),
+        ImageState::UNDEFINED,
+        ImageState::TRANSFER_DST,
+    );
+
+    // One copy per level, all out of the same staging buffer.
+    for (index, level) in texture.levels().enumerate() {
+        uploads.command.copy_buffer_to_image_level(
+            staging,
+            level.offset as u64,
             image.handle(),
             image.aspect(),
-            ImageState::TRANSFER_DST,
-            ImageState::SHADER_READ,
+            Extent2D {
+                width: level.width,
+                height: level.height,
+            },
+            u32::try_from(index).expect("a mip chain is far shorter than u32::MAX"),
         );
-    })?;
+    }
+
+    uploads.command.transition_image(
+        image.handle(),
+        image.aspect(),
+        ImageState::TRANSFER_DST,
+        ImageState::SHADER_READ,
+    );
 
     Ok(image)
 }

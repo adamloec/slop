@@ -211,6 +211,65 @@ fn resizing_between_frames_replaces_the_depth_buffer_safely() {
     );
 }
 
+#[test]
+fn loading_a_second_time_replaces_rather_than_accumulates() {
+    // `load` used to be unsafe to call twice and said nothing about it. The
+    // material rows it builds are local and restart at zero, while `self.meshes`
+    // accumulated across calls holding the *previous* call's row indices — so a
+    // second model silently re-pointed the first model's meshes at the wrong
+    // material rows, or past the end of the buffer. The superseded heap slot was
+    // never removed either, so it leaked.
+    //
+    // Counting meshes is the direct assertion: the same model loaded twice must
+    // leave exactly what one load leaves.
+    let Some((device, allocator)) = headless() else {
+        return;
+    };
+
+    let Some(vfs) = example_model::assets().ok() else {
+        return;
+    };
+
+    let Some(mut renderer) = harness(&device, &allocator, "models/cube.model") else {
+        return;
+    };
+
+    let before = renderer.render(CAPTURED_FRAME);
+    let meshes = renderer.meshes.mesh_count();
+    let draws = renderer.meshes.draw_count();
+
+    assert!(meshes > 0, "the harness should have loaded something");
+
+    renderer
+        .load(&allocator, &vfs, "models/cube.model")
+        .expect("loading a second time must succeed");
+
+    assert_eq!(
+        renderer.meshes.mesh_count(),
+        meshes,
+        "meshes accumulated across loads instead of being replaced"
+    );
+    assert_eq!(
+        renderer.meshes.draw_count(),
+        draws,
+        "placements accumulated across loads instead of being replaced"
+    );
+
+    // The freed resources were ones the frame above may still have been reading,
+    // so this also covers the wait `unload` performs before dropping them.
+    assert_eq!(
+        device.instance().validation_errors(),
+        0,
+        "the validation layer reported an error while reloading"
+    );
+
+    assert_eq!(
+        before,
+        renderer.render(CAPTURED_FRAME),
+        "the same model reloaded rendered differently"
+    );
+}
+
 /// Where Sponza's cooked model lives, when it has been fetched.
 const SPONZA: &str = "models/vendor/sponza/Sponza.model";
 
@@ -409,6 +468,16 @@ impl Headless {
     /// Rebuild the renderer's depth buffer at the target's current size.
     fn resize(&mut self, allocator: &Arc<Allocator>) -> Result<(), slop_render::RenderError> {
         self.meshes.resize(allocator, self.target.extent())
+    }
+
+    /// Load a model into the renderer that already has one.
+    fn load(
+        &mut self,
+        allocator: &Arc<Allocator>,
+        vfs: &slop_asset::Vfs,
+        model: &str,
+    ) -> Result<(), slop_render::RenderError> {
+        self.meshes.load(allocator, &mut self.heap, vfs, model)
     }
 
     /// Render one frame and bring it back to the CPU.
