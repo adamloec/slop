@@ -47,7 +47,8 @@ are added to the same declaration rather than to a call order.
 | Lights as data — `Lights`, `PointLight`, `View` | Landed — see §13 | M3, E4 |
 | Per-instance transforms in a storage buffer | Landed | M3, E4 |
 | Clustered forward+ — grid, build pass, forward pass reading it | Landed — see §14 | M3, E4 |
-| Shadows, IBL, post stack | Planned | M3, E5–E7 |
+| The directional light and ambient term as data — `Environment` | Landed | M3, E5 |
+| Cascaded shadows, IBL, post stack | Planned | M3, E5–E7 |
 | The overlay drawing inside the graph | **Absent** — the last caller of `Frame::finish` | M3 |
 | `MeshRenderer` decomposition — it is a god object today | Planned — `docs/reviews/2026-08-03.md` item 2 | M3 |
 | Automated coverage of the loop itself | **Absent** — see §6 | M3 |
@@ -72,6 +73,8 @@ are added to the same declaration rather than to a call order.
 | `PointLight` | One light, as a caller describes it |
 | `Lights` | The GPU-side light buffer, one per frame in flight |
 | `View` | What every draw in a frame shares: the camera, and the cluster grid |
+| `DirectionalLight` | A light with no position — the sun |
+| `Environment` | The per-frame buffer holding the sun and the ambient term |
 | `ClusterGrid` | How the frustum is divided, and the depth-to-slice mapping |
 | `ClusterCamera` | What the build pass needs about the camera |
 | `Clusters` | The build pass and the per-cell light lists it fills |

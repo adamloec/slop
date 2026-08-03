@@ -61,6 +61,7 @@
 //! render through this crate and neither reference moved.
 
 mod cluster;
+mod environment;
 mod error;
 mod frame;
 mod graph;
@@ -71,6 +72,7 @@ mod vertex;
 mod view;
 
 pub use cluster::{ClusterCamera, ClusterGrid, Clusters, sphere_touches_box};
+pub use environment::{DirectionalLight, Environment, default_ambient};
 pub use error::RenderError;
 pub use frame::{Frame, FrameOutcome, FrameRenderer, FrameRendererConfig, Target};
 pub use graph::{BufferId, ComputePass, Graph, ImageId, Imported, ImportedBuffer, RenderPass};

@@ -35,8 +35,9 @@ use slop_ecs::{Entity, World};
 use slop_editor::{DebugUi, InspectorState};
 use slop_math::Vec3;
 use slop_render::{
-    ClusterGrid, Clusters, ComputePass, FrameRenderer, FrameRendererConfig, Graph, HdrTarget,
-    Imported, ImportedBuffer, Lights, MeshRenderer, PointLight, RenderPass, Tonemap, View,
+    ClusterGrid, Clusters, ComputePass, DirectionalLight, Environment, FrameRenderer,
+    FrameRendererConfig, Graph, HdrTarget, Imported, ImportedBuffer, Lights, MeshRenderer,
+    PointLight, RenderPass, Tonemap, View,
 };
 
 /// What the scene pass clears the HDR target to.
@@ -109,6 +110,11 @@ struct Renderer {
     lights: Lights,
     /// The cluster grid, and the compute pass that fills it.
     clusters: Clusters,
+    /// The sun and the ambient term, one buffer per frame in flight.
+    environment: Environment,
+    /// Which way the sun points. A field so E5's cascades and the shading read
+    /// the same one, and so the inspector can eventually move it.
+    sun: DirectionalLight,
     /// Where they sit — a function of the model's bounds, so it frames whatever
     /// is loaded. Kept rather than rebuilt, since nothing moves them yet.
     placed_lights: Vec<PointLight>,
@@ -228,6 +234,9 @@ impl Renderer {
             ..ClusterGrid::default()
         };
 
+        let environment = Environment::new(gpu.allocator(), &mut heap, frames.frames_in_flight())
+            .map_err(|error| error.to_string())?;
+
         let cluster_module = load_shader(gpu.device(), &vfs, "cluster_build")?;
         let clusters = Clusters::new(
             gpu.device(),
@@ -273,6 +282,8 @@ impl Renderer {
             tonemap,
             lights,
             clusters,
+            environment,
+            sun: DirectionalLight::default(),
             placed_lights,
             heap,
             frames,
@@ -336,6 +347,8 @@ impl Renderer {
         let heap = &self.heap;
         let lights = &mut self.lights;
         let clusters = &mut self.clusters;
+        let environment = &mut self.environment;
+        let sun = self.sun;
         let placed_lights = &self.placed_lights;
         let ui = &mut self.ui;
         let allocator = self.gpu.allocator();
@@ -407,8 +420,15 @@ impl Renderer {
                     error!(error = %failure, "this frame's cluster grid was not written");
                 }
 
+                if let Err(failure) =
+                    environment.write(frame.slot, &sun, slop_render::default_ambient())
+                {
+                    error!(error = %failure, "this frame's environment was not written");
+                }
+
                 let view = View::new(
                     camera(aspect, centre, angle, settings),
+                    environment,
                     clusters,
                     frame.slot,
                 );

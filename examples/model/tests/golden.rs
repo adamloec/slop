@@ -375,6 +375,9 @@ struct Headless {
     /// otherwise the references stop covering the pass that decides which lights
     /// reach a fragment at all.
     clusters: slop_render::Clusters,
+    /// The sun and ambient term, with the values the shader used to hold as
+    /// constants — see `DirectionalLight::default`.
+    environment: slop_render::Environment,
     placed_lights: Vec<slop_render::PointLight>,
     heap: BindlessHeap,
     readback: Buffer,
@@ -488,6 +491,9 @@ impl Headless {
             .map_err(|error| error.to_string())?;
         let placed_lights = example_model::lights(centre, radius);
 
+        let environment = slop_render::Environment::new(allocator, &mut heap, 1)
+            .map_err(|error| error.to_string())?;
+
         let cluster_module = ShaderModule::from_bytes(
             device,
             &vfs.read("shaders/passes/cluster_build.spv")
@@ -534,6 +540,7 @@ impl Headless {
             tonemap,
             lights,
             clusters,
+            environment,
             placed_lights,
             heap,
             readback,
@@ -650,8 +657,17 @@ impl Headless {
             .write(0, &cluster_camera, &self.lights)
             .expect("the cluster grid must be writable");
 
+        self.environment
+            .write(
+                0,
+                &slop_render::DirectionalLight::default(),
+                slop_render::default_ambient(),
+            )
+            .expect("the environment must be writable");
+
         let view = slop_render::View::new(
             camera(aspect, self.centre, angle, self.settings),
+            &self.environment,
             &self.clusters,
             0,
         );

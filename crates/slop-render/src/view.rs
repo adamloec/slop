@@ -11,9 +11,9 @@
 
 use slop_math::Mat4;
 
-use crate::Clusters;
+use crate::{Clusters, Environment};
 
-/// The camera, and the lights, for one frame.
+/// The camera, and the lighting, for one frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct View {
     /// World space to clip space.
@@ -21,13 +21,19 @@ pub struct View {
     /// Heap index of the cluster grid this frame's draws read.
     ///
     /// The grid carries the light buffer's index as well as the cell layout, so
-    /// this one number is everything a shading pass needs. That is deliberate:
-    /// the cluster build reads the same buffer, and two passes reading one
-    /// description cannot disagree about where a cell is.
+    /// this one number is everything a shading pass needs to find its point
+    /// lights. That is deliberate: the cluster build reads the same buffer, and
+    /// two passes reading one description cannot disagree about where a cell is.
     ///
     /// [`NO_CLUSTERS`] means there is no grid, and shading falls back to the
-    /// directional light alone.
+    /// environment alone.
     pub grid: u32,
+    /// Heap index of the directional light and ambient term.
+    ///
+    /// A second index rather than fields in the grid: the grid describes where
+    /// the *cells* are, and E5's shadow passes read the sun's direction without
+    /// caring about clustering at all.
+    pub environment: u32,
 }
 
 /// The grid index meaning "there is no cluster grid".
@@ -38,30 +44,37 @@ pub struct View {
 pub const NO_CLUSTERS: u32 = u32::MAX;
 
 impl View {
-    /// A view whose lighting comes from `clusters`, for this frame's slot.
+    /// A view lit by `environment` and the point lights `clusters` assigned.
     ///
     /// `slot` is [`Frame::slot`](crate::Frame::slot). Taking it here rather than
-    /// letting a caller pass a bare index is the point: the grid buffers are a
-    /// ring, and reading the wrong element of one is a corrupted frame rather
-    /// than an error.
+    /// letting a caller pass a bare index is the point: both are rings, and
+    /// reading the wrong element of one is a corrupted frame rather than an
+    /// error.
     #[must_use]
-    pub fn new(view_projection: Mat4, clusters: &Clusters, slot: usize) -> Self {
+    pub fn new(
+        view_projection: Mat4,
+        environment: &Environment,
+        clusters: &Clusters,
+        slot: usize,
+    ) -> Self {
         Self {
             view_projection,
             grid: clusters.handle(slot),
+            environment: environment.handle(slot),
         }
     }
 
-    /// A view with no clustered lighting at all.
+    /// A view with the environment but no point lights.
     ///
-    /// What a depth prepass uses — it shades nothing — and what a caller with no
-    /// lights uses. The directional light in `shaders/passes/model.slang` still
-    /// applies; it is not data yet.
+    /// What a depth prepass uses — it shades nothing, so the cluster grid would
+    /// be along for the ride — and what a caller that has placed no point lights
+    /// uses. The sun and the ambient term still apply.
     #[must_use]
-    pub fn unlit(view_projection: Mat4) -> Self {
+    pub fn unclustered(view_projection: Mat4, environment: &Environment, slot: usize) -> Self {
         Self {
             view_projection,
             grid: NO_CLUSTERS,
+            environment: environment.handle(slot),
         }
     }
 }
@@ -71,13 +84,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_unlit_view_names_no_grid() {
+    fn no_grid_cannot_be_spelled_as_slot_zero() {
         // Zero is a real heap slot, so "none" cannot be spelled that way — an
-        // unlit view would otherwise read whatever buffer landed in slot zero
-        // and interpret it as a cluster grid.
-        let view = View::unlit(Mat4::IDENTITY);
-
-        assert_eq!(view.grid, NO_CLUSTERS);
-        assert_ne!(view.grid, 0);
+        // unclustered view would otherwise read whatever buffer landed in slot
+        // zero and interpret it as a cluster grid.
+        assert_ne!(NO_CLUSTERS, 0);
+        assert_eq!(NO_CLUSTERS, u32::MAX);
     }
 }

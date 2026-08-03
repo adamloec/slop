@@ -7,6 +7,7 @@
 
 #include "lib/bindless.slang"
 #include "lib/cluster.slang"
+#include "lib/environment.slang"
 #include "lib/light.slang"
 
 // Per-material parameters, matching `MaterialGpu` in
@@ -88,7 +89,10 @@ struct PushConstants
     // rather than several, so that this shader and `cluster_build.slang` cannot
     // hold different opinions about the grid — see `lib/cluster.slang`.
     uint grid;
-    uint _pad;
+    // The directional light and the ambient term. A second index rather than
+    // fields in the grid buffer: that one describes where the *cells* are, and
+    // the shadow passes at E5 will read this without caring about clustering.
+    uint environment;
 };
 
 [[vk::push_constant]] PushConstants g_push;
@@ -215,15 +219,6 @@ void prepassMain(VertexOut input)
     }
 }
 
-// A single directional light, deliberately.
-//
-// This is a bring-up shader: its job is to prove that geometry, materials and
-// textures reach the GPU intact, and shading that anyone would ship arrives with
-// M3's Stage A. A flat unlit surface would hide a wrong normal, so there is just
-// enough lighting to make one visible.
-static const float3 LIGHT_DIRECTION = normalize(float3(0.4, 0.8, 0.45));
-static const float3 AMBIENT = float3(0.18, 0.19, 0.22);
-
 [shader("fragment")]
 float4 fragmentMain(VertexOut input) : SV_Target
 {
@@ -285,7 +280,15 @@ float4 fragmentMain(VertexOut input) : SV_Target
         normal = normalize(tangent * sampled.x + bitangent * sampled.y + normal * sampled.z);
     }
 
-    float3 lit = AMBIENT + saturate(dot(normal, LIGHT_DIRECTION));
+    // The directional light and the ambient term. Both were constants compiled
+    // into this file until E5 needed the direction on the CPU — cascaded shadow
+    // maps are built along it, so it has to be something a caller chooses.
+    EnvironmentGpu environment =
+        loadFromBuffer<EnvironmentGpu>(BufferHandle(g_push.environment), 0);
+
+    float3 lit = environment.ambient
+               + environment.sunColor * environment.sunIntensity
+                     * saturate(dot(normal, environment.sunDirection));
 
     // Matching `slop_render::NO_CLUSTERS`. Not zero, because zero is a real heap
     // slot and a view without a grid would read whatever landed there.

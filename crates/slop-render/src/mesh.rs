@@ -145,7 +145,8 @@ struct PushConstants {
     materials: u32,
     material: u32,
     grid: u32,
-    _pad: [u32; 3],
+    environment: u32,
+    _pad: [u32; 2],
 }
 
 /// Loads a cooked model and draws it.
@@ -804,7 +805,8 @@ impl MeshRenderer {
             materials: self.materials_slot?.index(),
             material: 0,
             grid: view.grid,
-            _pad: [0; 3],
+            environment: view.environment,
+            _pad: [0; 2],
         })
     }
 
