@@ -40,9 +40,9 @@
 //! let scene = graph.import("hdr", hdr.image(), hdr.view(), ..);
 //! let screen = graph.present("swapchain", frame.target);
 //!
-//! graph.add(&PassDesc { name: "scene", color: Some((scene, Load::Clear(..))), .. },
+//! graph.add(&RenderPass { name: "scene", color: Some((scene, Load::Clear(..))), .. },
 //!           |pass| meshes.draw(pass));
-//! graph.add(&PassDesc { name: "tonemap", color: Some((screen, Load::Discard)),
+//! graph.add(&RenderPass { name: "tonemap", color: Some((screen, Load::Discard)),
 //!                       samples: &[(scene, Stage::Fragment)], .. },
 //!           |pass| tonemap.draw(pass));
 //!
@@ -50,8 +50,8 @@
 //! ```
 
 use slop_rhi::{
-    Attachments, ColorAttachment, CommandBuffer, DepthAttachment, Extent2D, ImageAspect,
-    ImageHandle, ImageState, ImageViewHandle, Load, Pass, Stage,
+    Attachments, BufferHandle, BufferState, ColorAttachment, CommandBuffer, DepthAttachment,
+    Extent2D, ImageAspect, ImageHandle, ImageState, ImageViewHandle, Load, Pass, Stage,
 };
 
 /// A resource the graph tracks the state of.
@@ -61,7 +61,7 @@ use slop_rhi::{
 /// barrier between them. Two `ImageHandle`s that happen to be equal would not
 /// be enough, because the graph would have no place to record what it last did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ResourceId(usize);
+pub struct ImageId(usize);
 
 /// One image, and what the graph last left it in.
 struct Tracked {
@@ -117,13 +117,13 @@ pub struct Imported {
 /// three calls and hides which fields exist, and the set of things a pass can do
 /// is small enough to see at once — which matters more while §9.4 is still being
 /// built out and the answer to "can a pass do X yet" is asked often.
-pub struct PassDesc<'a> {
+pub struct RenderPass<'a> {
     /// For diagnostics and, at `docs/DESIGN.md` §10.2, the pass visualiser.
     pub name: &'static str,
     /// The colour attachment, and how to treat what is already in it.
-    pub color: Option<(ResourceId, Load)>,
+    pub color: Option<(ImageId, Load)>,
     /// The depth attachment, how to treat it, and whether to keep the result.
-    pub depth: Option<(ResourceId, Load, bool)>,
+    pub depth: Option<(ImageId, Load, bool)>,
     /// Resources this pass samples, and the stage that samples them.
     ///
     /// The stage is not decoration: a barrier ordering a write against a
@@ -131,10 +131,10 @@ pub struct PassDesc<'a> {
     /// cluster build reads the depth prepass from compute. `ImageState` used to
     /// bake the stage into each constant, and E1c replaced that with a selector
     /// precisely so the graph could supply it here.
-    pub samples: &'a [(ResourceId, Stage)],
+    pub samples: &'a [(ImageId, Stage)],
 }
 
-impl Default for PassDesc<'_> {
+impl Default for RenderPass<'_> {
     fn default() -> Self {
         Self {
             name: "unnamed",
@@ -145,9 +145,9 @@ impl Default for PassDesc<'_> {
     }
 }
 
-impl std::fmt::Debug for PassDesc<'_> {
+impl std::fmt::Debug for RenderPass<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PassDesc")
+        f.debug_struct("RenderPass")
             .field("name", &self.name)
             .field("color", &self.color.map(|(id, _)| id))
             .field("depth", &self.depth.map(|(id, _, _)| id))
@@ -156,13 +156,86 @@ impl std::fmt::Debug for PassDesc<'_> {
     }
 }
 
-/// A pass and the work it records.
-struct Recorded<'a> {
+/// A buffer the graph tracks the state of.
+///
+/// Separate from [`ImageId`] rather than one id over both, so that passing a
+/// buffer where an image belongs is a type error. They are barriered
+/// differently — a buffer has no layout — and the declaration is the place that
+/// distinction should be visible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BufferId(usize);
+
+/// One buffer, and what the graph last left it in.
+struct TrackedBuffer {
     name: &'static str,
-    color: Option<(ResourceId, Load)>,
-    depth: Option<(ResourceId, Load, bool)>,
-    samples: Vec<(ResourceId, Stage)>,
-    record: Box<dyn FnOnce(&mut Pass<'_>) + 'a>,
+    buffer: BufferHandle,
+    state: BufferState,
+    final_state: Option<BufferState>,
+}
+
+/// A buffer the graph should track, but does not own.
+#[derive(Debug, Clone, Copy)]
+pub struct ImportedBuffer {
+    /// For diagnostics and the pass visualiser.
+    pub name: &'static str,
+    /// The buffer itself.
+    pub buffer: BufferHandle,
+    /// What state it is in when the frame starts.
+    pub state: BufferState,
+    /// What it must be left in when the frame ends.
+    pub final_state: Option<BufferState>,
+}
+
+/// What a compute pass touches.
+///
+/// The stage is not a field here the way it is on [`RenderPass::samples`]: a
+/// compute pass reads and writes at the compute stage by definition, so naming
+/// it would be restating the pass kind.
+#[derive(Debug, Default)]
+pub struct ComputePass<'a> {
+    /// For diagnostics and the pass visualiser.
+    pub name: &'static str,
+    /// Images this pass samples.
+    pub samples: &'a [ImageId],
+    /// Images this pass writes through the heap's storage-image binding.
+    pub writes_images: &'a [ImageId],
+    /// Buffers this pass reads.
+    pub reads: &'a [BufferId],
+    /// Buffers this pass writes.
+    ///
+    /// `docs/PLAN.md` §9.4's cluster build is exactly this: one dispatch writing
+    /// a light-index buffer that the forward pass then reads.
+    pub writes: &'a [BufferId],
+}
+
+/// A pass and the work it records.
+enum Recorded<'a> {
+    Render {
+        name: &'static str,
+        color: Option<(ImageId, Load)>,
+        depth: Option<(ImageId, Load, bool)>,
+        samples: Vec<(ImageId, Stage)>,
+        record: Box<dyn FnOnce(&mut Pass<'_>) + 'a>,
+    },
+    Compute {
+        name: &'static str,
+        samples: Vec<ImageId>,
+        writes_images: Vec<ImageId>,
+        reads: Vec<BufferId>,
+        writes: Vec<BufferId>,
+        /// Takes the command buffer rather than a `Pass`: a dispatch is not
+        /// inside a render pass, and there is no begin/end for the graph to
+        /// bracket it with.
+        record: Box<dyn FnOnce(&CommandBuffer) + 'a>,
+    },
+}
+
+impl Recorded<'_> {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Render { name, .. } | Self::Compute { name, .. } => name,
+        }
+    }
 }
 
 /// The frame's passes, and the resources flowing between them.
@@ -172,6 +245,7 @@ struct Recorded<'a> {
 /// declarations are cheap to rebuild.
 pub struct Graph<'a> {
     resources: Vec<Tracked>,
+    buffers: Vec<TrackedBuffer>,
     passes: Vec<Recorded<'a>>,
 }
 
@@ -181,12 +255,45 @@ impl<'a> Graph<'a> {
     pub fn new() -> Self {
         Self {
             resources: Vec::new(),
+            buffers: Vec::new(),
             passes: Vec::new(),
         }
     }
 
+    /// Track a buffer the graph does not own.
+    pub fn import_buffer(&mut self, resource: &ImportedBuffer) -> BufferId {
+        self.buffers.push(TrackedBuffer {
+            name: resource.name,
+            buffer: resource.buffer,
+            state: resource.state,
+            final_state: resource.final_state,
+        });
+
+        BufferId(self.buffers.len() - 1)
+    }
+
+    /// Declare a compute pass and the work it dispatches.
+    ///
+    /// The closure gets the command buffer rather than a render pass, because a
+    /// dispatch is not inside one — and the graph having no `Pass` to hand over
+    /// is what makes that structural rather than a rule.
+    pub fn add_compute(
+        &mut self,
+        desc: &ComputePass<'_>,
+        record: impl FnOnce(&CommandBuffer) + 'a,
+    ) {
+        self.passes.push(Recorded::Compute {
+            name: desc.name,
+            samples: desc.samples.to_vec(),
+            writes_images: desc.writes_images.to_vec(),
+            reads: desc.reads.to_vec(),
+            writes: desc.writes.to_vec(),
+            record: Box::new(record),
+        });
+    }
+
     /// Track an image the graph does not own.
-    pub fn import(&mut self, resource: &Imported) -> ResourceId {
+    pub fn import(&mut self, resource: &Imported) -> ImageId {
         self.resources.push(Tracked {
             name: resource.name,
             image: resource.image,
@@ -197,7 +304,7 @@ impl<'a> Graph<'a> {
             final_state: resource.final_state,
         });
 
-        ResourceId(self.resources.len() - 1)
+        ImageId(self.resources.len() - 1)
     }
 
     /// Declare a pass and the work it records.
@@ -210,8 +317,8 @@ impl<'a> Graph<'a> {
     /// breaks that at §9.4's eight passes. Recorded in `PLAN.md` §6.1: the seam
     /// — declare, then record — is what a frame arena or a bump allocator would
     /// be slotted behind without a caller changing.
-    pub fn add(&mut self, desc: &PassDesc<'_>, record: impl FnOnce(&mut Pass<'_>) + 'a) {
-        self.passes.push(Recorded {
+    pub fn add(&mut self, desc: &RenderPass<'_>, record: impl FnOnce(&mut Pass<'_>) + 'a) {
+        self.passes.push(Recorded::Render {
             name: desc.name,
             color: desc.color,
             depth: desc.depth,
@@ -231,7 +338,7 @@ impl<'a> Graph<'a> {
     /// `DESIGN.md` §10.2 asks for one and M2 deferred it because there was no
     /// graph to read. This is what it reads.
     pub fn pass_names(&self) -> impl Iterator<Item = &'static str> + '_ {
-        self.passes.iter().map(|pass| pass.name)
+        self.passes.iter().map(Recorded::name)
     }
 
     /// The tracked resources, in declaration order.
@@ -244,12 +351,22 @@ impl<'a> Graph<'a> {
         self.resources.iter().map(|resource| resource.name)
     }
 
+    /// The tracked buffers, in declaration order.
+    ///
+    /// Separate from [`resource_names`](Self::resource_names) rather than
+    /// merged, so the visualiser can say which is which — a buffer and an image
+    /// flowing between the same two passes are not the same kind of edge, and
+    /// §9.4's cluster build produces one of each.
+    pub fn buffer_names(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.buffers.iter().map(|buffer| buffer.name)
+    }
+
     /// Emit every barrier and record every pass.
     ///
     /// # Panics
     ///
     /// If a pass names a resource from a different graph. That is a programming
-    /// error rather than a condition — `ResourceId` is only obtainable from
+    /// error rather than a condition — `ImageId` is only obtainable from
     /// `import`, so reaching this means one was carried across frames.
     pub fn execute(mut self, command: &CommandBuffer) {
         // Taken out so the barrier helpers can borrow `self.resources` mutably
@@ -257,58 +374,100 @@ impl<'a> Graph<'a> {
         let passes = std::mem::take(&mut self.passes);
 
         for pass in passes {
-            // Reads first. A pass that samples what it also writes is not
-            // expressible here, and ordering the reads before the attachment
-            // transitions is what keeps the two from being emitted in an order
-            // that depends on declaration.
-            for (id, stage) in &pass.samples {
-                self.transition(command, *id, ImageState::shader_read(*stage));
-            }
+            match pass {
+                Recorded::Render {
+                    name,
+                    color,
+                    depth,
+                    samples,
+                    record,
+                } => {
+                    // Reads first. Ordering them before the attachment
+                    // transitions is what keeps the emitted order from
+                    // depending on how the declaration happened to be written.
+                    for (id, stage) in &samples {
+                        self.transition(command, *id, ImageState::shader_read(*stage));
+                    }
 
-            if let Some((id, _)) = pass.color {
-                self.transition(command, id, ImageState::COLOR_ATTACHMENT);
-            }
+                    if let Some((id, _)) = color {
+                        self.transition(command, id, ImageState::COLOR_ATTACHMENT);
+                    }
 
-            if let Some((id, _, _)) = pass.depth {
-                self.transition(command, id, ImageState::DEPTH_ATTACHMENT);
-            }
+                    if let Some((id, _, _)) = depth {
+                        self.transition(command, id, ImageState::DEPTH_ATTACHMENT);
+                    }
 
-            let color = pass.color.map(|(id, load)| {
-                let tracked = &self.resources[id.0];
+                    let attachment = color.map(|(id, load)| {
+                        let tracked = &self.resources[id.0];
 
-                (
-                    ColorAttachment {
-                        view: tracked.view,
+                        (
+                            ColorAttachment {
+                                view: tracked.view,
+                                load,
+                            },
+                            tracked.extent,
+                        )
+                    });
+
+                    let depth = depth.map(|(id, load, store)| DepthAttachment {
+                        view: self.resources[id.0].view,
                         load,
-                    },
-                    tracked.extent,
-                )
-            });
+                        store,
+                    });
 
-            let depth = pass.depth.map(|(id, load, store)| DepthAttachment {
-                view: self.resources[id.0].view,
-                load,
-                store,
-            });
+                    let Some((attachment, extent)) = attachment else {
+                        // A render pass with no colour attachment would be a
+                        // depth-only pass, which §9.4's prepass is and this
+                        // cannot express yet — `Attachments` requires a colour
+                        // target. Named rather than silently skipped.
+                        panic!(
+                            "render pass '{name}' declares no colour attachment; depth-only \
+                             passes are not yet expressible"
+                        );
+                    };
 
-            let Some((color, extent)) = color else {
-                // A pass with no colour attachment is a compute pass, which
-                // §9.4 has and this cannot express yet. Declaring one is a
-                // mistake worth naming rather than silently skipping.
-                panic!(
-                    "pass '{}' declares no colour attachment; compute passes are not \
-                     yet expressible in the graph",
-                    pass.name
-                );
-            };
+                    let mut rendering = command.begin_rendering(&Attachments {
+                        color: attachment,
+                        depth,
+                        extent,
+                    });
 
-            let mut rendering = command.begin_rendering(&Attachments {
-                color,
-                depth,
-                extent,
-            });
+                    record(&mut rendering);
+                }
 
-            (pass.record)(&mut rendering);
+                Recorded::Compute {
+                    samples,
+                    writes_images,
+                    reads,
+                    writes,
+                    record,
+                    ..
+                } => {
+                    for id in &samples {
+                        self.transition(command, *id, ImageState::shader_read(Stage::Compute));
+                    }
+
+                    for id in &writes_images {
+                        self.transition(command, *id, ImageState::STORAGE_WRITE);
+                    }
+
+                    for id in &reads {
+                        self.transition_buffer(command, *id, BufferState::SHADER_READ);
+                    }
+
+                    for id in &writes {
+                        self.transition_buffer(
+                            command,
+                            *id,
+                            BufferState::storage_write(Stage::Compute),
+                        );
+                    }
+
+                    // No `begin_rendering`, and nothing to end. The closure gets
+                    // the command buffer and binds its own compute pipeline.
+                    record(command);
+                }
+            }
         }
 
         // Whatever the frame owes the outside world. The presentable image is
@@ -317,13 +476,31 @@ impl<'a> Graph<'a> {
         // used to do by convention.
         for index in 0..self.resources.len() {
             if let Some(final_state) = self.resources[index].final_state {
-                self.transition(command, ResourceId(index), final_state);
+                self.transition(command, ImageId(index), final_state);
+            }
+        }
+
+        for index in 0..self.buffers.len() {
+            if let Some(final_state) = self.buffers[index].final_state {
+                self.transition_buffer(command, BufferId(index), final_state);
             }
         }
     }
 
+    /// Move one buffer into `wanted`, if it is not already there.
+    fn transition_buffer(&mut self, command: &CommandBuffer, id: BufferId, wanted: BufferState) {
+        let tracked = &mut self.buffers[id.0];
+
+        if tracked.state == wanted {
+            return;
+        }
+
+        command.barrier_buffer(tracked.buffer, tracked.state, wanted);
+        tracked.state = wanted;
+    }
+
     /// Move one resource into `wanted`, if it is not already there.
-    fn transition(&mut self, command: &CommandBuffer, id: ResourceId, wanted: ImageState) {
+    fn transition(&mut self, command: &CommandBuffer, id: ImageId, wanted: ImageState) {
         let tracked = &mut self.resources[id.0];
 
         // Skipping a no-op transition is not just an optimisation: a barrier
@@ -432,10 +609,10 @@ mod tests {
         });
 
         graph.add(
-            &PassDesc {
+            &RenderPass {
                 name: "only",
                 color: Some((id, Load::Discard)),
-                ..PassDesc::default()
+                ..RenderPass::default()
             },
             |_| {},
         );

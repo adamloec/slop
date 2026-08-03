@@ -17,5 +17,11 @@ slop-rhi = { workspace = true }
 
 thiserror = { workspace = true }
 
+[dev-dependencies]
+# Test-only: the graph's compute passes are exercised against a real device,
+# using the cooked shaders in `shaders/tests/`. Deriving the barriers is only a
+# claim if something dispatches through them and reads the answer back.
+slop-core = { workspace = true, features = ["subscriber"] }
+
 [lints]
 workspace = true

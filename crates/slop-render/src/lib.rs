@@ -58,7 +58,7 @@ mod vertex;
 
 pub use error::RenderError;
 pub use frame::{Frame, FrameOutcome, FrameRenderer, FrameRendererConfig, Target};
-pub use graph::{Graph, Imported, PassDesc, ResourceId};
+pub use graph::{BufferId, ComputePass, Graph, ImageId, Imported, ImportedBuffer, RenderPass};
 pub use hdr::{HdrTarget, Tonemap};
 pub use mesh::MeshRenderer;
 pub use vertex::VertexBinding;

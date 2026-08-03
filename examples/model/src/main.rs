@@ -35,7 +35,8 @@ use slop_ecs::{Entity, World};
 use slop_editor::{DebugUi, InspectorState};
 use slop_math::Vec3;
 use slop_render::{
-    FrameRenderer, FrameRendererConfig, Graph, HdrTarget, Imported, MeshRenderer, PassDesc, Tonemap,
+    FrameRenderer, FrameRendererConfig, Graph, HdrTarget, Imported, MeshRenderer, RenderPass,
+    Tonemap,
 };
 
 /// What the scene pass clears the HDR target to.
@@ -338,7 +339,7 @@ impl Renderer {
                     });
 
                     graph.add(
-                        &PassDesc {
+                        &RenderPass {
                             name: "scene",
                             color: Some((scene, Load::Clear(ClearValue::Color(CLEAR)))),
                             depth: Some((
@@ -348,20 +349,20 @@ impl Renderer {
                                 // cost bandwidth nothing reads.
                                 false,
                             )),
-                            ..PassDesc::default()
+                            ..RenderPass::default()
                         },
                         |pass| meshes.draw(pass, heap, view_projection),
                     );
                 }
 
                 graph.add(
-                    &PassDesc {
+                    &RenderPass {
                         name: "tonemap",
                         color: Some((screen, Load::Discard)),
                         // The declaration that produces the barrier: this reads
                         // what the pass above wrote.
                         samples: &[(scene, Stage::Fragment)],
-                        ..PassDesc::default()
+                        ..RenderPass::default()
                     },
                     |pass| tonemap.draw(pass, heap, hdr.slot()),
                 );

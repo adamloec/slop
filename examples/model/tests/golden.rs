@@ -604,7 +604,7 @@ impl Headless {
             });
 
             graph.add(
-                &slop_render::PassDesc {
+                &slop_render::RenderPass {
                     name: "scene",
                     color: Some((
                         scene,
@@ -615,18 +615,18 @@ impl Headless {
                         slop_rhi::Load::Clear(slop_rhi::ClearValue::Depth(slop_rhi::DEPTH_CLEAR)),
                         false,
                     )),
-                    ..slop_render::PassDesc::default()
+                    ..slop_render::RenderPass::default()
                 },
                 |pass| meshes.draw(pass, heap, view_projection),
             );
         }
 
         graph.add(
-            &slop_render::PassDesc {
+            &slop_render::RenderPass {
                 name: "tonemap",
                 color: Some((screen, slop_rhi::Load::Discard)),
                 samples: &[(scene, slop_rhi::Stage::Fragment)],
-                ..slop_render::PassDesc::default()
+                ..slop_render::RenderPass::default()
             },
             |pass| tonemap.draw(pass, heap, source),
         );
