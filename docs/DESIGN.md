@@ -338,7 +338,7 @@ shelling out to a binary foreclosed it. **That was false.** `slangc
 input locations with their semantic names, push constant fields with byte offsets
 and sizes, and descriptor table slots. It was verified against
 `shaders/passes/cube.slang` before this correction was written, and the shader
-cooker has used it since — `slop-cli/src/reflection.rs`.
+cooker has used it since — `slop-cook/src/reflection.rs`.
 
 The claim mattered, because it was the sole justification for taking on a
 vendored C++ build. Reflection now works with the CLI, and the parallel

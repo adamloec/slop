@@ -1,9 +1,9 @@
 # Slop Engine — Implementation Plan & Session Handoff
 
-**Status:** M0 and M1 complete. M2 underway — the content pipeline, the frame
-renderer, shader reflection and the debug overlay are in; materials and a
-Sponza-scale scene are not.
-**Last updated:** 2026-08-02
+**Status:** M0, M1 and M2 complete. M3 — the renderer, Stage A — is next and has
+not started. §9.2 item E has the ordering: the render graph first, then clustered
+forward+, shadows, IBL, HDR/tonemap and the post stack.
+**Last updated:** 2026-08-03
 
 This document is the working companion to `DESIGN.md`. **`DESIGN.md` is
 authoritative for all architectural decisions** — read it first, in full, before
@@ -123,18 +123,27 @@ Two consequences worth carrying into M0:
 
 ## 3. Current state
 
-**M0 and M1 are complete; M2 is about half done.** The lit textured cube renders
-with a golden image guarding it, the reflection and ECS foundations are built
-through scheduling and serialization, and the content pipeline cooks and hot
-reloads meshes, textures and shaders.
+**M0, M1 and M2 are complete. M3 has not started.**
 
-What M2 still owes is the half that needs a renderer to be worth anything:
-materials, a Sponza-scale scene, and the debug UI. §9 has the order and why
-`slop-render` comes out of the examples first.
+A Sponza-scale glTF scene — 103 primitives, 25 materials, 70 BC7 textures with
+mip chains — loads through the cook pipeline and renders with its own materials
+and normal maps, guarded by a golden image. Underneath it: the reflection and ECS
+foundations through scheduling and world serialization, a content pipeline that
+cooks and hot reloads meshes, textures and shaders on a content-hash cache, and a
+debug overlay that shows frame timing and inspects a live entity.
 
-797 tests. Clippy and rustdoc clean under `-D warnings` in both feature
+§9.3 records M2's exit criteria and that they are met. §9.2 item E is what M3
+starts from.
+
+**837 tests.** Clippy and rustdoc clean under `-D warnings` in both feature
 configurations, Vulkan validation reporting nothing, and every crate containing
 `unsafe` passing under Miri — `slop-ecs` under both Stacked and Tree Borrows.
+
+Two things this section is not allowed to imply. **A milestone being complete is
+not the codebase being clean:** `CONSIDERATIONS.md` carries a review of the tree
+at this point, and §6.1 below is the register of what is standing in for
+something else. And **Linux has never been run** — every portability claim in
+this repository is untested, standing since M0.
 
 ### 3.0 M1 — reflection, the ECS, and serialization
 
@@ -720,12 +729,36 @@ import all of that under a better crate name. **Each of these is a rewrite again
 two working references, and the golden images are what say the rewrite is
 equivalent.**
 
-**The distinction this table enforces:** a *hack* is a shortcut that makes the
-right thing harder later, and there are none here. Everything below is either a
-requirement currently living in the wrong crate (which gets **rebuilt** where it
-belongs), or a simple implementation behind a final seam (which gets **replaced**
-with no caller changing). `DESIGN.md` §1.2 principle 6 is the rule: defer implementations
+**Reading the `When` column.** It is the milestone at which the fate happens, so
+a row still listed with a milestone that has already shipped is either resolved
+and not struck, or overdue. `✅` means resolved, and the row is kept struck
+rather than deleted so the decision stays readable.
+
+**Audited 2026-08-03**, partially. Verified against the source: `No mipmaps`
+(resolved), `JobSystem backed by std::thread::scope` (resolved), the fixed vertex
+layout (tangent added, so retargeted at M3), `Every sampler is created fresh at
+its use site` (still true at three call sites, overdue), `WorldCell::query
+allocates` (still true, overdue) and `Reflect rejects generic types` (still
+true, overdue). **The remaining rows tagged M1 or M2 have not been re-checked
+and may be in either state.** That is a gap, and naming it is better than a
+register that reads as audited when it is not.
+
+**The distinction this table enforces:** everything below is either a requirement
+currently living in the wrong crate (which gets **rebuilt** where it belongs), or
+a simple implementation behind a final seam (which gets **replaced** with no
+caller changing). `DESIGN.md` §1.2 principle 6 is the rule: defer implementations
 freely, never seams.
+
+**This table used to claim there were no hacks in the tree. That claim is
+withdrawn.** A hack is a shortcut that makes the right thing harder later, and
+the 2026-08-03 review in `CONSIDERATIONS.md` found several — Vulkan types leaking
+through every layer above the RHI, a `MeshRenderer` whose `load` is not safe to
+call twice, and a duplicated uploader in `examples/cube` that has already drifted
+from its counterpart by one barrier. **The register is not the whole debt.** It
+records what was deferred *deliberately, behind a seam*; `CONSIDERATIONS.md`
+records what was found afterwards. The vocabulary here — Replaced, Extended,
+Rebuilt — makes every row read as scheduling, which is exactly how a register
+turns into a story about not having debt. Read both.
 
 | What | Where | Standing in for | Fate | When |
 |---|---|---|---|---|
@@ -733,8 +766,8 @@ freely, never seams.
 | The tangent is transformed by the normal matrix, not the model matrix | `shaders/passes/model.slang` | Per-instance data in a storage buffer, carrying the model matrix | **Replaced.** A normal transforms by the inverse transpose; a tangent lies *along* the surface and transforms by the model matrix. They agree exactly after normalisation under rotation and uniform scale, and diverge under non-uniform scale, which skews the frame. The model matrix is not available to use: the push constant block is 120 of the 128 bytes Vulkan guarantees and another `float3x3` needs 48. Per-instance data is where a model matrix belongs anyway. | M3 |
 | Every shader drawing cooked geometry must declare all four vertex attributes | `slop-asset/src/mesh.rs`, every pass | Per-mesh vertex layouts, with pipeline variants to match | **Extended.** The layout is derived from shader reflection, so a shader omitting a field computes a stride shorter than the buffer's and reads every vertex after the first from the middle of its predecessor. `cube.slang` declares a tangent it never samples for exactly this reason, and a test asserts the reflected stride equals `VERTEX_SIZE`. Real per-mesh layouts arrive with skinning, which needs joints and weights on some meshes and not others. | M5 |
 | `slop-cook` uses `anyhow`, and `CONVENTIONS.md` §6 says libraries use `thiserror` | `slop-cook` | Typed errors, once something branches on the kind | **Replaced.** Argued from the rule's own reason — "a caller must be able to match and respond" — which no caller does: the CLI and the editor both report the failure and mark the asset uncooked. What a cook failure is *for* is the context chain, and "reading primitive 3 of mesh 'Body' in sponza.gltf: index 5 names a vertex the primitive does not have" is the whole diagnosis. A flat enum discards it. **The trigger is an editor that shows a missing-texture failure differently from a malformed-file one.** | M4 |
-| Mip levels are averaged in whatever space the texture is stored in | `slop-cli/src/texture_import.rs` | Filtering in linear light for colour textures, and in raw values for data ones | **Replaced.** A box filter over sRGB-encoded bytes is not the mean of the light they represent — it biases dark, so distant surfaces darken slightly. Doing it right needs to know which textures are colour and which are data (normal, roughness, occlusion), and that is per-asset import settings, which do not exist. The material already records `TextureSlot::is_srgb`, so the information exists at *import* time and does not reach the texture cooker — closing that gap is the work. | M3 |
-| Mip generation is a box filter | `slop-cli/src/texture_import.rs` | A Kaiser or Mitchell kernel, per asset | **Replaced.** What hardware would do and what every pipeline starts with. Better kernels trade sharpness against ringing, which is a per-asset judgement — the same missing import settings. | M3 |
+| Mip levels are averaged in whatever space the texture is stored in | `slop-cook/src/texture_import.rs` | Filtering in linear light for colour textures, and in raw values for data ones | **Replaced.** A box filter over sRGB-encoded bytes is not the mean of the light they represent — it biases dark, so distant surfaces darken slightly. Doing it right needs to know which textures are colour and which are data (normal, roughness, occlusion), and that is per-asset import settings, which do not exist. The material already records `TextureSlot::is_srgb`, so the information exists at *import* time and does not reach the texture cooker — closing that gap is the work. | M3 |
+| Mip generation is a box filter | `slop-cook/src/texture_import.rs` | A Kaiser or Mitchell kernel, per asset | **Replaced.** What hardware would do and what every pipeline starts with. Better kernels trade sharpness against ringing, which is a per-asset judgement — the same missing import settings. | M3 |
 | `Gpu` ties one window to one device | `slop-app/src/gpu.rs` | A device shared by several surfaces | **Extended.** Right for a game, which has one window; wrong for the editor (`DESIGN.md` §2.12), where a detached viewport is a second surface on the *same* device — re-running bring-up would create a second device and make sharing a texture between panels impossible. The split is `Gpu` keeping instance/device/allocator and handing out surfaces, and it is additive: `Gpu::new` stays the one-window path. Not done now because the editor does not exist and a two-window API designed without one is a guess. | M6 |
 | `FrameRenderer` has no automated test | `slop-render` | A smoke test that drives a real window, or a headless path that fakes a swapchain | **Extended.** Everything it does needs a surface, a surface needs a window, and a test harness has no event loop — the cube's golden renders headlessly and so covers `Scene`, not this. The check today is running both examples under `SLOP_FRAMES` with validation on, which is a command someone has to type. **The resize path has no coverage at all**, automated or otherwise, because `SLOP_FRAMES` never resizes the window. | M3 |
 | Scene setup — uploads, pipeline, draw recording | `examples/cube/src/scene.rs` | `slop-render` + `slop-asset` | **Rebuilt.** It proves the pieces fit together; it is not the shape an engine wants. One hard-coded pipeline, a sampler and a heap owned by the scene, and push constants restated from the shader — all of it example-grade on purpose, none of it moves. (`CARGO_MANIFEST_DIR` is no longer among them: `Vfs::discover` walks up for a cooked cache, which works the same in a source tree and beside a shipped binary.) | M3 |
@@ -743,25 +776,25 @@ freely, never seams.
 | A cooked model is a flat list, not a hierarchy | `slop-asset/src/model.rs` | `slop-scene`'s runtime tree, once something articulates | **Joined by.** Right for a static level, which is drawn rather than posed, and wrong the moment a parent joint animates. The tree is a *runtime* structure `slop-scene` owns; this format records where things ended up. | M5 |
 | Materials carry no occlusion or HDR emissive | `slop-asset/src/material.rs` | More slots and a float texture format | **Extended.** Occlusion is a baked term a real-time renderer computes or ignores; float images are refused by name rather than silently narrowed, and arrive with IBL. | M3 |
 | Frame timing is CPU wall-clock, not GPU time | `examples/cube/src/main.rs` | GPU timestamp queries written into the command buffer | **Joined by.** Wall-clock between frames is the honest measure of how fast frames arrive and a poor one for attributing cost to a pass — it includes waiting for the GPU. Attribution needs timestamps, and the render graph is what will know which pass one belongs to. | M3 |
-| The overlay assumes one scale factor for the whole frame | `slop-render/src/overlay.rs` | Per-viewport scale, once a window can span two monitors at different scalings | **Extended.** `pixels_per_point` arrives per frame and applies to every draw in it, which is right until a window straddles a 100% and a 150% display. | M3 |
-| A partial texture update re-uploads the whole image | `slop-render/src/overlay.rs` | `vkCmdCopyBufferToImage` into the sub-region | **Replaced.** Wasteful and correct. Font atlases settle within a few frames of startup, so this runs a handful of times and then never again. | M3 |
+| The overlay assumes one scale factor for the whole frame | `slop-editor/src/overlay.rs` | Per-viewport scale, once a window can span two monitors at different scalings | **Extended.** `pixels_per_point` arrives per frame and applies to every draw in it, which is right until a window straddles a 100% and a 150% display. | M3 |
+| A partial texture update re-uploads the whole image | `slop-editor/src/overlay.rs` | `vkCmdCopyBufferToImage` into the sub-region | **Replaced.** Wasteful and correct. Font atlases settle within a few frames of startup, so this runs a handful of times and then never again. | M3 |
 | `PushConstants` field *order* is not checked against the shader | `examples/cube/src/scene.rs` | A generic material parameter writer driven by reflected field offsets | **Replaced.** Reflection gives every field's name, offset and size; only the block *size* is compared today. Swapping two same-sized fields would still pass. The writer that fixes it arrives with materials. | M2 |
 | Synchronous upload — submit and wait | `examples/cube/src/scene.rs` | Async transfer queue + staging ring | **Replaced.** Correct for startup, wrong for streaming. | M2 |
-| `slangc` invoked as a CLI | `slop-cli/src/cook.rs` | The Slang library, for link-time specialization | **Replaced**, and no longer urgent. This was recorded as blocking reflection; that premise was false (`DESIGN.md` §2.11, corrected) and `-reflection-json` now feeds the cooker. What the library still buys is composing modules with specialization constants, and not spawning a process per shader. The cache layout, keying and read path all survive either way. | M3+ |
+| `slangc` invoked as a CLI | `slop-cook/src/shader_import.rs` | The Slang library, for link-time specialization | **Replaced**, and no longer urgent. This was recorded as blocking reflection; that premise was false (`DESIGN.md` §2.11, corrected) and `-reflection-json` now feeds the cooker. What the library still buys is composing modules with specialization constants, and not spawning a process per shader. The cache layout, keying and read path all survive either way. | M3+ |
 | The asset VFS reads synchronously | `slop-asset` | Async streaming alongside it | **Joined by, not replaced.** A blocking read stays correct for startup, for tools, and for the cooker itself; §2.8's streaming is an additional entry point rather than a different one. Recorded because "the VFS is sync" reads like a shortcut and is not.  Moved to M3: nothing yet loads enough at once to notice, and a Sponza-scale scene is what will say what the streaming API needs. | M3 |
 | An asset is unloaded by hand, never by refcount | `slop-asset` | Reference counting, once something holds handles long enough to outlive its need for them | **Extended.** `unload` is explicit and correct; what is missing is *who decides*, and nothing holds a handle past a frame yet. Counting references now would count them from one place. | M2/M3 |
 | `Assets<T>` is single-threaded — every mutation takes `&mut` | `slop-asset` | Interior mutability or a job-system-owned loader, once streaming decodes off the main thread | **Extended.** `Asset: Send + Sync` is already required so the bound does not have to be added later; only the *ownership* is provisional, and no public signature changes when the loader moves. | M2 |
-| Every texture is cooked to BC7 with one fixed encoder setting | `slop-cli/src/texture_import.rs` | Per-asset import settings — format, sRGB, alpha mode, mip policy | **Extended.** BC7 is right for colour and wrong for a normal map (BC5) or HDR (BC6H), and the alpha modes differ in whether they preserve alpha at all. Nothing yet knows what a texture *is for*; the material system is what will. | M2/M3 |
-| No mipmaps | `slop-cli/src/texture_import.rs` | A mip chain generated at cook time, compressed per level | **Extended.** Block compression without mips aliases badly at distance, and the cube never gets far enough away to show it. Generating them is another pass over the same pixels and changes no format — the header would gain a level count. | M2 |
+| Every texture is cooked to BC7 with one fixed encoder setting | `slop-cook/src/texture_import.rs` | Per-asset import settings — format, sRGB, alpha mode, mip policy | **Extended.** BC7 is right for colour and wrong for a normal map (BC5) or HDR (BC6H), and the alpha modes differ in whether they preserve alpha at all. Nothing yet knows what a texture *is for*; the material system is what will. | M2/M3 |
+| ~~No mipmaps~~ | `slop-cook/src/texture_import.rs` | A mip chain generated at cook time, compressed per level | **Resolved in M2.** Texture format version 2 carries a level count and per-level offsets; chains are generated in RGBA8 and compressed per level. | ✅ |
 | `cook --watch` polls the source tree on a timer | `slop-cli/src/main.rs` | An event-driven watcher (`notify` or the platform API) | **Replaced.** A tree walk four times a second is nothing here and wrong for a large project. Correctness does not depend on the watcher being right about what changed — the cache decides that, on the same code path a one-shot cook uses — so the loop is all that is replaced. | M2/M3 |
 | The runtime polls cooked mtimes rather than subscribing | `slop-asset/src/vfs.rs` | Watching the cache directory for events | **Replaced.** One `stat` per loaded asset, throttled; fine for tens, wasteful for thousands. `Version` is already opaque, so where the answer comes from can change without a caller noticing. | M2/M3 |
 | Hot reload waits for the device to go idle before swapping | `examples/cube/src/scene.rs` | Deferred deletion — free after the last frame that could reference it retires | **Replaced.** Correct, and the blunt instrument: a stall nobody perceives when a human saves a file. A renderer streaming assets per frame cannot do this, and that is what forces the queue. | M3 |
-| A cooked mesh has one fixed vertex layout — position, normal, UV | `slop-asset` | Flexible attributes, once a material needs tangents or a second UV set | **Replaced.** Cheap to change *because* it is cooked: bump `COOKER_VERSION` and every artifact regenerates from source, which is exactly what that constant is for. A format that guessed at flexibility now would be guessing. | M2 |
+| A cooked mesh has one fixed vertex layout — position, normal, UV, tangent | `slop-asset/src/mesh.rs` | Flexible attributes, once a material needs a second UV set or skinning weights | **Replaced.** Cheap to change *because* it is cooked: bump `COOKER_VERSION` and every artifact regenerates from source, which is exactly what that constant is for. Tangent was added this way in M2 — format version 2 → 3, vertex 32 → 48 bytes — which is the evidence that the escape hatch works. A format that guessed at flexibility now would still be guessing. | M3 |
 | A cooked mesh is decoded field by field rather than cast | `slop-asset` | A zero-copy read over an aligned or memory-mapped buffer | **Replaced.** `fs::read` returns a `Vec<u8>` aligned to 1, so casting it to `[Vertex]` is undefined; decoding explicitly is also what makes the format little-endian by construction rather than by accident. Zero-copy arrives with the streaming loader, which is what will own an aligned buffer. | M2 |
 | glTF import covers positions, normals, UVs and indices | `slop-cli` | Materials, tangents, skinning, animation, scene hierarchy | **Extended.** Enough that `examples/cube` draws from a file and its golden image still matches, which is the consumer that exists. Each addition is another attribute in the same pipeline, not a different one. | M2/M3 |
 | No `Cooker` trait — each asset kind drives the cache itself | `slop-asset`, `slop-cli` | An asset-kind abstraction, once two kinds disagree usefully | **Extended.** Deliberately not designed against one real implementor: a shader is one source to one artifact, a glTF is one source to many, and a trait shaped by the first would break on the second. The **cache** is what is shared and is what was factored out. | M2 |
-| Coarse include digest — any include recooks everything | `slop-cli/src/cook.rs` | Per-shader dependency lists via `slangc -depfile` | **Replaced.** Correct but pessimistic; wrong would be a cache that lies. | M2 |
-| `JobSystem` backed by `std::thread::scope` | `slop-core/src/jobs.rs` | Work-stealing pool | **Replaced.** API shape is final; do not build on the cost model. | M1 |
+| Coarse include digest — any include recooks everything | `slop-cook/src/shader_import.rs` | Per-shader dependency lists via `slangc -depfile` | **Replaced.** Correct but pessimistic; wrong would be a cache that lies. | M2 |
+| ~~`JobSystem` backed by `std::thread::scope`~~ | `slop-core/src/jobs.rs` | Work-stealing pool | **Resolved in M1.** Backed by `rayon`, held privately — no `rayon` type appears in any public signature, so the exit stays one file. | ✅ |
 | `HandleAllocator` liveness in a `Vec<bool>` | `slop-core/src/alloc.rs` | A bitset | **Replaced.** Entirely behind the API. | M1 |
 | Every sampler is created fresh at its use site | `examples/cube/src/scene.rs`, `slop-render/src/{mesh,overlay}.rs` | A sampler cache in the material system | **Replaced.** No longer a raw `vk::Sampler` freed by hand — `slop_rhi::TextureSampler` owns its own `Drop` as of 2026-08-02 — but there is still no sharing. Samplers are a small, highly repeated set of states, and a device permits only a few thousand; one per material is how that limit is reached. | M2 |
 | Whole-frame golden comparison only | `slop-verify` | Region assertions, intermediate captures | **Extended**, not replaced (`DESIGN.md` §8 item 8). | M3 |

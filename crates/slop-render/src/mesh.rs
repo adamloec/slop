@@ -426,14 +426,32 @@ impl MeshRenderer {
     /// attachment whose size differs from the colour target is a validation
     /// error on the first frame after a resize.
     ///
+    /// Replacing an existing depth buffer destroys the old image, which frames
+    /// still in flight may reference, so this waits for the device to go idle
+    /// first. That is the same blunt instrument `Swapchain::recreate` uses and
+    /// for the same reason: resizing is rare, and a per-frame fence is the
+    /// eventual answer rather than this one's.
+    ///
+    /// The wait is not redundant with the swapchain's. Today the only caller
+    /// reaches here through `FrameRenderer::prepare`, which has already waited —
+    /// but that made this function correct by call order rather than by
+    /// construction, with nothing to catch a caller that resizes the renderer
+    /// without recreating a swapchain. Waiting here costs nothing on the
+    /// existing path, where the device is already idle.
+    ///
     /// # Errors
     ///
-    /// [`RenderError::Rhi`] if the image cannot be allocated.
+    /// [`RenderError::Rhi`] if the device cannot be waited on, or the image
+    /// cannot be allocated.
     pub fn resize(
         &mut self,
         allocator: &Arc<Allocator>,
         extent: vk::Extent2D,
     ) -> Result<(), RenderError> {
+        if self.depth.is_some() {
+            self.device.wait_idle()?;
+        }
+
         self.depth = Some(Image::new(
             allocator,
             &ImageConfig {

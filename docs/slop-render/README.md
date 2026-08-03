@@ -1,12 +1,11 @@
 # slop-render
 
-**Last updated:** 2026-08-02
+**Last updated:** 2026-08-03
 
 ## 1. Purpose
 
-The renderer — `DESIGN.md` §4. Three things today: the loop that turns a
-swapchain into a stream of frames, the pass that draws a cooked model, and the
-one that draws a debug overlay on top.
+The renderer — `DESIGN.md` §4. Two things today: the loop that turns a swapchain
+into a stream of frames, and the pass that draws a cooked model.
 
 ```
  window size ──► prepare ──► (resize your attachments)
@@ -14,8 +13,9 @@ one that draws a debug overlay on top.
                    ▼
               render(|frame| …) ──► acquire, record, submit, present
                    │
-                   ├──► MeshRenderer::record   — the model, with its materials
-                   └──► Overlay::draw          — the debug UI, over it
+                   ├──► MeshRenderer::record        — the model, with its materials
+                   ├──► slop_editor::DebugUi::draw  — the debug UI, over it
+                   └──► Frame::finish               — the last writer, and only it
 ```
 
 The render graph and the passes that make up Stage A arrive at M3 (`PLAN.md`
@@ -30,11 +30,12 @@ materials, Sponza — needed a frame loop that was not copy-pasted.
 | Swapchain recreation, reported so callers can resize with it | Landed | M2 |
 | Both examples driven by it, goldens unchanged | Landed | M2 |
 | `VertexBinding` — vertex layout from cooked reflection | Landed | M2 |
-| `Overlay` — the debug UI's Vulkan backend (§8) | Landed | M2 |
 | `MeshRenderer` — draws a cooked model, one pipeline for every material | Landed — see §10 | M2 |
+| Material system — glTF materials, bindless textures, alpha modes | Landed | M2 |
+| `Overlay` — the debug UI's Vulkan backend | Moved to `slop-editor` — see §8 | M2 |
 | Render graph — passes declaring reads and writes | Planned | M3 |
-| Material system | Planned — its blocker, shader reflection, has landed | M2 |
 | Clustered forward+, shadows, IBL, HDR/tonemap | Planned | M3 |
+| `MeshRenderer` decomposition — it is a god object today | Planned — `CONSIDERATIONS.md` item 2 | M3 |
 | Automated coverage of the loop itself | **Absent** — see §6 | M3 |
 
 ## 3. Key types
@@ -47,7 +48,6 @@ materials, Sponza — needed a frame loop that was not copy-pasted.
 | `VertexBinding` | A pipeline vertex layout derived from a shader's cooked reflection |
 | `Target` | The image being drawn to, and the states it enters and leaves in |
 | `FrameOutcome` | Whether a frame was presented or skipped |
-| `Overlay` | Draws what an immediate-mode UI tessellated, over a target |
 | `MeshRenderer` | Loads a cooked model and draws every mesh it places |
 
 ## 4. Why two calls and not one
@@ -106,14 +106,19 @@ and neither golden image moved.
 oversight to be quietly carried.
 
 Everything it does needs a surface, a surface needs a window, and a window needs
-an event loop — none of which a test harness has. The cube's golden test renders
-headlessly and therefore exercises `Scene`, not this. So the check is running
-both examples:
+an event loop — none of which a test harness has. The golden tests render
+headlessly and therefore exercise `Scene` and `MeshRenderer`, not this. So the
+check is running the examples:
 
 ```
 SLOP_FRAMES=120 cargo run -p example-cube
 SLOP_FRAMES=120 cargo run -p example-triangle
+SLOP_FRAMES=120 cargo run -p example-model
 ```
+
+`MeshRenderer` **is** covered, as of M2: `examples/model/tests/golden.rs` drives
+it headlessly against two references — the cube model, which always runs, and
+Sponza, which skips by name when it has not been fetched.
 
 Both exit non-zero on failure and run with validation layers on, so this catches
 synchronisation mistakes — but it is a command someone has to type. Recorded in
@@ -139,58 +144,20 @@ covers it at all, because `SLOP_FRAMES` never resizes the window.
 6. **The device is waited idle before the renderer's fields drop.** Destroying a
    semaphore a pending submission still references is undefined.
 
-## 8. The debug overlay
+## 8. The debug overlay lives in `slop-editor`
 
-`DESIGN.md` §10.2's overlay, and only its *renderer* half. `Overlay` takes the
-triangles egui produced and draws them; it owns no egui context, reads no input,
-and does not know what a window is. Those live in the application, where the
-platform already put them.
+`Overlay` was here and moved out in M2. Both halves of the reasoning that put it
+here are still true — it takes tessellated triangles, owns no egui context and
+does not know what a window is — but "what draws the UI" and "what feeds the UI"
+are one concern split across two types, and a renderer crate carrying a UI
+backend is a renderer crate with an opinion about UI toolkits.
 
-```
- application            slop-render
- ───────────            ───────────
- egui::Context   ──▶  primitives ──▶  Overlay::draw
- egui_winit      ──▶  raw input
-```
+**`slop-render` now depends on nothing egui-shaped.** The overlay's own design
+notes moved with it, to `docs/slop-editor/README.md` §6.
 
-**egui rather than Dear ImGui**, and `DESIGN.md` §4 had already chosen it for
-`slop-editor`. Checked again rather than assumed: egui is at 0.35 and pure Rust,
-`imgui-rs` is at 0.12 and behind upstream, and the actively developed
-`dear-imgui-rs` is at `0.16.0-alpha.1`. Dear ImGui also means a C++ build, which
-`DESIGN.md` §2.13's trap table names as the dependency *most likely to actually
-bite us* — the same surface the §2.11 correction had just removed.
-
-**The backend is written rather than taken.** `egui-ash-renderer` exists, and it
-brings its own descriptor pool, sampler and pipeline management — all of which
-this engine already has in a bindless form a general-purpose backend cannot
-assume. Taking it would mean two descriptor models in one frame. What is written
-instead is an upload, a pipeline and a draw loop that sets a scissor rectangle;
-the font rasterizer and layout engine, which are the genuinely hard parts, are
-egui's.
-
-Four things that are not obvious, each of which cost a debugging pass:
-
-- **The overlay opens its own render pass.** A pipeline used inside a pass must
-  declare the depth format that pass carries. The overlay wants no depth at all,
-  so sharing the scene's pass would depth-test the interface against the cube and
-  let geometry occlude the readout describing it.
-- **The descriptor set is re-bound with the overlay's own layout.** Two pipeline
-  layouts are compatible only if their push constant ranges match as well as
-  their set layouts, and the overlay's block is a different size from the
-  scene's. Validation catches this; nothing else would.
-- **Vertex buffers are per in-flight slot.** `Frame::slot` exists for this. One
-  shared buffer is corrupted by the frame still reading it — `FrameRenderer`
-  waits for *this* slot before recording, which says nothing about the others.
-- **Vertex positions are in points; scissor rectangles are in physical pixels.**
-  The shader divides by the screen size *in points*, so a scaled display draws
-  the interface at the right size. Dividing by the physical size instead draws
-  it at 1/scale while its clip rectangles stay full size, which shaves the left
-  edge off every label — invisible at 100% scaling, which is what a headless
-  test defaults to.
-- **The colour attribute is four bytes in the buffer and a `float4` in the
-  shader.** Reflection describes the shader side and cannot see the buffer
-  format, so this module states its layout explicitly and checks the shader
-  against it. See §9.
+What stayed behind is the part that is genuinely about this crate: `Frame::slot`
+exists because a UI writes GPU memory per frame and needs one copy per in-flight
+slot, and §9 below is why reflection alone cannot derive that UI's vertex layout.
 
 ## 9. What reflection cannot tell you
 

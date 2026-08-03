@@ -1,6 +1,6 @@
 # slop-app
 
-**Last updated:** 2026-08-01
+**Last updated:** 2026-08-03
 
 ## 1. Purpose
 
@@ -13,21 +13,33 @@ in `examples/`, and the editor embeds this crate exactly as a shipping game does
 
 ## 2. Status
 
-The smallest crate in the workspace, and deliberately so — its main job arrives
-with `slop-render` at M3.
+Small, and deliberately so. It owns bring-up and configuration, not the frame
+loop — that is `slop-render`'s, and it landed there during M2.
 
 | Area | State | Milestone |
 |---|---|---|
 | `logging` — log filter policy, `SLOP_LOG` | Landed | M0 |
 | `window` — creation, and the winit-to-Vulkan seam | Landed | M0 |
-| Main loop wiring sim and render | Planned — the frame loop's shape is `slop-render`'s to determine | M3 |
-| Configuration file, CLI arguments | Planned | M2 |
+| `gpu` — `Gpu`: window, surface, device and allocator in drop order | Landed | M2 |
+| `timing` — `FrameTimes`, a ring of frame durations | Landed | M2 |
+| Event-loop shell — `ApplicationHandler`, resize, `SLOP_FRAMES` | **Absent** — see below | M3 |
+| Configuration file, CLI arguments | Planned | M3 |
 | Module and plugin wiring | Planned | M4 |
 
-**The examples currently own the frame loop**, and two of them carry roughly 150
-lines of near-identical plumbing. That is a known and deliberate cost recorded in
-`PLAN.md` §6.1, along with what would change the decision: a third copy is the
-signal to lift it here early rather than waiting for M3.
+**`Gpu` is what removed the last `unsafe` from every example.** `create_surface`
+is unsafe for one reason — the window must outlive the surface — and holding the
+four objects in one type with a declared drop order discharges that obligation
+once, here, rather than at every call site.
+
+**The event-loop shell is still copied, four times.** `window`, `triangle`,
+`cube` and `model` each carry an `App`/`Renderer` pair, an
+`impl ApplicationHandler`, and hand-rolled `SLOP_FRAMES` parsing.
+`CONVENTIONS.md` §2.3's "third copy is the trigger to extract" is the rule that
+correctly produced `FrameRenderer` and `Gpu` — it fired on the frame loop and the
+extraction stopped halfway, taking everything *except* the loop, which is the
+part actually being copied. It is at four copies, one past the trigger.
+`CONSIDERATIONS.md` item 4 records it; this crate is the right home and already
+depends on `winit`.
 
 ## 3. The three consumers
 
@@ -38,7 +50,7 @@ running under — that assumption is what turns an engine into a framework.
 flowchart TD
     app["slop-app"]
     game["shipping game"]
-    editor["slop-editor"]
+    editor["editor — DESIGN.md §2.12, M6"]
     headless["headless / CI"]
 
     game --> app
@@ -47,6 +59,11 @@ flowchart TD
 
     app --> owns["each owns main and drives the loop"]
 ```
+
+**The editor arrow is the plan, not the tree.** `slop-editor` today is the debug
+UI layer (§10.2) and does not depend on this crate at all — the examples wire the
+two together. §10.1's editor application is M6, and it is the one that will embed
+this crate as a game does.
 
 Headless is not a debug convenience. It is what makes deterministic replay,
 golden-image tests, and the frame-budget harness possible (`DESIGN.md` §5), so

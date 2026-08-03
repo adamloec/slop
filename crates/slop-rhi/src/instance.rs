@@ -6,6 +6,8 @@
 //! `docs/DESIGN.md` §5 requires for golden images and deterministic replay.
 
 use std::ffi::{CStr, CString, c_void};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use ash::{Entry, vk};
 use slop_core::diagnostics::tracing::{debug, error, info, trace, warn};
@@ -81,6 +83,14 @@ pub struct Instance {
     raw: ash::Instance,
     entry: Entry,
     validation_enabled: bool,
+    /// How many validation errors the messenger has seen. Declared after `debug`
+    /// so it outlives the callback holding a pointer to it.
+    ///
+    /// The one atomic in this crate outside a test, and it is not ambient state:
+    /// it belongs to this instance and is reachable only through it. A
+    /// `extern "system"` callback has no other channel — the `user_data` pointer
+    /// is what Vulkan gives us, so the count has to live behind one.
+    errors: Arc<AtomicU64>,
 }
 
 struct DebugMessenger {
@@ -132,8 +142,10 @@ impl Instance {
         // 'static.
         let raw = unsafe { entry.create_instance(&create_info, None) }?;
 
+        let errors = Arc::new(AtomicU64::new(0));
+
         let debug = if validation_enabled {
-            Some(DebugMessenger::new(&entry, &raw)?)
+            Some(DebugMessenger::new(&entry, &raw, &errors)?)
         } else {
             None
         };
@@ -150,7 +162,22 @@ impl Instance {
             raw,
             entry,
             validation_enabled,
+            errors,
         })
+    }
+
+    /// How many validation errors this instance has reported since creation.
+    ///
+    /// Always zero when validation is disabled, which is every release build —
+    /// so this is an assertion a test makes, not a branch a frame takes.
+    ///
+    /// It exists because validation output otherwise only reaches `tracing`,
+    /// where a test cannot see it. A suite that renders correct-looking images
+    /// while the layer reports a use-after-free is reporting success at exactly
+    /// the moment it should not, which `docs/PLAN.md` §3.1 already records
+    /// learning once from golden tests that skipped on setup failure.
+    pub fn validation_errors(&self) -> u64 {
+        self.errors.load(Ordering::Relaxed)
     }
 
     /// The underlying `ash` instance.
@@ -288,7 +315,11 @@ impl std::fmt::Debug for Instance {
 }
 
 impl DebugMessenger {
-    fn new(entry: &Entry, instance: &ash::Instance) -> Result<Self, RhiError> {
+    fn new(
+        entry: &Entry,
+        instance: &ash::Instance,
+        errors: &Arc<AtomicU64>,
+    ) -> Result<Self, RhiError> {
         let loader = ash::ext::debug_utils::Instance::new(entry, instance);
 
         let create_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
@@ -303,7 +334,11 @@ impl DebugMessenger {
                     | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
                     | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
             )
-            .pfn_user_callback(Some(debug_callback));
+            .pfn_user_callback(Some(debug_callback))
+            // Points at the `AtomicU64` inside the caller's `Arc`, which
+            // `Instance` declares after `debug` and therefore outlives this
+            // messenger. The callback only ever reads it as `&AtomicU64`.
+            .user_data(Arc::as_ptr(errors).cast::<c_void>().cast_mut());
 
         // SAFETY: `create_info` is fully initialized and the callback has the
         // signature Vulkan requires. `loader` borrows `instance`, which outlives
@@ -323,7 +358,7 @@ unsafe extern "system" fn debug_callback(
     severity: vk::DebugUtilsMessageSeverityFlagsEXT,
     kind: vk::DebugUtilsMessageTypeFlagsEXT,
     data: *const vk::DebugUtilsMessengerCallbackDataEXT<'_>,
-    _user_data: *mut c_void,
+    user_data: *mut c_void,
 ) -> vk::Bool32 {
     // SAFETY: Vulkan guarantees `data` points to a valid callback-data struct
     // for the duration of this call.
@@ -344,6 +379,14 @@ unsafe extern "system" fn debug_callback(
         vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE => "performance",
         _ => "general",
     };
+
+    if severity == vk::DebugUtilsMessageSeverityFlagsEXT::ERROR && !user_data.is_null() {
+        // SAFETY: `user_data` is the pointer `DebugMessenger::new` took from an
+        // `Arc<AtomicU64>` owned by the `Instance` that created this messenger.
+        // That `Arc` is declared after `debug`, so it is still alive for as long
+        // as the messenger can call back into here.
+        unsafe { &*user_data.cast::<AtomicU64>() }.fetch_add(1, Ordering::Relaxed);
+    }
 
     match severity {
         vk::DebugUtilsMessageSeverityFlagsEXT::ERROR => error!(kind, "{message}"),

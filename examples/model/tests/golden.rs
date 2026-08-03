@@ -36,6 +36,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use example_model::{OrbitCamera, bounds, camera};
 use slop_math::Vec3;
@@ -43,7 +44,7 @@ use slop_render::{MeshRenderer, Target};
 use slop_rhi::{
     Allocator, BindlessHeap, BindlessHeapConfig, Buffer, BufferConfig, CommandPool, Device,
     DeviceSelection, Image, ImageConfig, ImageState, Instance, InstanceConfig, MemoryLocation,
-    RhiError, ShaderModule, vk,
+    RhiError, ShaderModule, TimelineSemaphore, vk,
 };
 use slop_verify::{Golden, Mode, Rgba8, Tolerance};
 
@@ -155,6 +156,58 @@ fn consecutive_frames_actually_differ() {
         renderer.render(CAPTURED_FRAME),
         renderer.render(CAPTURED_FRAME + 30),
         "the camera does not appear to be orbiting"
+    );
+}
+
+#[test]
+fn resizing_between_frames_replaces_the_depth_buffer_safely() {
+    // `MeshRenderer::resize` destroys the depth image it is replacing, and a
+    // frame submitted just before may still be reading it. In the windowed path
+    // that is survivable by accident: `FrameRenderer::prepare` recreates the
+    // swapchain first, and `Swapchain::recreate` waits for the device. Here
+    // there is no swapchain and no such wait, which is why this test lives in
+    // the headless harness rather than a windowed one.
+    //
+    // The signal is the validation layer, which reports
+    // VUID-vkDestroyImage-image-01000 when an image a pending command buffer
+    // references is destroyed. `Instance::validation_errors` is what makes that
+    // assertable: without it the layer's report only reaches `tracing` and this
+    // test passes just as happily against the unfixed code.
+    let Some((device, allocator)) = headless() else {
+        return;
+    };
+
+    let Some(mut renderer) = harness(&device, &allocator, "models/cube.model") else {
+        return;
+    };
+
+    let before = renderer.render(CAPTURED_FRAME);
+
+    // The frame is deliberately left in flight: `submit_frame` returns without
+    // waiting, so the GPU may still be reading the depth buffer that `resize` is
+    // about to destroy. Going through `render` here would prove nothing, because
+    // it waits before returning and nothing is ever in flight.
+    let in_flight = renderer.submit_frame(CAPTURED_FRAME);
+
+    // The same extent on purpose: the depth attachment has to keep matching the
+    // colour target, which this harness does not resize. The destroy-and-replace
+    // is what is under test, not the new size.
+    renderer
+        .resize(&allocator)
+        .expect("resizing to the same extent must succeed");
+
+    Headless::wait(&in_flight);
+
+    assert_eq!(
+        device.instance().validation_errors(),
+        0,
+        "the validation layer reported an error while resizing over a frame in flight"
+    );
+
+    assert_eq!(
+        before,
+        renderer.render(CAPTURED_FRAME),
+        "the same frame rendered differently after the depth buffer was replaced"
     );
 }
 
@@ -353,8 +406,24 @@ impl Headless {
         })
     }
 
+    /// Rebuild the renderer's depth buffer at the target's current size.
+    fn resize(&mut self, allocator: &Arc<Allocator>) -> Result<(), slop_render::RenderError> {
+        self.meshes.resize(allocator, self.target.extent())
+    }
+
     /// Render one frame and bring it back to the CPU.
     fn render(&mut self, frame: u64) -> Rgba8 {
+        let timeline = self.submit_frame(frame);
+        Self::wait(&timeline);
+        self.read_back()
+    }
+
+    /// Record and submit one frame, returning without waiting for it.
+    ///
+    /// Split out of [`Self::render`] so a test can hold a frame in flight and do
+    /// something to the resources it references. Every other caller wants
+    /// `render`, which waits.
+    fn submit_frame(&mut self, frame: u64) -> TimelineSemaphore {
         self.pool.reset().expect("the pool must reset");
         let command = self
             .pool
@@ -406,8 +475,34 @@ impl Headless {
         command.make_visible_to_host(self.readback.handle());
         command.end().expect("end");
 
-        submit(&self.device, &command);
+        let timeline =
+            TimelineSemaphore::new(&self.device, 0).expect("semaphore creation must succeed");
 
+        self.device
+            .submit_graphics(&slop_rhi::Submission {
+                command: &command,
+                wait: &[],
+                signal: &[],
+                signal_timeline: &[(timeline.handle(), 1)],
+            })
+            .expect("submission must succeed");
+
+        timeline
+    }
+
+    /// Block until a submitted frame has finished.
+    fn wait(timeline: &TimelineSemaphore) {
+        assert!(
+            timeline
+                .wait(1, Duration::from_secs(10))
+                .expect("waiting must not fail"),
+            "the GPU did not finish within ten seconds"
+        );
+    }
+
+    /// Copy the target out of the readback buffer. Only valid once the frame
+    /// that wrote it has finished.
+    fn read_back(&self) -> Rgba8 {
         let bytes = self
             .readback
             .mapped()
@@ -426,20 +521,6 @@ impl Drop for Headless {
             eprintln!("device did not go idle: {failure}");
         }
     }
-}
-
-/// Submit a recorded buffer and wait for it.
-fn submit(device: &Arc<Device>, command: &slop_rhi::CommandBuffer) {
-    device
-        .submit_graphics(&slop_rhi::Submission {
-            command,
-            wait: &[],
-            signal: &[],
-            signal_timeline: &[],
-        })
-        .expect("submission must succeed");
-
-    device.wait_idle().expect("the GPU must finish");
 }
 
 /// An approved reference, committed to the repository.

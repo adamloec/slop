@@ -24,19 +24,20 @@ cooked it is the one that understands the format.
 |---|---|---|
 | `Cache` — layout, content-hash keying, stamps | Landed | M2 |
 | `Vfs` — reading cooked bytes at runtime | Landed | M2 |
-| Shader cooking driven onto the cache | Landed — in `slop-cli` | M2 |
+| Shader cooking driven onto the cache | Landed — in `slop-cook` | M2 |
 | `Mesh` — the cooked mesh format | Landed | M2 |
 | `Material` — the cooked material format | Landed | M2 |
 | `Model` — the cooked model format: what is placed where | Landed | M2 |
-| glTF import + cook — geometry, materials, referenced images | Landed — importer in `slop-cli` | M2 |
+| glTF import + cook — geometry, materials, referenced images, tangents | Landed — importer in `slop-cook` | M2 |
 | `Texture` — the cooked texture format | Landed | M2 |
-| PNG import + cook | Landed — importer in `slop-cli` | M2 |
+| PNG import + cook | Landed — importer in `slop-cook` | M2 |
 | Proven end to end — `examples/cube` draws only cooked assets | Landed — see §5.4 | M2 |
 | `Assets<T>` — the registry, `Handle<T>`, load, reload, unload | Landed — see §5.5 | M2 |
 | `Reflection` — what a cooked shader says about itself | Landed — see §5.8 | M2 |
 | Hot reload — `reload_changed` plus `cook --watch` | Landed — see §5.6 | M2 |
 | Block compression — BC7 in the importer | Landed — see §5.7 | M2 |
-| Mipmaps | Planned — BC7 without them aliases at distance | M2 |
+| Mipmaps — a chain per texture, compressed per level | Landed | M2 |
+| `Vfs::discover` — walking up for a project's cache | Landed | M2 |
 | Per-asset import settings | Planned — what decides format, sRGB, alpha mode | M2/M3 |
 | Async streaming | Planned — **beside** the sync read, not replacing it. Moved to M3: Sponza is what will say what the API needs | M3 |
 | Reference counting to decide when to unload | Planned — waits for something holding handles | M2/M3 |
@@ -54,7 +55,7 @@ flowchart LR
 ```
 
 Two halves that never meet in one process: `Cache` is the write side and only
-`slop-cli` uses it; `Vfs` is the read side and is what ships.
+`slop-cook` uses it; `Vfs` is the read side and is what ships.
 
 ## 4. Key types
 
@@ -320,7 +321,7 @@ Three things worth knowing:
 The encoder is Intel's ISPC texture compressor, and taking it rather than writing
 it is `DESIGN.md` §3's write/take line applied literally: eight modes, partition
 tables and endpoint fitting, all offline, none of it touching the engine's
-architecture. It is a dependency of `slop-cli` **only**, so invariant 7 keeps it
+architecture. It is a dependency of `slop-cook` **only**, so invariant 7 keeps it
 out of anything that ships.
 
 **The golden image did not change.** A two-colour checkerboard is BC7's easy
@@ -400,6 +401,8 @@ VFS is synchronous" is not mistaken for a shortcut.
 6. **The read side knows nothing about formats.** `Vfs` returns bytes; whoever
    asked for them is what understands them. A `Vfs` that learned about SPIR-V
    would learn about glTF next, and then it would be the engine.
-7. **The write side never ships.** `Cache` exists for `slop-cli`. If engine code
+7. **The write side never ships.** `Cache` exists for `slop-cook`. If engine code
    reaches for it, something has been built the wrong way round — the engine
-   loads cooked bytes and compiles nothing (`DESIGN.md` §2.8).
+   loads cooked bytes and compiles nothing (`DESIGN.md` §2.8). As of M2 this is
+   enforced by the dependency graph rather than by habit: `slop-cook` is a
+   separate crate, and only `slop-cli` depends on it.
