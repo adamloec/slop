@@ -19,15 +19,27 @@ egui-winit = { workspace = true }
 slop-asset = { workspace = true }
 slop-core = { workspace = true }
 # The inspector reads and writes components through reflection, which is what
-# lets it show a type this crate was never compiled against.
-slop-ecs = { workspace = true }
-slop-reflect = { workspace = true }
+# lets it show a type this crate was never compiled against. Optional, because
+# it is the only part of this crate that needs an ECS -- see `[features]`.
+slop-ecs = { workspace = true, optional = true }
+slop-reflect = { workspace = true, optional = true }
 # For `Frame` and the pass it draws into. The editor's overlay is a renderer;
 # it is not itself part of the renderer.
 slop-render = { workspace = true }
 slop-rhi = { workspace = true }
 thiserror = { workspace = true }
 winit = { workspace = true }
+
+[features]
+# The entity inspector, and the only reason this crate would need an ECS.
+#
+# Off by default, and that is the same argument that split this crate out of
+# `slop-app` in the first place: `overlay` and `debug` need neither `slop-ecs`
+# nor `slop-reflect`, so a frame-timing overlay on a triangle should not pull
+# in an ECS and a reflection system to draw one. `docs/DESIGN.md` §10.2's debug
+# UI and §10.1's editor share "almost nothing architecturally", and this is the
+# first place that shows up in the dependency graph rather than only in prose.
+inspector = ["dep:slop-ecs", "dep:slop-reflect"]
 
 [lints]
 workspace = true

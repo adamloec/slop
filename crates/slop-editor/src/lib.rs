@@ -38,12 +38,21 @@
 //!
 //! That order is a strict dependency chain, and it is what keeps the headless
 //! tests possible: they use `overlay` alone.
+//!
+//! It is also why the inspector is behind the `inspector` feature, off by
+//! default. Being last in a strict chain means nothing else here needs it, and
+//! it is the only part that needs `slop-ecs` and `slop-reflect` — so a frame
+//! overlay on a triangle no longer links an ECS and a reflection system to draw
+//! one. That is the same complaint this crate's existence answers, reproduced
+//! one layer up.
 
 pub mod debug;
+#[cfg(feature = "inspector")]
 pub mod inspector;
 pub mod overlay;
 
 pub use debug::{DebugUi, Declared};
+#[cfg(feature = "inspector")]
 pub use inspector::{InspectorState, inspector};
 pub use overlay::Overlay;
 

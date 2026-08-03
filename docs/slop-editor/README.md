@@ -29,9 +29,29 @@ what §2.12 says it is.
 | Frame timing readout | Landed | M2 |
 | Entity inspector over `slop-reflect` | Landed | M2 |
 | Render pass visualiser | Planned — needs a graph to visualise | M3 |
-| `inspector` behind a cargo feature | Planned — `CONSIDERATIONS.md` item 5 | — |
+| `inspector` behind a cargo feature, off by default | Landed — see §2.1 | M2 |
 | Rename to `slop-debug` | Planned — `CONSIDERATIONS.md` item 5 | — |
 | §10.1's scene editor, as a binary | Planned | M6 |
+
+### 2.1 Features
+
+| Feature | Default | What it adds |
+|---|---|---|
+| `inspector` | off | The entity inspector, and with it `slop-ecs` and `slop-reflect` |
+
+Off by default because the module map below is a strict chain and the inspector
+is its last link — nothing else in this crate needs it, and it is the only part
+needing an ECS or a reflection system.
+
+The effect is measurable rather than tidy-minded: `examples/triangle` and
+`examples/cube` now link neither crate, while `examples/model` — the one that
+edits components live — turns the feature on. That is the same complaint this
+crate's existence answers, which `CONSIDERATIONS.md` item 5 found reproduced one
+layer up: a frame-timing overlay on a triangle should not pull in an ECS to draw
+one.
+
+The rename to `slop-debug` is a separate matter and stays deferred. Merging the
+two is what would have stopped the cheap half happening.
 
 ## 3. Module map
 

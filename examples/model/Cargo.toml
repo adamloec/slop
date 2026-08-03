@@ -24,7 +24,9 @@ slop-app = { workspace = true }
 slop-asset = { workspace = true }
 slop-core = { workspace = true, features = ["subscriber"] }
 slop-ecs = { workspace = true }
-slop-editor = { workspace = true }
+# With the inspector: this is the one example that edits components live, which
+# is what that feature is for.
+slop-editor = { workspace = true, features = ["inspector"] }
 slop-math = { workspace = true }
 slop-reflect = { workspace = true }
 slop-render = { workspace = true }
