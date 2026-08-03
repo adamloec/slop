@@ -35,8 +35,8 @@ use slop_ecs::{Entity, World};
 use slop_editor::{DebugUi, InspectorState};
 use slop_math::Vec3;
 use slop_render::{
-    FrameRenderer, FrameRendererConfig, Graph, HdrTarget, Imported, MeshRenderer, RenderPass,
-    Tonemap,
+    FrameRenderer, FrameRendererConfig, Graph, HdrTarget, Imported, Lights, MeshRenderer,
+    PointLight, RenderPass, Tonemap, View,
 };
 
 /// What the scene pass clears the HDR target to.
@@ -44,6 +44,13 @@ use slop_render::{
 /// Dark rather than black, so that geometry missing entirely is visibly
 /// different from geometry that is merely unlit.
 const CLEAR: [f32; 4] = [0.02, 0.02, 0.03, 1.0];
+
+/// How many lights the buffer is built to hold.
+///
+/// Fixed for its lifetime — see `Lights::new` — so it is sized for what §9.4 is
+/// heading towards rather than for the four this example places. A thousand
+/// rows is thirty-two kilobytes, which is not worth being careful about.
+const LIGHT_CAPACITY: u32 = 1024;
 use slop_rhi::{
     BindlessHeap, BindlessHeapConfig, ClearValue, Device, ImageAspect, ImageState, Load,
     ShaderModule, Stage,
@@ -98,6 +105,11 @@ struct Renderer {
     hdr: HdrTarget,
     /// What resolves it onto the swapchain.
     tonemap: Tonemap,
+    /// This frame's lights, one buffer per frame in flight.
+    lights: Lights,
+    /// Where they sit — a function of the model's bounds, so it frames whatever
+    /// is loaded. Kept rather than rebuilt, since nothing moves them yet.
+    placed_lights: Vec<PointLight>,
     heap: BindlessHeap,
     frames: FrameRenderer,
     /// Where the model sits, for the camera to look at.
@@ -192,6 +204,18 @@ impl Renderer {
 
         let (centre, radius) = bounds(&vfs, &logical);
 
+        // Sized for far more than four, because the capacity is fixed for the
+        // lifetime of the buffer — see `Lights::new` — and E4's whole point is
+        // that many lights become affordable.
+        let lights = Lights::new(
+            gpu.allocator(),
+            &mut heap,
+            frames.frames_in_flight(),
+            LIGHT_CAPACITY,
+        )
+        .map_err(|error| error.to_string())?;
+        let placed_lights = example_model::lights(centre, radius);
+
         // One entity, one component. `with_builtins` registers the primitives
         // that `OrbitCamera`'s fields resolve to; the component's own type is
         // registered from its derived `Reflect` impl.
@@ -223,6 +247,8 @@ impl Renderer {
             meshes,
             hdr,
             tonemap,
+            lights,
+            placed_lights,
             heap,
             frames,
             centre,
@@ -283,6 +309,8 @@ impl Renderer {
         let hdr = &self.hdr;
         let tonemap = &self.tonemap;
         let heap = &self.heap;
+        let lights = &mut self.lights;
+        let placed_lights = &self.placed_lights;
         let ui = &mut self.ui;
         let allocator = self.gpu.allocator();
         let centre = self.centre;
@@ -325,14 +353,27 @@ impl Renderer {
                     final_state: None,
                 });
 
-                let view_projection = camera(aspect, centre, angle, settings);
+                // Written here rather than before the frame opened, and that is
+                // the safe place rather than a convenient one: `render` waits
+                // for *this* slot's previous submission before handing the
+                // frame over, so the GPU has finished reading what was here.
+                //
+                // A failure is logged rather than propagated. The only way this
+                // fails is more lights than the buffer holds, and a scene that
+                // renders with the lighting it had is better than one that does
+                // not render.
+                if let Err(failure) = lights.write(frame.slot, placed_lights) {
+                    error!(error = %failure, "this frame's lights were not written");
+                }
 
-                if let Some((image, view, aspect)) = meshes.depth() {
+                let view = View::new(camera(aspect, centre, angle, settings), lights, frame.slot);
+
+                if let Some((image, depth_view, depth_aspect)) = meshes.depth() {
                     let depth = graph.import(&Imported {
                         name: "depth",
                         image,
-                        view,
-                        aspect,
+                        view: depth_view,
+                        aspect: depth_aspect,
                         extent: hdr.extent(),
                         state: ImageState::UNDEFINED,
                         final_state: None,
@@ -353,7 +394,9 @@ impl Renderer {
                             )),
                             ..RenderPass::default()
                         },
-                        |pass| meshes.draw_depth(pass, heap, view_projection),
+                        // Unlit: the prepass shades nothing, so the lights in
+                        // `view` are along for the ride rather than read.
+                        |pass| meshes.draw_depth(pass, heap, &view),
                     );
 
                     graph.add(
@@ -371,7 +414,7 @@ impl Renderer {
                             )),
                             ..RenderPass::default()
                         },
-                        |pass| meshes.draw(pass, heap, view_projection),
+                        |pass| meshes.draw(pass, heap, &view),
                     );
                 }
 

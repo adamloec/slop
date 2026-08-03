@@ -143,6 +143,54 @@ pub fn bounds(vfs: &Vfs, logical: &str) -> (Vec3, f32) {
     (centre, (max - min).length() * 0.5)
 }
 
+/// Four point lights arranged around a model of the given bounds.
+///
+/// Scaled to the model rather than fixed, for the reason [`bounds`] gives: this
+/// is a viewer, and a light rig hand-tuned to one asset would make it a demo.
+/// Four rather than one because a single light leaves half of every surface on
+/// ambient alone, and the point of `docs/PLAN.md` §9.4's clustering is many
+/// lights — a rig that reads correctly with one would prove nothing about it.
+///
+/// Deliberately **not** random. `docs/DESIGN.md` §2.14 makes the frame number
+/// the only clock a reproducible render may read, and a golden image of a lit
+/// scene needs the lighting to be a function of the model and nothing else.
+///
+/// Distinct colours, and warm against cool: a lighting bug that swaps two lights
+/// or drops one is obvious under coloured light and invisible under four white
+/// ones.
+#[must_use]
+pub fn lights(centre: Vec3, radius: f32) -> Vec<slop_render::PointLight> {
+    // **Outside** the bounding sphere, not inside it. Inside is where these
+    // started, and it lit Sponza's atrium nicely while leaving the cube's golden
+    // image bit-identical — because a light at 0.45 of a unit cube's radius sits
+    // *within* the cube, where every outward-facing normal points away from it.
+    // A rig that silently does nothing to compact models is a rig that stops the
+    // reference from covering the light path at all, which is how it was found.
+    let offset = radius * 1.15;
+    // Far enough past the model that the far side is lit too, so the falloff
+    // reads as falloff rather than as a hard edge across the middle.
+    let reach = radius * 3.0;
+    // Inverse-square over that distance: a surface at the centre is about
+    // `radius` away, so the intensity has to carry a factor of `radius²` before
+    // anything reads as lit at all.
+    let intensity = radius * radius * 1.6;
+
+    [
+        (Vec3::new(1.0, 0.6, -1.0), Vec3::new(1.0, 0.82, 0.62)),
+        (Vec3::new(-1.0, 0.6, -1.0), Vec3::new(0.55, 0.72, 1.0)),
+        (Vec3::new(-1.0, 0.35, 1.0), Vec3::new(1.0, 0.65, 0.55)),
+        (Vec3::new(1.0, 0.35, 1.0), Vec3::new(0.65, 1.0, 0.78)),
+    ]
+    .into_iter()
+    .map(|(direction, color)| slop_render::PointLight {
+        position: centre + direction * offset,
+        color,
+        intensity,
+        radius: reach,
+    })
+    .collect()
+}
+
 /// Cooked assets, found by walking up from wherever this was run.
 ///
 /// The starting directory is chosen here rather than inside `slop-asset` —

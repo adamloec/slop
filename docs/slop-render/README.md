@@ -42,7 +42,10 @@ E4–E7, and are added to the same declaration rather than to a call order.
 | Compute passes and tracked buffers in the graph | Landed | M3, E4 |
 | HDR target and tonemap resolve | Landed | M3, E2 |
 | Depth prepass, including the alpha-masked half | Landed — masked half untested, `PLAN.md` §6.1 | M3, E4 |
-| Clustered forward+, shadows, IBL, post stack | Planned | M3, E4–E7 |
+| Lights as data — `Lights`, `PointLight`, `View` | Landed — see §13 | M3, E4 |
+| Per-instance transforms in a storage buffer | Landed | M3, E4 |
+| Cluster grid and build pass; the forward pass reading it | Planned | M3, E4 |
+| Shadows, IBL, post stack | Planned | M3, E5–E7 |
 | The overlay drawing inside the graph | **Absent** — the last caller of `Frame::finish` | M3 |
 | `MeshRenderer` decomposition — it is a god object today | Planned — `docs/reviews/2026-08-03.md` item 2 | M3 |
 | Automated coverage of the loop itself | **Absent** — see §6 | M3 |
@@ -64,6 +67,9 @@ E4–E7, and are added to the same declaration rather than to a call order.
 | `RenderPass` / `ComputePass` | What one pass reads and writes |
 | `HdrTarget` | The floating-point image the scene is drawn into |
 | `Tonemap` | The fullscreen pass that resolves it onto the swapchain |
+| `PointLight` | One light, as a caller describes it |
+| `Lights` | The GPU-side light buffer, one per frame in flight |
+| `View` | What every draw in a frame shares: the camera, and the lights |
 
 ## 4. Why two calls and not one
 
@@ -291,3 +297,44 @@ Barriers here rest on reading the code more than the tooling suggests.
 What the graph deliberately does not do yet — no topological ordering, no
 culling of passes nothing reads, no transient aliasing — is in the module's own
 documentation, with the reasoning.
+
+## 13. Lights, and why the radius is not a hint
+
+`PointLight::radius` is a hard cutoff, not a falloff parameter, and the shader
+applies a **windowed** inverse square that reaches exactly zero there.
+
+That is the decision the rest of E4 rests on. Physical inverse-square falloff
+never reaches zero, so a light with genuinely unbounded reach belongs to every
+cluster and clustering it saves nothing. Giving the radius a meaning the shading
+honours is what makes "is this light in this cell" a question with an answer.
+
+Getting the two out of step is the classic version of this bug: cluster on a
+radius the shading ignores, and lights pop in and out as the camera moves,
+because a cell stops listing a light that is still contributing to it. Nothing
+reports that — it just looks wrong at the edges of cells.
+
+The **directional** light is still a constant in `model.slang`, deliberately. It
+has no position and infinite extent, so it belongs to every cluster by
+construction. It becomes data at E5, where cascaded shadows need its direction.
+
+### The forward pass still loops over every light
+
+By design, for now. The buffer, the falloff and the radius exist so that the
+loop *body* does not change when the cluster build lands — only where the
+indices come from. `PLAN.md` §6.1 carries the row.
+
+### What the reference images prove about all this
+
+Both model references were re-approved when lighting arrived, so it is worth
+being precise about what still holds them up.
+
+Rendering the same frames through `View::unlit` — lights off, everything else
+unchanged — reproduces the **pre-lighting references bit for bit**, on both the
+cube and Sponza. That is what says the per-instance rewrite was exact: the model
+matrix moved out of the push block into a storage buffer, the shader stopped
+receiving a precomputed model-view-projection and started building one, and the
+tangent changed which matrix transforms it. A transposed matrix layout or a
+wrong multiply would have shown as broken geometry, and none of it moved a pixel.
+
+So the lit references differ from their predecessors by lighting alone, which is
+the only claim being made for them.

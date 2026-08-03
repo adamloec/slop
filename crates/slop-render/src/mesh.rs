@@ -45,7 +45,7 @@ use slop_rhi::{
     SampledImage, Sampler, SamplerConfig, ShaderModule, ShaderStage, StorageBuffer, TextureSampler,
 };
 
-use crate::{RenderError, VertexBinding};
+use crate::{RenderError, VertexBinding, View};
 
 /// What a material's texture index holds when it has no texture.
 ///
@@ -109,6 +109,21 @@ struct Placement {
     transform: Mat4,
 }
 
+/// Where one placement sits, matching `InstanceGpu` in `model.slang`.
+///
+/// **The model matrix is four explicit columns, not a `Mat4`.** A matrix in a
+/// structured buffer has a layout convention on each side, and the two
+/// disagreeing transposes every transform in the scene — which reads as broken
+/// geometry rather than as a layout bug, and is the kind of thing that costs an
+/// afternoon. Four `[f32; 4]` have exactly one interpretation, and the shader
+/// writes the multiply out rather than asking a matrix type to do it.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct InstanceGpu {
+    model_columns: [[f32; 4]; 4],
+    normal_rows: [[f32; 4]; 3],
+}
+
 /// Per-draw constants, matching `PushConstants` in `model.slang`.
 ///
 /// The trailing pad is not decoration. `Mat4` forces sixteen-byte alignment, so
@@ -116,13 +131,21 @@ struct Placement {
 /// bytes are uninitialised padding — which `bytemuck::bytes_of` would then read.
 /// `#[derive(Pod)]` refuses to compile a struct in that state, which is how the
 /// gap becomes visible.
+///
+/// This used to carry the model-view-projection and the normal matrix, at 120 of
+/// the 128 bytes Vulkan guarantees, and being full is what kept the model matrix
+/// out of the shader — see [`InstanceGpu`]. What is left is the camera and five
+/// indices.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct PushConstants {
-    model_view_projection: Mat4,
-    normal_rows: [[f32; 4]; 3],
+    view_projection: Mat4,
+    instances: u32,
+    instance: u32,
     materials: u32,
     material: u32,
+    lights: u32,
+    light_count: u32,
     _pad: [u32; 2],
 }
 
@@ -142,6 +165,15 @@ pub struct MeshRenderer {
     images: Vec<Image>,
     materials: Option<Buffer>,
     materials_slot: Option<slop_core::Handle<StorageBuffer>>,
+    /// One row per placement, written once at load.
+    ///
+    /// Not one buffer per frame in flight, and that is a statement about the
+    /// content rather than a shortcut: a placement's transform is fixed by the
+    /// cooked model and nothing moves. The day something does, this becomes a
+    /// ring like `Lights`' — a change behind an unchanged seam, since the shader
+    /// already reads it by index.
+    instances: Option<Buffer>,
+    instances_slot: Option<slop_core::Handle<StorageBuffer>>,
     texture_slots: Vec<slop_core::Handle<SampledImage>>,
     /// Destroyed when this drops, which is `TextureSampler`'s job rather than a
     /// hand-written `Drop` here.
@@ -268,6 +300,8 @@ impl MeshRenderer {
             images: Vec::new(),
             materials: None,
             materials_slot: None,
+            instances: None,
+            instances_slot: None,
             texture_slots: Vec::new(),
             sampler,
             sampler_slot,
@@ -391,6 +425,7 @@ impl MeshRenderer {
         }
 
         self.upload_materials(allocator, heap, &materials)?;
+        self.upload_instances(allocator, heap)?;
 
         // After every copy above is recorded, and before the first frame that
         // reads any of it.
@@ -419,10 +454,15 @@ impl MeshRenderer {
             heap.remove_storage_buffer(slot);
         }
 
+        if let Some(slot) = self.instances_slot.take() {
+            heap.remove_storage_buffer(slot);
+        }
+
         self.meshes.clear();
         self.placements.clear();
         self.images.clear();
         self.materials = None;
+        self.instances = None;
 
         Ok(())
     }
@@ -550,6 +590,59 @@ impl MeshRenderer {
         Ok(())
     }
 
+    /// Put every placement's transform in a storage buffer the shader indexes.
+    ///
+    /// Written once, here, rather than per frame: what a placement's transform
+    /// is comes from the cooked model and does not change. The normal matrix is
+    /// computed here too — it is `transpose(inverse(mat3(model)))`, the same
+    /// value every frame, and doing it per draw on the CPU was work repeated
+    /// sixty times a second for an answer that never moved.
+    fn upload_instances(
+        &mut self,
+        allocator: &Arc<Allocator>,
+        heap: &mut BindlessHeap,
+    ) -> Result<(), RenderError> {
+        if self.placements.is_empty() {
+            return Ok(());
+        }
+
+        let rows: Vec<InstanceGpu> = self
+            .placements
+            .iter()
+            .map(|placement| InstanceGpu {
+                model_columns: placement.transform.to_cols_array_2d(),
+                normal_rows: normal_rows(placement.transform),
+            })
+            .collect();
+
+        let bytes: &[u8] = bytemuck::cast_slice(&rows);
+        let mut buffer = Buffer::new(
+            allocator,
+            &BufferConfig {
+                name: "model instances",
+                size: bytes.len() as u64,
+                usage: BufferUsage::STORAGE,
+                // Host-visible, for the same reason the material buffer is:
+                // written once at load, read every frame, and a scene's
+                // transforms are kilobytes.
+                location: MemoryLocation::Upload,
+            },
+        )?;
+
+        buffer.mapped_mut()?[..bytes.len()].copy_from_slice(bytes);
+
+        let slot = heap
+            .insert_storage_buffer(buffer.handle())
+            .ok_or(RenderError::Layout {
+                what: "the bindless heap had no room for the instance buffer",
+            })?;
+
+        self.instances_slot = Some(slot);
+        self.instances = Some(buffer);
+
+        Ok(())
+    }
+
     /// Rebuild the depth buffer for a new target size.
     ///
     /// Must be called before the first frame and after every resize: a depth
@@ -614,22 +707,22 @@ impl MeshRenderer {
     /// learning once from golden tests that skipped on setup failure, and a
     /// `debug_assert` puts the complaint where the mistake is rather than
     /// leaving it to be diagnosed from an empty window.
-    pub fn draw(&self, pass: &mut slop_rhi::Pass<'_>, heap: &BindlessHeap, view_projection: Mat4) {
+    pub fn draw(&self, pass: &mut slop_rhi::Pass<'_>, heap: &BindlessHeap, view: &View) {
         debug_assert!(
             !(self.materials_slot.is_some() && self.depth.is_none()),
             "a model is loaded but `MeshRenderer::resize` has never run, so there is \
              no depth buffer and nothing will be drawn"
         );
 
-        let Some(materials) = self.materials_slot else {
+        let Some(shared) = self.shared(view) else {
             return;
         };
 
         pass.bind_pipeline(&self.pipeline);
         pass.bind_heap(heap);
 
-        for placement in &self.placements {
-            self.record(pass, placement, materials, view_projection);
+        for index in 0..self.placements.len() {
+            self.record(pass, index, shared);
         }
 
         // Ends the pass, so the transition below is outside it.
@@ -671,13 +764,8 @@ impl MeshRenderer {
     /// `docs/PLAN.md` §6.1 carries the row; closing it wants a source asset
     /// shaped for the case rather than a camera hunt through Sponza, which was
     /// tried.
-    pub fn draw_depth(
-        &self,
-        pass: &mut slop_rhi::Pass<'_>,
-        heap: &BindlessHeap,
-        view_projection: Mat4,
-    ) {
-        let Some(materials) = self.materials_slot else {
+    pub fn draw_depth(&self, pass: &mut slop_rhi::Pass<'_>, heap: &BindlessHeap, view: &View) {
+        let Some(shared) = self.shared(view) else {
             return;
         };
 
@@ -692,14 +780,34 @@ impl MeshRenderer {
             // rule breaks silently the day the vertex shader reads the heap.
             pass.bind_heap(heap);
 
-            for placement in &self.placements {
-                if self.meshes[placement.mesh].masked != masked {
+            for index in 0..self.placements.len() {
+                if self.meshes[self.placements[index].mesh].masked != masked {
                     continue;
                 }
 
-                self.record(pass, placement, materials, view_projection);
+                self.record(pass, index, shared);
             }
         }
+    }
+
+    /// The push constants every draw in a frame shares, or `None` when there is
+    /// nothing loaded to draw.
+    ///
+    /// Built once per pass rather than per draw. Everything here but the
+    /// instance and material indices is the same for all of them, and computing
+    /// it inside the loop was how the model matrix ended up being multiplied by
+    /// the camera on the CPU a hundred times a frame.
+    fn shared(&self, view: &View) -> Option<PushConstants> {
+        Some(PushConstants {
+            view_projection: view.view_projection,
+            instances: self.instances_slot?.index(),
+            instance: 0,
+            materials: self.materials_slot?.index(),
+            material: 0,
+            lights: view.lights,
+            light_count: view.light_count,
+            _pad: [0; 2],
+        })
     }
 
     /// One draw, identical whichever pipeline is bound.
@@ -707,21 +815,15 @@ impl MeshRenderer {
     /// Shared by [`draw`](Self::draw) and [`draw_depth`](Self::draw_depth)
     /// rather than written twice, because the push constants the two send must
     /// be the same bytes — see `draw_depth` for what happens when they are not.
-    fn record(
-        &self,
-        pass: &slop_rhi::Pass<'_>,
-        placement: &Placement,
-        materials: slop_core::Handle<StorageBuffer>,
-        view_projection: Mat4,
-    ) {
-        let mesh = &self.meshes[placement.mesh];
+    fn record(&self, pass: &slop_rhi::Pass<'_>, placement: usize, shared: PushConstants) {
+        let mesh = &self.meshes[self.placements[placement].mesh];
 
         let push = PushConstants {
-            model_view_projection: view_projection * placement.transform,
-            normal_rows: normal_rows(placement.transform),
-            materials: materials.index(),
+            // The row `upload_instances` wrote for this placement. Placements
+            // are uploaded in order, so the index is the position in the list.
+            instance: placement as u32,
             material: mesh.material,
-            _pad: [0; 2],
+            ..shared
         };
 
         pass.push_constants(&bytemuck::bytes_of(&push)[..self.push_constant_bytes as usize]);

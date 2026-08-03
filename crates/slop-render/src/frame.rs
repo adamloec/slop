@@ -261,6 +261,17 @@ impl FrameRenderer {
         self.frame_number
     }
 
+    /// How many in-flight slots exist.
+    ///
+    /// What a caller sizes its own per-frame ring against — a light buffer, a
+    /// vertex buffer a UI rewrites. [`Frame::slots`] reports the same number
+    /// during a frame; this is for building the ring before the first one, where
+    /// the alternative is the caller re-reading the config it passed to `new`
+    /// and the two silently disagreeing.
+    pub fn frames_in_flight(&self) -> usize {
+        self.slots.len()
+    }
+
     /// Mark the swapchain as needing recreation, after a resize.
     ///
     /// Separate from [`FrameRenderer::prepare`] because the window event and the

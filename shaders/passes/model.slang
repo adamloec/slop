@@ -38,20 +38,67 @@ static const uint NO_TEXTURE = 0xFFFFFFFF;
 static const uint ALPHA_MODE_MASK_BITS = 3;
 static const uint ALPHA_MODE_MASK = 1;
 
-// Per-draw data. Under the 128 bytes Vulkan guarantees, which is why the
-// material lives in a buffer rather than here.
-struct PushConstants
+// One point light, matching `PointLightGpu` in `crates/slop-render/src/light.rs`.
+//
+// The radius sits beside the position rather than beside the intensity so that
+// a cluster-assignment pass reads the sphere it is testing — centre and radius —
+// out of one sixteen-byte row.
+struct PointLightGpu
 {
-    float4x4 modelViewProjection;
-    // Rows of the normal matrix — transpose(inverse(mat3(model))) — as three
-    // float4 because a float3x3 in a push constant block is padded to the same
-    // size anyway and the packing is then implicit rather than stated.
+    float3 position;
+    float radius;
+
+    float3 color;
+    float intensity;
+};
+
+// Where one placement of one mesh sits, matching `InstanceGpu` in
+// `crates/slop-render/src/mesh.rs`.
+//
+// **The model matrix is stored as its four columns, not as a `float4x4`.** That
+// is not stylistic: a matrix in a structured buffer has a layout convention, and
+// getting it backwards transposes every transform in the scene — which looks
+// like broken geometry rather than like a layout bug. Four `float4` have exactly
+// one interpretation, and the multiply below is written out, so there is no
+// convention to get wrong.
+struct InstanceGpu
+{
+    float4 modelColumn0;
+    float4 modelColumn1;
+    float4 modelColumn2;
+    float4 modelColumn3;
+
+    // Rows of the normal matrix — transpose(inverse(mat3(model))). Three float4
+    // because a float3x3 is padded to the same size anyway and the packing is
+    // then implicit rather than stated.
     float4 normalRow0;
     float4 normalRow1;
     float4 normalRow2;
+};
+
+// Per-draw data. 84 of the 128 bytes Vulkan guarantees.
+//
+// It used to be 120, carrying the model-view-projection and the normal matrix
+// per draw, and it was full — which is why the model matrix itself could not be
+// here and why the tangent was transformed by the wrong matrix. Both moved to
+// `InstanceGpu`, where `docs/DESIGN.md` §4.2 stage B needs them anyway: a draw
+// list built on the GPU has nothing per-draw to push.
+struct PushConstants
+{
+    // The camera, not the object. Per frame rather than per draw, and still
+    // pushed per draw because it is 64 bytes either way and a per-frame buffer
+    // for one value would be machinery for nothing.
+    float4x4 viewProjection;
+
+    uint instances;
+    uint instance;
 
     uint materials;
     uint material;
+
+    // Where this frame's lights are, and how many.
+    uint lights;
+    uint lightCount;
 };
 
 [[vk::push_constant]] PushConstants g_push;
@@ -68,6 +115,10 @@ struct VertexIn
 struct VertexOut
 {
     float4 position : SV_Position;
+    // Where this fragment is in the world, which is what a point light needs to
+    // measure a distance from. Interpolated, so it is the surface point rather
+    // than the vertex.
+    float3 worldPosition : POSITION0;
     float3 normal : NORMAL;
     float2 uv : TEXCOORD0;
     // World-space tangent, with handedness carried through untouched in `w`.
@@ -78,40 +129,62 @@ struct VertexOut
     float4 tangent : TANGENT;
 };
 
+// A point in object space, moved into the world by an instance's model matrix.
+//
+// Written out column by column rather than as a matrix multiply, for the reason
+// `InstanceGpu` gives: four `float4` have one interpretation and a `float4x4` in
+// a buffer has two.
+float3 toWorld(InstanceGpu instance, float3 position)
+{
+    return instance.modelColumn0.xyz * position.x
+         + instance.modelColumn1.xyz * position.y
+         + instance.modelColumn2.xyz * position.z
+         + instance.modelColumn3.xyz;
+}
+
+// A *direction* moved into the world — the same thing without the translation.
+float3 directionToWorld(InstanceGpu instance, float3 direction)
+{
+    return instance.modelColumn0.xyz * direction.x
+         + instance.modelColumn1.xyz * direction.y
+         + instance.modelColumn2.xyz * direction.z;
+}
+
 [shader("vertex")]
 VertexOut vertexMain(VertexIn input)
 {
+    InstanceGpu instance =
+        loadFromBuffer<InstanceGpu>(BufferHandle(g_push.instances), g_push.instance);
+
     VertexOut output;
 
-    output.position = mul(g_push.modelViewProjection, float4(input.position, 1.0));
+    float3 world = toWorld(instance, input.position);
+
+    output.worldPosition = world;
+    output.position = mul(g_push.viewProjection, float4(world, 1.0));
 
     // The normal matrix rather than the model matrix. They differ under
     // non-uniform scale, and using the model matrix there tilts every normal —
     // which looks like a lighting bug and is a transform one.
     float3x3 normalMatrix = float3x3(
-        g_push.normalRow0.xyz,
-        g_push.normalRow1.xyz,
-        g_push.normalRow2.xyz);
+        instance.normalRow0.xyz,
+        instance.normalRow1.xyz,
+        instance.normalRow2.xyz);
 
     output.normal = normalize(mul(normalMatrix, input.normal));
     output.uv = input.uv;
 
-    // **The normal matrix, used on a tangent, which is not strictly correct.**
-    //
-    // A normal is perpendicular to the surface and transforms by the inverse
+    // **The model matrix, on the tangent, which is now the correct one.** A
+    // normal is perpendicular to the surface and transforms by the inverse
     // transpose; a tangent lies *along* the surface and transforms like any
-    // other direction, by the model matrix. The two agree up to scale under
-    // rotation and uniform scale — and after the normalize below, agree exactly.
-    // They diverge only under non-uniform scale, where this skews the tangent.
-    //
-    // The model matrix is not here to use: this block is 120 of the 128 bytes
-    // Vulkan guarantees, and another float3x3 needs 48 more. The fix is the
-    // per-instance data that a storage buffer will carry, which is where the
-    // model matrix belongs anyway. `docs/PLAN.md` §6.1 has the row.
+    // other direction. This used to use the normal matrix because the model
+    // matrix would not fit in the push block, which skewed tangents under
+    // non-uniform scale; the instance buffer is what fixed it.
     //
     // `w` passes through untouched: handedness is a property of the UV mapping,
     // not of where the model sits.
-    output.tangent = float4(normalize(mul(normalMatrix, input.tangent.xyz)), input.tangent.w);
+    output.tangent =
+        float4(normalize(directionToWorld(instance, input.tangent.xyz)), input.tangent.w);
 
     return output;
 }
@@ -222,7 +295,47 @@ float4 fragmentMain(VertexOut input) : SV_Target
         normal = normalize(tangent * sampled.x + bitangent * sampled.y + normal * sampled.z);
     }
 
-    float lambert = saturate(dot(normal, LIGHT_DIRECTION));
+    float3 lit = AMBIENT + saturate(dot(normal, LIGHT_DIRECTION));
 
-    return float4(albedo.rgb * (AMBIENT + lambert), albedo.a);
+    // Every light, every fragment. **That is what E4 replaces**: the cluster
+    // build assigns lights to cells of a grid and this loop reads only its own
+    // cell, which is the difference between a scene with a dozen lights and one
+    // with thousands. The loop body does not change when that lands — only where
+    // the indices come from — which is why the buffer is here first.
+    for (uint index = 0; index < g_push.lightCount; ++index)
+    {
+        PointLightGpu light =
+            loadFromBuffer<PointLightGpu>(BufferHandle(g_push.lights), index);
+
+        float3 toLight = light.position - input.worldPosition;
+        float distanceSquared = dot(toLight, toLight);
+
+        // Squared throughout, so the only square root is the one `normalize`
+        // needs. Comparing against the squared radius rather than the radius
+        // keeps the early-out exact rather than approximately so.
+        float radiusSquared = light.radius * light.radius;
+
+        if (distanceSquared >= radiusSquared)
+        {
+            continue;
+        }
+
+        // Inverse square, windowed to reach exactly zero at the radius. The
+        // window matters more than it looks: unwindowed inverse square never
+        // reaches zero, so a light cut off at its radius leaves a visible edge —
+        // and the radius is what cluster assignment tests, so the shading has to
+        // agree with it or lights pop as the camera moves.
+        //
+        // Guarded against the singularity at zero distance, which is otherwise
+        // an infinity that spreads through the sum and shows as a white pixel.
+        float window = saturate(1.0 - (distanceSquared * distanceSquared)
+                                    / (radiusSquared * radiusSquared));
+        float attenuation = window * window / max(distanceSquared, 1e-4);
+
+        float lambert = saturate(dot(normal, normalize(toLight)));
+
+        lit += light.color * light.intensity * lambert * attenuation;
+    }
+
+    return float4(albedo.rgb * lit, albedo.a);
 }

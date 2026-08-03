@@ -64,15 +64,19 @@ mod error;
 mod frame;
 mod graph;
 mod hdr;
+mod light;
 mod mesh;
 mod vertex;
+mod view;
 
 pub use error::RenderError;
 pub use frame::{Frame, FrameOutcome, FrameRenderer, FrameRendererConfig, Target};
 pub use graph::{BufferId, ComputePass, Graph, ImageId, Imported, ImportedBuffer, RenderPass};
 pub use hdr::{HdrTarget, Tonemap};
+pub use light::{Lights, PointLight};
 pub use mesh::MeshRenderer;
 pub use vertex::VertexBinding;
+pub use view::View;
 
 /// The format the HDR target uses, re-exported so a pipeline drawing into it
 /// declares the same one rather than restating it.

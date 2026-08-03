@@ -368,6 +368,10 @@ struct Headless {
     /// Where the scene is drawn before being resolved, as in the window.
     hdr: HdrTarget,
     tonemap: Tonemap,
+    /// One slot: the harness submits and waits per frame, so nothing is ever in
+    /// flight beside it.
+    lights: slop_render::Lights,
+    placed_lights: Vec<slop_render::PointLight>,
     heap: BindlessHeap,
     readback: Buffer,
     target: Image,
@@ -472,6 +476,14 @@ impl Headless {
 
         let (centre, radius) = bounds(vfs, model);
 
+        // The same rig the window places, from the same function, for the same
+        // reason the camera is shared: a golden image lit differently from the
+        // demo would stop catching a broken light rig and start drifting from
+        // it silently.
+        let lights = slop_render::Lights::new(allocator, &mut heap, 1, 1024)
+            .map_err(|error| error.to_string())?;
+        let placed_lights = example_model::lights(centre, radius);
+
         // The camera *maths* is what is under test and is shared with the
         // windowed viewer. The camera *settings* are data, and Sponza's are
         // chosen to look at something worth comparing — see `SPONZA_CLOSENESS`.
@@ -487,6 +499,8 @@ impl Headless {
             meshes,
             hdr,
             tonemap,
+            lights,
+            placed_lights,
             heap,
             readback,
             target,
@@ -586,18 +600,26 @@ impl Headless {
             final_state: Some(ImageState::TRANSFER_SRC),
         });
 
-        let view_projection = camera(aspect, self.centre, angle, self.settings);
+        self.lights
+            .write(0, &self.placed_lights)
+            .expect("the light rig fits the buffer it was built for");
+
+        let view = slop_render::View::new(
+            camera(aspect, self.centre, angle, self.settings),
+            &self.lights,
+            0,
+        );
         let meshes = &self.meshes;
         let tonemap = &self.tonemap;
         let heap = &self.heap;
         let source = self.hdr.slot();
 
-        if let Some((image, view, aspect)) = self.meshes.depth() {
+        if let Some((image, depth_view, depth_aspect)) = self.meshes.depth() {
             let depth = graph.import(&slop_render::Imported {
                 name: "depth",
                 image,
-                view,
-                aspect,
+                view: depth_view,
+                aspect: depth_aspect,
                 extent: self.hdr.extent(),
                 state: ImageState::UNDEFINED,
                 final_state: None,
@@ -626,7 +648,7 @@ impl Headless {
                     )),
                     ..slop_render::RenderPass::default()
                 },
-                |pass| meshes.draw_depth(pass, heap, view_projection),
+                |pass| meshes.draw_depth(pass, heap, &view),
             );
 
             graph.add(
@@ -639,7 +661,7 @@ impl Headless {
                     depth: Some((depth, slop_rhi::Load::Preserve, false)),
                     ..slop_render::RenderPass::default()
                 },
-                |pass| meshes.draw(pass, heap, view_projection),
+                |pass| meshes.draw(pass, heap, &view),
             );
         }
 
