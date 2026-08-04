@@ -46,7 +46,7 @@
 //! from draw order — which is a real glTF mode (`mode: 4` unindexed) and is
 //! handled by generating the sequence, since that is what it means.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use slop_asset::mesh::{Mesh, Vertex};
@@ -56,6 +56,17 @@ use slop_core::diagnostics::tracing::{debug, info, warn};
 
 use crate::geometry::{generate_flat_normals, generate_tangents};
 use crate::shader_import::Summary;
+use crate::sources::{self, Sources};
+
+/// What a glTF source file looks like.
+///
+/// Both extensions, because they are one format: `.glb` is the same document
+/// with its buffers embedded, and an importer that read only one would silently
+/// ignore half the assets in circulation.
+const MODELS: Sources<'static> = Sources {
+    extensions: &["gltf", "glb"],
+    skip: None,
+};
 
 /// Bump to invalidate every cooked mesh.
 ///
@@ -87,7 +98,7 @@ pub(crate) fn meshes(root: &Path, force: bool) -> Result<Summary> {
     }
 
     let mut sources = Vec::new();
-    collect_models(&source_root, &mut sources)?;
+    sources::collect(&source_root, &MODELS, &mut sources)?;
     sources.sort();
 
     let mut summary = Summary::default();
@@ -339,33 +350,6 @@ fn read_primitive(
         indices,
         material,
     })
-}
-
-/// Recursively gather `.gltf` and `.glb` files.
-fn collect_models(directory: &Path, found: &mut Vec<PathBuf>) -> Result<()> {
-    let entries = std::fs::read_dir(directory)
-        .with_context(|| format!("reading directory {}", directory.display()))?;
-
-    for entry in entries {
-        let entry = entry.with_context(|| format!("reading {}", directory.display()))?;
-        let path = entry.path();
-
-        if path.is_dir() {
-            collect_models(&path, found)?;
-            continue;
-        }
-
-        let is_model = path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension == "gltf" || extension == "glb");
-
-        if is_model {
-            found.push(path);
-        }
-    }
-
-    Ok(())
 }
 
 /// Cook every material in one glTF file, returning each one's logical path by

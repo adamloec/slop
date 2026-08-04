@@ -51,6 +51,7 @@ mod geometry;
 mod gltf_import;
 mod reflection;
 mod shader_import;
+mod sources;
 mod texture_import;
 
 use std::path::Path;

@@ -43,6 +43,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::reflection;
+use crate::sources::{self, Sources};
 use anyhow::{Context, Result, bail};
 use slop_asset::{Cache, CacheKey};
 use slop_core::diagnostics::tracing::{debug, info, warn};
@@ -67,6 +68,27 @@ const REFLECTION_EXTENSION: &str = "refl";
 /// to the point, an error. Excluding by directory rather than by inspecting
 /// contents keeps the rule something an author can see in the file tree.
 const SHADER_INCLUDE_DIRECTORY: &str = "lib";
+
+/// What a compilable shader source looks like.
+///
+/// Skipping [`SHADER_INCLUDE_DIRECTORY`] is the whole reason
+/// [`Sources::skip`](crate::sources::Sources::skip) exists: those files declare
+/// no entry points, so compiling one standalone fails. They still affect the
+/// cache key, through [`include_digest`].
+const SHADER_SOURCES: Sources<'static> = Sources {
+    extensions: &[SHADER_SOURCE_EXTENSION],
+    skip: Some(SHADER_INCLUDE_DIRECTORY),
+};
+
+/// Everything under the include directory, regardless of extension.
+///
+/// Every file, not only `.slang`: an include directory may hold a `.h` of shared
+/// constants or a generated table, and any of them changing changes what the
+/// shaders compile to.
+const SHADER_INCLUDES: Sources<'static> = Sources {
+    extensions: &[],
+    skip: None,
+};
 
 /// What a cook run did.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -106,7 +128,7 @@ pub(crate) fn shaders(root: &Path, force: bool) -> Result<Summary> {
     let includes = include_digest(&source_root)?;
 
     let mut sources = Vec::new();
-    collect_sources(&source_root, &mut sources)?;
+    sources::collect(&source_root, &SHADER_SOURCES, &mut sources)?;
     sources.sort();
 
     let mut summary = Summary::default();
@@ -341,7 +363,7 @@ fn include_digest(source_root: &Path) -> Result<String> {
     }
 
     let mut includes = Vec::new();
-    collect_all(&directory, &mut includes)?;
+    sources::collect(&directory, &SHADER_INCLUDES, &mut includes)?;
     // Sorted, because directory iteration order is not defined and a digest
     // that depends on it would differ between machines — which would defeat
     // artifact reuse across the CI matrix (`docs/DESIGN.md` §2.13).
@@ -362,64 +384,6 @@ fn include_digest(source_root: &Path) -> Result<String> {
     }
 
     Ok(digest.finish().as_str().to_owned())
-}
-
-/// Recursively gather shader sources, in no particular order.
-///
-/// Skips [`SHADER_INCLUDE_DIRECTORY`]: those files are `#include`d by others
-/// and have no entry points of their own, so compiling one standalone fails.
-/// They still affect the cache key, through [`include_digest`].
-fn collect_sources(directory: &Path, found: &mut Vec<PathBuf>) -> Result<()> {
-    let entries = std::fs::read_dir(directory)
-        .with_context(|| format!("reading directory {}", directory.display()))?;
-
-    for entry in entries {
-        let path = entry
-            .with_context(|| format!("reading an entry in {}", directory.display()))?
-            .path();
-
-        if path.is_dir() {
-            if path
-                .file_name()
-                .is_some_and(|name| name == SHADER_INCLUDE_DIRECTORY)
-            {
-                continue;
-            }
-
-            collect_sources(&path, found)?;
-        } else if path
-            .extension()
-            .is_some_and(|ext| ext == SHADER_SOURCE_EXTENSION)
-        {
-            found.push(path);
-        }
-    }
-
-    Ok(())
-}
-
-/// Recursively gather every file, regardless of extension.
-///
-/// Every file, not only `.slang`: an include directory may hold a `.h` of
-/// shared constants or a generated table, and any of them changing changes what
-/// the shaders compile to.
-fn collect_all(directory: &Path, found: &mut Vec<PathBuf>) -> Result<()> {
-    let entries = std::fs::read_dir(directory)
-        .with_context(|| format!("reading directory {}", directory.display()))?;
-
-    for entry in entries {
-        let path = entry
-            .with_context(|| format!("reading an entry in {}", directory.display()))?
-            .path();
-
-        if path.is_dir() {
-            collect_all(&path, found)?;
-        } else {
-            found.push(path);
-        }
-    }
-
-    Ok(())
 }
 
 /// The located shader compiler and its version.
