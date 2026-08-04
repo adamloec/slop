@@ -37,7 +37,7 @@ use slop_math::Vec3;
 use slop_render::{
     CASCADES, ClusterGrid, Clusters, ComputePass, DepthTarget, DirectionalLight, Environment,
     FrameRenderer, FrameRendererConfig, Graph, HdrTarget, Imported, ImportedBuffer, Lights,
-    MeshRenderer, PointLight, RenderPass, ShadowConfig, Shadows, Tonemap, View,
+    MeshRenderer, PointLight, RenderPass, ShadowConfig, Shadows, Skybox, Tonemap, View,
 };
 
 /// What the scene pass clears the HDR target to.
@@ -137,6 +137,14 @@ struct Renderer {
     /// the specular term additive rather than required — the shader tests for it
     /// and adds nothing.
     sky: Option<slop_render::Sky>,
+    /// What draws that cube behind the scene.
+    ///
+    /// Built whether or not there is a `sky` to draw, unlike the cube itself. A
+    /// pipeline created only when an environment happens to be fetched is a
+    /// pipeline whose shader is never compiled on a fresh clone, and the last
+    /// thing E6d found was a shader path that no test covered because nothing
+    /// built it.
+    skybox: Skybox,
     /// The four cascades the sun casts into.
     shadows: Shadows,
     /// Which way the sun points. A field so E5's cascades and the shading read
@@ -225,6 +233,20 @@ impl Renderer {
             &load_reflection(&vfs, "passes/post/tonemap")?,
             // The swapchain's, because this is the pass that writes it.
             frames.format(),
+        )
+        .map_err(|error| error.to_string())?;
+
+        let skybox_module = load_shader(gpu.device(), &vfs, "passes/scene/skybox")?;
+        let skybox = Skybox::new(
+            gpu.device(),
+            &mut heap,
+            &skybox_module,
+            &load_reflection(&vfs, "passes/scene/skybox")?,
+            // The HDR target's, not the swapchain's: the sky is part of the
+            // scene and is tonemapped with it. Drawing it after the resolve
+            // would put an un-exposed background behind an exposed model.
+            slop_render::HDR_FORMAT,
+            slop_rhi::preferred_depth_format(gpu.device()),
         )
         .map_err(|error| error.to_string())?;
 
@@ -350,6 +372,7 @@ impl Renderer {
             environment,
             irradiance: example_model::irradiance_of(cooked_environment.as_ref()),
             sky,
+            skybox,
             shadows,
             sun: DirectionalLight::default(),
             placed_lights,
@@ -412,6 +435,7 @@ impl Renderer {
         let meshes = &self.meshes;
         let hdr = &self.hdr;
         let tonemap = &self.tonemap;
+        let skybox = &self.skybox;
         let heap = &self.heap;
         let lights = &mut self.lights;
         let clusters = &mut self.clusters;
@@ -639,9 +663,12 @@ impl Renderer {
                                 // What the prepass wrote. Clearing here would
                                 // throw the prepass away and leave it pure cost.
                                 load: Load::Preserve,
-                                // Scratch from here on, so storing it would
-                                // cost bandwidth nothing reads.
-                                store: false,
+                                // Stored only for the skybox, which tests
+                                // against it to find the pixels no geometry
+                                // covered. With no environment to draw there is
+                                // no later reader, and storing it would cost
+                                // bandwidth nothing looks at.
+                                store: sky.is_some(),
                                 layer: 0,
                             }),
                             // What the cluster build wrote. This is the
@@ -655,6 +682,35 @@ impl Renderer {
                         },
                         |pass| meshes.draw(pass, heap, &view),
                     );
+
+                    // Last into the scene target, and only where the depth
+                    // buffer is still at its cleared value — see
+                    // `passes/scene/skybox.slang`. Declared only when there is
+                    // an environment to draw: without one the shader would
+                    // paint the background black, which is worse than the clear
+                    // colour it would be replacing.
+                    if sky.is_some() {
+                        graph.add(
+                            &RenderPass {
+                                name: "skybox",
+                                // Preserve, not clear: this fills what the scene
+                                // left, so clearing would erase the scene.
+                                color: Some((scene, Load::Preserve)),
+                                depth: Some(DepthTarget {
+                                    image: depth,
+                                    load: Load::Preserve,
+                                    // Nothing reads it after this.
+                                    store: false,
+                                    layer: 0,
+                                }),
+                                ..RenderPass::default()
+                            },
+                            // The same view the scene was drawn with, which is
+                            // what keeps the sky and the geometry in front of it
+                            // looking the same way.
+                            |pass| skybox.draw(pass, heap, &view),
+                        );
+                    }
                 }
 
                 graph.add(

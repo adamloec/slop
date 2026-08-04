@@ -85,6 +85,7 @@ pub use lighting::shadow::{
     CASCADES, CascadeFit, SPLIT_BLEND, ShadowConfig, Shadows, light_basis, splits,
 };
 pub use lighting::sky::Sky;
+pub use lighting::skybox::Skybox;
 pub use mesh::MeshRenderer;
 pub use vertex::VertexBinding;
 pub use view::{NO_CLUSTERS, NO_SHADOWS, View};

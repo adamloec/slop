@@ -1,10 +1,11 @@
 //! Where the light in a frame comes from, and which fragments each source
 //! reaches.
 //!
-//! Four modules and one subject. They were at the crate root through E4 and E5,
-//! and `docs/CONVENTIONS.md` promotes to a directory once three or more share a
-//! subject that is already a name in the crate — "lighting" is `docs/PLAN.md`
-//! §9.4's own word for half the frame, so this is overdue rather than early.
+//! One subject, a module at a time. They were at the crate root through E4 and
+//! E5, and `docs/CONVENTIONS.md` promotes to a directory once three or more
+//! share a subject that is already a name in the crate — "lighting" is
+//! `docs/PLAN.md` §9.4's own word for half the frame, so this is overdue rather
+//! than early.
 //!
 //! | | |
 //! |---|---|
@@ -12,6 +13,8 @@
 //! | [`light`] | Point lights, and the falloff that makes a radius mean something |
 //! | [`cluster`] | Which cell of the view frustum each light reaches, so a fragment shades against its own cell rather than the whole scene |
 //! | [`shadow`] | Where the four cascades sit, and what each one sees |
+//! | [`sky`] | The prefiltered environment cube on the GPU: what a reflection reads |
+//! | [`skybox`] | The pass that draws that cube where nothing else was |
 //!
 //! # Why these four and not the rest
 //!
@@ -36,3 +39,4 @@ pub(crate) mod environment;
 pub(crate) mod light;
 pub(crate) mod shadow;
 pub(crate) mod sky;
+pub(crate) mod skybox;

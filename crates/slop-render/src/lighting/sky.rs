@@ -178,14 +178,17 @@ impl Sky {
         self.levels
     }
 
-    /// The image itself, for [`Graph::import`](crate::Graph::import).
-    ///
-    /// E6e's skybox reads level zero of this as an ordinary sampled resource,
-    /// which the graph has to know about to barrier correctly.
-    #[must_use]
-    pub fn image(&self) -> &Image {
-        &self.image
-    }
+    // **There is no `image()`, and there was one.** It existed for E6e to hand
+    // to `Graph::import`, on the assumption that a pass sampling this cube would
+    // need a barrier derived for it. It does not: nothing writes this image
+    // after the blocking upload above, so there is no hazard in a frame for the
+    // graph to derive — the same reason no mesh texture and no material buffer
+    // is imported either.
+    //
+    // Importing it anyway would have been worse than useless. It would imply the
+    // graph tracks what a shader reaches for through the heap, which it cannot:
+    // the forward pass has sampled this cube since E6d without declaring
+    // anything, because a bindless index is not a declaration.
 }
 
 impl std::fmt::Debug for Sky {

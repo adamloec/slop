@@ -420,7 +420,7 @@ impl<'a> Graph<'a> {
     ///
     /// **Boxed, which is one allocation per pass per frame.**
     /// `docs/CONVENTIONS.md` §8 says the frame loop allocates nothing, and this
-    /// breaks that at §9.4's eight passes. Recorded in `PLAN.md` §6.1: the seam
+    /// breaks that once per pass in §9.4's frame. Recorded in `PLAN.md` §6.1: the seam
     /// — declare, then record — is what a frame arena or a bump allocator would
     /// be slotted behind without a caller changing.
     pub fn add(&mut self, desc: &RenderPass<'_>, record: impl FnOnce(&mut Pass<'_>) + 'a) {

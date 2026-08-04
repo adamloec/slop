@@ -40,7 +40,7 @@ use std::time::Duration;
 
 use example_model::{OrbitCamera, bounds, camera};
 use slop_math::Vec3;
-use slop_render::{HdrTarget, MeshRenderer, Target, Tonemap};
+use slop_render::{HdrTarget, MeshRenderer, Skybox, Target, Tonemap};
 use slop_rhi::{
     Allocator, BindlessHeap, BindlessHeapConfig, Buffer, BufferConfig, BufferUsage, CommandPool,
     Device, DeviceSelection, Extent2D, Format, Image, ImageConfig, ImageKind, ImageState,
@@ -146,6 +146,126 @@ fn sponza_under_a_cooked_environment_matches_its_reference() {
     .unwrap_or_else(|failure| panic!("sponza under helipad did not match: {failure}"));
 
     println!("sponza + helipad, frame {CAPTURED_FRAME}: {difference}");
+}
+
+#[test]
+fn the_cube_under_a_cooked_environment_matches_its_reference() {
+    // **The only reference that shows the sky.** E6e added the skybox so that a
+    // frame would show the environment beside the surfaces it lights, and
+    // `sponza-helipad.png` cannot do that: at `SPONZA_CLOSENESS` the camera is
+    // inside the building and geometry covers all 65536 pixels, so the pass
+    // draws nothing at all. Measured, not assumed — the reference was still
+    // bit-identical with the skybox fragment forced to magenta.
+    //
+    // The cube leaves most of the frame empty, which is what makes this the
+    // reference that a wrong face in the cube table can be *seen* in. §9.7's
+    // trap list says that table renders as "the HDR is odd" rather than as a
+    // bug; a human approving this image is the check that catches it.
+    let Some((device, allocator)) = headless() else {
+        return;
+    };
+
+    let Some(mut renderer) = harness(
+        &device,
+        &allocator,
+        "models/cube.model",
+        Lighting::Cooked(HELIPAD),
+    ) else {
+        return;
+    };
+
+    let image = renderer.render(CAPTURED_FRAME);
+
+    let difference = Golden {
+        reference: &reference_path("cube-helipad.png"),
+        failures: &failures_path(),
+        tolerance: Tolerance::HARDWARE,
+        mode: Mode::from_env(),
+    }
+    .check(&image)
+    .unwrap_or_else(|failure| panic!("the cube under helipad did not match: {failure}"));
+
+    println!("cube + helipad, frame {CAPTURED_FRAME}: {difference}");
+}
+
+#[test]
+fn the_skybox_fills_what_the_clear_colour_used_to() {
+    // What the reference above cannot claim on its own, for the reason it
+    // documents: a reference approved *with* the skybox is equally happy
+    // without one, having been approved against whatever it produced.
+    //
+    // The corner is background at every orbit angle — `OrbitCamera::framing`
+    // fits the model's bounding sphere to the vertical field of view with a
+    // margin, so a cube never reaches a corner of a square target. So the
+    // corner pixel is exactly the pixel the skybox is responsible for, and
+    // under a uniform sky it is still the clear colour.
+    let Some((device, allocator)) = headless() else {
+        return;
+    };
+
+    let Some(mut with_sky) = harness(
+        &device,
+        &allocator,
+        "models/cube.model",
+        Lighting::Cooked(HELIPAD),
+    ) else {
+        return;
+    };
+
+    let Some(mut without) = harness(&device, &allocator, "models/cube.model", Lighting::Uniform)
+    else {
+        return;
+    };
+
+    let sky = corner(&with_sky.render(CAPTURED_FRAME));
+    let cleared = corner(&without.render(CAPTURED_FRAME));
+
+    assert_eq!(
+        cleared, CLEARED_CORNER,
+        "the corner is not the clear colour, so it is not background and this \
+         test is measuring the wrong pixel"
+    );
+
+    assert_ne!(
+        sky, cleared,
+        "the background is still the clear colour with an environment bound, so \
+         the skybox pass is drawing nothing"
+    );
+}
+
+#[test]
+fn the_sky_turns_with_the_camera() {
+    // The failure the test above cannot see: a ray direction that reaches the
+    // shader but does not depend on where the camera is looking — an
+    // inverse-view-projection that was never inverted, a varying dropped to a
+    // constant, a normalise applied per vertex. Every one of those fills the
+    // background with *a* colour from the cube, which is enough to pass
+    // `the_skybox_fills_what_the_clear_colour_used_to` and enough to approve a
+    // reference against.
+    //
+    // Half an orbit apart, so the same corner is looking at genuinely opposite
+    // parts of the sky rather than at two nearby samples of one gradient.
+    let Some((device, allocator)) = headless() else {
+        return;
+    };
+
+    let Some(mut renderer) = harness(
+        &device,
+        &allocator,
+        "models/cube.model",
+        Lighting::Cooked(HELIPAD),
+    ) else {
+        return;
+    };
+
+    let half_orbit = (std::f32::consts::PI / example_model::RADIANS_PER_FRAME) as u64;
+
+    assert_ne!(
+        corner(&renderer.render(CAPTURED_FRAME)),
+        corner(&renderer.render(CAPTURED_FRAME + half_orbit)),
+        "the background is the same colour from opposite sides of the orbit, so \
+         the sky is not being sampled along the view ray"
+    );
 }
 
 #[test]
@@ -428,6 +548,24 @@ fn loading_a_second_time_replaces_rather_than_accumulates() {
     );
 }
 
+/// The top-left pixel, which is background in every frame this suite renders.
+///
+/// A named helper rather than an index at three call sites, because *which*
+/// pixel is not arbitrary — see `the_skybox_fills_what_the_clear_colour_used_to`
+/// for why a corner is the one place the skybox is unambiguously responsible
+/// for.
+fn corner(image: &Rgba8) -> [u8; 4] {
+    image.pixel(0, 0).expect("the target is not empty")
+}
+
+/// What a background pixel is when nothing draws one.
+///
+/// The scene pass's clear colour, which the windowed viewer states as `CLEAR`
+/// and this suite restates because the two are separate declarations of the same
+/// frame. `0.02` and `0.03` linear into an eight-bit UNORM target through an
+/// identity tonemap; the alpha is forced opaque by the tonemap.
+const CLEARED_CORNER: [u8; 4] = [5, 5, 8, 255];
+
 /// Where Sponza's cooked model lives, when it has been fetched.
 const SPONZA: &str = "models/vendor/sponza/Sponza.model";
 
@@ -561,6 +699,8 @@ fn harness(
     for logical in [
         "shaders/passes/scene/model.spv",
         "shaders/passes/scene/model.refl",
+        "shaders/passes/scene/skybox.spv",
+        "shaders/passes/scene/skybox.refl",
     ] {
         if !vfs.exists(logical) {
             eprintln!("skipping: '{logical}' is not cooked — run `cargo run -p slop-cli -- cook`");
@@ -620,6 +760,12 @@ struct Headless {
     /// Where the scene is drawn before being resolved, as in the window.
     hdr: HdrTarget,
     tonemap: Tonemap,
+    /// What draws the environment behind the model, when there is one.
+    ///
+    /// Built for every test, including the ones that never declare the pass —
+    /// the same reason the windowed viewer builds it unconditionally. A pipeline
+    /// nothing constructs is a shader nothing compiles.
+    skybox: Skybox,
     /// One slot: the harness submits and waits per frame, so nothing is ever in
     /// flight beside it.
     lights: slop_render::Lights,
@@ -717,6 +863,29 @@ impl Headless {
             )
             .map_err(|error| error.to_string())?,
             FORMAT,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let skybox_module = ShaderModule::from_bytes(
+            device,
+            &vfs.read("shaders/passes/scene/skybox.spv")
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let skybox = Skybox::new(
+            device,
+            &mut heap,
+            &skybox_module,
+            &slop_asset::Reflection::read(
+                &vfs.read("shaders/passes/scene/skybox.refl")
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?,
+            // Into the HDR target with the scene, and tested against the same
+            // depth buffer.
+            slop_render::HDR_FORMAT,
+            slop_rhi::preferred_depth_format(device),
         )
         .map_err(|error| error.to_string())?;
 
@@ -833,6 +1002,7 @@ impl Headless {
             meshes,
             hdr,
             tonemap,
+            skybox,
             lights,
             clusters,
             environment,
@@ -1060,6 +1230,8 @@ impl Headless {
 
         let meshes = &self.meshes;
         let tonemap = &self.tonemap;
+        let skybox = &self.skybox;
+        let has_sky = self.sky.is_some();
         let heap = &self.heap;
         let source = self.hdr.slot();
 
@@ -1114,7 +1286,8 @@ impl Headless {
                     depth: Some(slop_render::DepthTarget {
                         image: depth,
                         load: slop_rhi::Load::Preserve,
-                        store: false,
+                        // Stored only for the skybox, as in the viewer.
+                        store: has_sky,
                         layer: 0,
                     }),
                     reads: &[
@@ -1125,6 +1298,27 @@ impl Headless {
                 },
                 |pass| meshes.draw(pass, heap, &view),
             );
+
+            // The same conditional declaration the viewer makes: a sky is drawn
+            // when there is one, and the clear colour stands in when there is
+            // not. That is what keeps the pre-E6e references — every one lit by
+            // a uniform sky — comparable at all.
+            if has_sky {
+                graph.add(
+                    &slop_render::RenderPass {
+                        name: "skybox",
+                        color: Some((scene, slop_rhi::Load::Preserve)),
+                        depth: Some(slop_render::DepthTarget {
+                            image: depth,
+                            load: slop_rhi::Load::Preserve,
+                            store: false,
+                            layer: 0,
+                        }),
+                        ..slop_render::RenderPass::default()
+                    },
+                    |pass| skybox.draw(pass, heap, &view),
+                );
+            }
         }
 
         graph.add(

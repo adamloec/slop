@@ -793,6 +793,8 @@ nothing about the tree.
 | Light intensity is a number someone picked, in no unit | `slop-render/src/lighting/environment.rs`, `slop-render/src/lighting/light.rs` | Photometric units — lux for a sun, lumens for a point light | **Extended.** E6d re-based every intensity by π when Lambert's missing divisor arrived, which is exactly the kind of silent re-tuning that a real unit prevents: the numbers changed and the image did not, and nothing but a comment says why. Two lights authored by different people cannot agree until an intensity means something. Cheap to add — it is a scale factor and a name — and it wants doing when there is a second author or an exposure control, whichever comes first. | M3+ |
 | A cube's mip chain is box-filtered within each face | `slop-cook/src/cube.rs` | Resampling across the face boundary | **Extended.** The four texels averaged for an edge texel are the four that exist; the neighbouring face's are not consulted, so each level's outermost ring is filtered against a boundary that is not there. The error is confined to one texel per edge and shrinks with the level, which is what every offline pipeline accepts here — and the hardware filters *across* faces when sampling, so the artefact is in the source of the prefilter rather than in the lookup. Doing it properly means resampling across the seam, which is a different and much larger piece of work than mip generation. | M3 |
 | An environment cooks at one fixed size with no per-asset settings | `slop-cook/src/import/environment.rs` | Import settings, as the texture rows want | **Extended.** `SIZE` is a constant of the cooker rather than a property of the asset, so a small studio HDR and a 8K outdoor capture both become 256. It is an input to the cache key, so changing it recooks correctly — what is missing is any way for one asset to say something different. The same missing per-asset import settings as the two mip rows above, and it closes with them. | M3 |
+| The visible sky is the prefiltered cube's base level | `slop-render/src/lighting/skybox.rs` | A background cube cooked at the source panorama's own resolution | **Extended.** The skybox samples level zero of the chain the *prefilter* produced, which is 256² per face — chosen for how much sky a rough reflection needs, not for how much a window shows. At a 55° vertical field of view that is about 2.8 texels per degree against 1080p's 19.6, so the background is visibly softer than everything drawn in front of it, while an 11 MB source panorama had the detail all along. The fix is a second, larger cube in the same artifact, read through the same one lookup — `specularFrom` at roughness zero is the only caller, so the seam is one function. Worth doing when a still is being judged rather than a feature verified. | M3, E7 |
+| `SLOP_FRAMES` does not apply to `example-window` | `examples/window` | Either drawing something, or a shell that counts idle frames too | **Extended.** It returns `frame_number() = 0` forever and asks not to redraw, both correct for M0 task E — it exists to prove a window, surface and swapchain can be created, and never presents. So the frame limit can never be reached and the process idles until a human closes it, which is a trap for anything that runs the examples in a batch. `CLAUDE.md` now says so; the real fix is task F's first render, which this example is deliberately behind. | M3 |
 | The ambient term is a flat colour | `slop-render/src/lighting/environment.rs` | Image-based lighting | **Replaced at E6.** Real ambient light arrives from different directions with different colours; a constant cannot express that and makes every surface's unlit side the same shade. Already a field in the environment buffer, so the seam does not move. | M3, E6 |
 | ~~The forward pass loops over every light~~ | `shaders/passes/scene/model.slang` | — | **Resolved at E4.** It reads its own cluster's list, and the loop body did not change — only where the indices come from, exactly as the row predicted. | ✅ |
 | A cluster's light list has a fixed stride | `slop-render/src/lighting/cluster.rs` | A compacted list with an atomic allocator | **Replaced.** The default grid at the default stride is under a megabyte, so the waste is bounded and known. The seam is already the compacted one: a cluster's range is written as an offset *and* a count rather than derived from its index, so compaction changes how the offset is produced and nothing that reads it. | M3, E7 |
@@ -1077,6 +1079,10 @@ flowchart TD
     ibl[("IBL — irradiance + prefiltered")] --> forward
     forward --> hdr[("HDR colour, Rgba16Float")]
 
+    ibl --> skybox("skybox — where depth is untouched")
+    depth --> skybox
+    skybox --> hdr
+
     hdr --> taa("TAA resolve")
     depth --> taa
     history[("history")] --> taa
@@ -1335,7 +1341,7 @@ the skybox.
 | Diffuse irradiance | **Order-3 spherical harmonics — 9 RGB coefficients, in the environment buffer** | Irradiance is a very low-frequency signal; nine coefficients reconstruct it to within about a percent, which is the Ramamoorthi and Hanrahan result the whole industry sits on. That is 108 bytes in a buffer that already exists, against an irradiance cube map's image, view, sampler, heap slot and upload. §6.1's row says the ambient seam "does not move" when this lands, and with SH that is literally true: `ambient: float3` becomes nine of them in the same struct |
 | Specular | **A prefiltered cube map, `Rgba16Float`, 128² base, roughness across the mip chain** | Cube rather than octahedral, and the reason is seams. An octahedral map needs no RHI change at all — it samples through `g_textures` today — but its outer edge folds onto the diagonal, so bilinear filtering across it needs a hand-maintained border on every level, and the prefiltered chain's small levels are where that border is 25–50% of the image. Cube faces filter across each other in hardware. The RHI cost is one flag and one view type; E5 already grew the layer views the upload needs |
 | Split-sum BRDF term | **The analytic fit, not a LUT** | The environment BRDF is a function of roughness and *N·V* alone — it has nothing to do with the environment, so cooking it per-asset would be wrong and cooking it once is a second artifact kind for ten ALU. The fit is accurate to a fraction of a percent over GGX. Recorded in §6.1 with the LUT as its replacement, behind `environmentSpecular` — one function, so the swap is not an investigation |
-| Skybox | **In scope, as a pass** | §9.4's frame does not list one and this adds it. Not for looks: without it the reference image shows the environment only through its effect on surfaces, and "lit by the right environment" and "lit by *an* environment" are then not distinguishable — the same gap §6.1 records for the cascades. A fullscreen triangle sampling the cube by view ray at the far plane is the cheapest thing that closes it |
+| Skybox | **In scope, as a pass** | §9.4's frame did not list one and this adds it — the diagram there now shows it, between the forward pass and the HDR target it also writes. Not for looks: without it the reference image shows the environment only through its effect on surfaces, and "lit by the right environment" and "lit by *an* environment" are then not distinguishable — the same gap §6.1 records for the cascades. A fullscreen triangle sampling the cube by view ray at the far plane is the cheapest thing that closes it |
 
 #### What this is really changing, which is not only IBL
 
@@ -1406,7 +1412,7 @@ Five steps, at E5's granularity, each landing on `main` on its own.
 | **E6b** | SH projection at cook time; `ambient` becomes nine coefficients; the shader evaluates it | `slop-math`, `slop-cook`, `slop-render`, `model.slang` | **Landed.** A constant environment reconstructs to that constant in every direction, at three levels — the basis alone, the cube's solid angles driving it, and the cooker end to end. A light from one side is brightest facing it and dimmest facing away, on all six axes, by equal amounts. **Every reference image is unchanged**, which is the claim `default_irradiance` exists to make: a uniform sky is the same one code path in its degenerate case, so a caller that binds no environment renders bit-identically to how it did before spherical harmonics existed. Two new tests cover what the references cannot — see below |
 | **E6c** | The prefiltered chain; cube images in the RHI; layers in the upload path; the heap's cube alias | `slop-rhi`, `slop-render`, `slop-cook` | **Landed.** Cook side: a uniform sky survives every roughness level — one assertion catching a weight that does not sum to one, a lobe leaking below the horizon, and a mip selection reading off the end of the chain. Variance falls monotonically with roughness, a reflection does not move as it blurs, and neighbouring texels stay within 6× of each other, which is what a firefly is not. GPU side: `slop-rhi/tests/cube.rs` uploads six differently-coloured faces and samples along the six axes, which is **the only thing that can check the engine's face order against the hardware's** — see below |
 | **E6d** | GGX direct specular and IBL specular; metallic and roughness finally read | `model.slang`, `shaders/lib/` | **Landed.** `the_specular_cube_reaches_the_shader` renders the same model under the same coefficients with and without the cube uploaded, which is the only pair differing in exactly the specular term — every reference binds both halves, so a lookup that silently found nothing would still change the image and the existing change-detector would pass. **All three references re-approved deliberately.** The white furnace this row promised is **not** done: it needs a surface whose albedo, roughness and metallic the test knows, and the harness renders cooked models rather than synthetic materials. §6.1 carries it |
-| **E6e** | The skybox pass | `slop-render`, `examples/model` | The reference now shows the environment it is lit by, so the two are checkable against each other |
+| **E6e** | The skybox pass | `slop-render`, `examples/model` | **Landed.** And this row's own claim turned out to be false of the reference it meant: `sponza-helipad.png` is bit-identical with the skybox fragment forced to magenta, because at `SPONZA_CLOSENESS` geometry covers all 65536 pixels. A **fourth** reference — the cube under helipad, mostly sky — is what makes the claim true, and two pixel assertions on a corner cover what no reference can. See below |
 
 E6a and E6b together are the whole feature's risk: after them the environment is
 on disk in a form the renderer reads, and everything left is integration with a
@@ -1572,3 +1578,55 @@ are constructible. Vulkan rejects the second and silently accepts the first,
 leaving an image that cannot be viewed as a cube for a reason nothing reports.
 `Subresource` exists for the same kind of reason: `level` and `layer` are both
 `u32`, differ by one letter, and mean a mip of a face against a face of a mip.
+
+#### What E6e found: the reference that could not see the pass it was for
+
+The decisions table above justifies the skybox with a claim about
+`sponza-helipad.png` — that without a sky, "lit by the right environment" and
+"lit by an environment" are not distinguishable in it. The pass landed, every
+test passed, and **that reference did not move by one bit.**
+
+It was not a broken pass. The fragment was forced to return magenta and the
+reference *still* reported `0 of 65536 pixels differ`: at `SPONZA_CLOSENESS` the
+camera is inside the building, and geometry covers every pixel of the frame.
+There is no background for a skybox to fill, so the reference this step was
+argued for is the one reference it can never appear in.
+
+What closes it is a fourth reference — **the cube under helipad**, where the
+model occupies the middle and the environment occupies everything else. That is
+also the first image in the repository in which §9.7's own trap list is
+*checkable by looking*: a wrong sign in `direction_of` renders as a horizon that
+is tilted, mirrored or in the wrong place, and a human approving this image sees
+it. Nothing before this could.
+
+Two assertions cover what a reference still cannot, both on the corner pixel —
+background at every orbit angle, since `OrbitCamera::framing` fits the bounding
+sphere inside the vertical field of view:
+
+| | Guards |
+|---|---|
+| `the_skybox_fills_what_the_clear_colour_used_to` | That the pass draws at all. It asserts the corner is the clear colour under a uniform sky *first*, so a test measuring the wrong pixel fails as a wrong measurement rather than passing quietly |
+| `the_sky_turns_with_the_camera` | That the direction reaching the cube depends on the camera. Half an orbit apart, so the same corner reads genuinely opposite parts of the sky |
+
+Verified by breaking it on purpose, twice:
+
+| Change | Result |
+|---|---|
+| The ray direction pinned to a constant | `the_sky_turns_with_the_camera` and the cube reference fail; `the_skybox_fills_...` **passes** — a constant direction still fills the background with a colour, which is exactly the failure it cannot see and the second test exists for |
+| The sky drawn at the near plane instead of the far one | Both cooked references fail. Which is also the proof that the pass runs for Sponza at all: it is declared and its depth test is doing the work, even though the correct version of it changes nothing there |
+
+**`Sky::image()` was written at E6c for a barrier that does not exist, and is
+gone.** The reasoning behind it — "the skybox reads this as an ordinary sampled
+resource, which the graph has to know about" — was wrong twice. Nothing writes
+the cube after its blocking upload, so there is no intra-frame hazard for the
+graph to derive; and importing it would imply the graph tracks what a shader
+reaches for through the heap, which it cannot. The forward pass has sampled that
+same cube undeclared since E6d, because **a bindless index is not a
+declaration**. Every mesh texture and every material buffer is in the same
+position, and none of them is imported either.
+
+The skybox is one pass with no resource of its own, then: the environment slot it
+reads is the one `View` already carries, which is what makes the sky drawn here
+and the sky reflected in `model.slang` the same environment by construction
+rather than by two call sites agreeing. Its one cost elsewhere is that the scene
+pass now stores depth — `store: sky.is_some()` — because a later pass reads it.

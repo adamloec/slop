@@ -81,7 +81,9 @@ cargo run -p slop-cli -- fetch sponza   # vendored test assets, not committed
 
 Examples: `cargo run -p example-window | example-triangle | example-cube |
 example-model`. `SLOP_FRAMES=n` exits after n frames, which is how shutdown is
-verified without a human closing a window.
+verified without a human closing a window — **except `example-window`**, which
+draws nothing by design (M0 task E), so its frame counter never advances and it
+idles until the window is closed. Do not put it in a batch that waits.
 
 Miri over any crate containing `unsafe`, under both aliasing models:
 
