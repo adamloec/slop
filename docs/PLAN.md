@@ -1327,7 +1327,7 @@ the skybox.
 
 | Question | Decision | Why |
 |---|---|---|
-| Where the prefilter runs | **Cook time, on the CPU, in `slop-cook`** | Two reasons, and the second is the one that decided it. The arithmetic is small — an order-3 SH projection is one pass over a 64² cube, and the specular chain below mip zero is about 32k texels total, which is under a second single-threaded and trivially partitioned across `JobSystem::for_each_mut`. So the usual argument for the GPU, that this is too slow offline, is false at these resolutions and should not be assumed. What the CPU buys is that **the integrator becomes testable without a device**, which is the lesson E4 and E5 both paid for: `tests/cluster.rs` exists because the goldens could not see a wrong light assignment, and `snap_to_texel`'s `floor` bug was found by a CPU test and would not have been found by looking. A GPU prefilter's correctness is visible only in the final image, which is exactly the trap §6.1's shadow row already records |
+| Where the prefilter runs | **Cook time, on the CPU, in `slop-cook`** | Two reasons, and the second is the one that decided it. The arithmetic is small enough — **this estimate was wrong by a factor of fifteen and the conclusion survived it anyway**; the measured numbers are under E6c below. So the usual argument for the GPU, that this is too slow offline, is false at these resolutions and should not be assumed. What the CPU buys is that **the integrator becomes testable without a device**, which is the lesson E4 and E5 both paid for: `tests/cluster.rs` exists because the goldens could not see a wrong light assignment, and `snap_to_texel`'s `floor` bug was found by a CPU test and would not have been found by looking. A GPU prefilter's correctness is visible only in the final image, which is exactly the trap §6.1's shadow row already records |
 | Source format | **Radiance `.hdr` (RGBE), decoded here** | Written rather than taken, and the line is §3's. BC7 was taken because a compressor is a serious project — eight modes, partition tables, endpoint fitting. An RGBE decoder is a header, a scanline loop and a run-length case, and it is testable against known bytes. OpenEXR is the opposite: half and float variants, tiles, multi-part files, and four compression codecs, none of which is worth owning. **EXR arrives when a source asset demands it**, as a dependency, not before |
 | Diffuse irradiance | **Order-3 spherical harmonics — 9 RGB coefficients, in the environment buffer** | Irradiance is a very low-frequency signal; nine coefficients reconstruct it to within about a percent, which is the Ramamoorthi and Hanrahan result the whole industry sits on. That is 108 bytes in a buffer that already exists, against an irradiance cube map's image, view, sampler, heap slot and upload. §6.1's row says the ambient seam "does not move" when this lands, and with SH that is literally true: `ambient: float3` becomes nine of them in the same struct |
 | Specular | **A prefiltered cube map, `Rgba16Float`, 128² base, roughness across the mip chain** | Cube rather than octahedral, and the reason is seams. An octahedral map needs no RHI change at all — it samples through `g_textures` today — but its outer edge folds onto the diagonal, so bilinear filtering across it needs a hand-maintained border on every level, and the prefiltered chain's small levels are where that border is 25–50% of the image. Cube faces filter across each other in hardware. The RHI cost is one flag and one view type; E5 already grew the layer views the upload needs |
@@ -1401,7 +1401,7 @@ Five steps, at E5's granularity, each landing on `main` on its own.
 |---|---|---|---|
 | **E6a** | `.hdr` decode, equirect → cube, the cooked format, `fetch` an environment | `slop-cook`, `slop-asset` | **Landed.** RGBE against known bytes in all three encodings — flat, adaptive and the old run-length one, which is decoded rather than refused because ignoring it produces garbage with no error; the two encodings of the same pixels compared against each other; the cube's face table round-tripped in both directions; the format round-tripped with truncation, version, face count and an unusable pixel format each refused by name. `helipad.hdr` cooks to a 4.2 MB artifact in under a second. See below for what it cost |
 | **E6b** | SH projection at cook time; `ambient` becomes nine coefficients; the shader evaluates it | `slop-math`, `slop-cook`, `slop-render`, `model.slang` | **Landed.** A constant environment reconstructs to that constant in every direction, at three levels — the basis alone, the cube's solid angles driving it, and the cooker end to end. A light from one side is brightest facing it and dimmest facing away, on all six axes, by equal amounts. **Every reference image is unchanged**, which is the claim `default_irradiance` exists to make: a uniform sky is the same one code path in its degenerate case, so a caller that binds no environment renders bit-identically to how it did before spherical harmonics existed. Two new tests cover what the references cannot — see below |
-| **E6c** | The prefiltered chain; cube images in the RHI; layers in the upload path; the heap's cube alias | `slop-rhi`, `slop-render`, `slop-cook` | A constant environment stays constant at every roughness level, which catches solid-angle weighting; higher levels are strictly smoother |
+| **E6c** | The prefiltered chain; cube images in the RHI; layers in the upload path; the heap's cube alias | `slop-rhi`, `slop-render`, `slop-cook` | **Cook half landed.** A uniform sky survives every roughness level — one assertion catching a weight that does not sum to one, a lobe leaking below the horizon, and a mip selection reading off the end of the chain. Variance falls monotonically with roughness, a reflection does not move as it blurs, and neighbouring texels stay within 6× of each other, which is what a firefly is not |
 | **E6d** | GGX direct specular and IBL specular; metallic and roughness finally read | `model.slang`, `shaders/lib/` | White furnace: a constant environment with no direct light leaves an unlit surface at its albedo, within tolerance. **All references re-approved here, deliberately** |
 | **E6e** | The skybox pass | `slop-render`, `examples/model` | The reference now shows the environment it is lit by, so the two are checkable against each other |
 
@@ -1479,3 +1479,39 @@ band weights set to zero in `lib/environment.slang`:
 
 The third row is the point. It is the test that looks like it covers this and
 does not.
+
+#### What E6c measured, against what this section guessed
+
+The decisions table above estimated the prefilter at "about 32k texels, under a
+second single-threaded". Both halves were wrong. The chain below level zero is
+**131k texels** — level one alone is 128²×6 = 98k, which is 75% of the work and
+the number the estimate missed — and each of the 128 samples per texel costs a
+face lookup, eight bilinear taps and a trigonometric term.
+
+Measured on the development machine, cooking `helipad.hdr` (3200×1600) at a 256
+cube:
+
+| Stage | Time |
+|---|---|
+| Decode and project onto the cube | 21 ms |
+| Spherical-harmonic projection | 12 ms |
+| Box-filtered chain | 0.5 ms |
+| **Prefilter, single-threaded** | **1.44 s** |
+| **Prefilter, 32 cores** | **95 ms** |
+
+So the estimate was out by roughly fifteen, and **the decision it supported was
+right anyway** — which is worth recording rather than quietly correcting, because
+the temptation next time is to trust the estimate rather than measure. A second
+and a half offline, once, content-hashed, is not an argument for moving an
+integrator onto the GPU where nothing can test it.
+
+A note on how that was almost mismeasured. The first readings were 7.3 s before
+parallelising and 4.6 s after — an apparent 1.6× on 32 cores, which looked like a
+broken dispatch. It was neither: `cargo run` dominates both, and the actual
+figures are 1.44 s against 95 ms, a 15× speedup. **Timing a `cargo run` measures
+cargo.** The cooker now logs its own elapsed time per environment, which is what
+makes the number a measurement rather than a stopwatch held over a build system.
+
+The work is partitioned **by row rather than by face**: six faces would cap the
+speedup at six however many cores exist, and would leave five idle at the small
+levels.

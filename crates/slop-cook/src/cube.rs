@@ -91,12 +91,6 @@ pub(crate) fn direction_of(face: Face, u: f32, v: f32) -> Vec3 {
 /// below picks; that is arbitrary and harmless, since both give the same
 /// direction back.
 ///
-/// **Test-only for now**, and that is the honest state rather than a permanent
-/// one: nothing in the cooker yet needs to go from a direction to a texel, and
-/// this exists because a mapping with only one direction implemented cannot be
-/// checked against anything. E6c's prefilter is the first caller — it samples the
-/// source cube along a reflection vector — and the gate comes off with it.
-#[cfg(test)]
 #[must_use]
 pub(crate) fn face_of(direction: Vec3) -> (Face, f32, f32) {
     let absolute = direction.abs();
@@ -182,6 +176,49 @@ impl Cube {
         let v = (y as f32 + 0.5).mul_add(step, -1.0);
 
         direction_of(face, u, v).normalize()
+    }
+
+    /// The radiance arriving from `direction`, bilinearly filtered.
+    ///
+    /// **Within one face**, with the sample position clamped to that face's own
+    /// texels rather than continuing onto its neighbour. A direction lands on
+    /// exactly one face, and only a sample within half a texel of an edge would
+    /// want the other — so the error is confined to the outermost ring and is the
+    /// same approximation [`halved`](Cube::halved) already makes.
+    ///
+    /// Worth being precise about what that does and does not cost, because it
+    /// sounds worse than it is: this is the *prefilter's* view of the source, not
+    /// the runtime's. At sample time the hardware filters across faces properly,
+    /// because the image is a real cube map. What a clamped edge biases is the
+    /// integral for a texel whose sample cone crosses a cube edge, by at most one
+    /// texel's worth of radiance out of hundreds of samples.
+    #[must_use]
+    pub(crate) fn sample(&self, direction: Vec3) -> Vec3 {
+        let (face, u, v) = face_of(direction);
+        let texels = &self.faces[face.layer()];
+
+        // From −1..1 into texel space, where a texel centre sits at `i + 0.5`.
+        let size = self.size as f32;
+        let x = u.mul_add(size, size).mul_add(0.5, -0.5);
+        let y = v.mul_add(size, size).mul_add(0.5, -0.5);
+
+        let x0 = x.floor();
+        let y0 = y.floor();
+        let fx = x - x0;
+        let fy = y - y0;
+
+        let at = |x: f32, y: f32| -> Vec3 {
+            let last = self.size.saturating_sub(1) as f32;
+            let x = x.clamp(0.0, last) as usize;
+            let y = y.clamp(0.0, last) as usize;
+
+            texels[y * self.size as usize + x]
+        };
+
+        let top = at(x0, y0).lerp(at(x0 + 1.0, y0), fx);
+        let bottom = at(x0, y0 + 1.0).lerp(at(x0 + 1.0, y0 + 1.0), fx);
+
+        top.lerp(bottom, fy)
     }
 
     /// How much sky the texel at `(x, y)` covers, in steradians.
@@ -623,6 +660,55 @@ mod tests {
             sh.diffuse(Vec3::Y),
             sh.diffuse(Vec3::NEG_Y)
         );
+    }
+
+    #[test]
+    fn sampling_a_texel_centre_returns_that_texel() {
+        // Bilinear filtering with the weights right reduces to a plain lookup at
+        // a texel centre. Half a texel off in either direction and this reads a
+        // blend of two — which is invisible on a smooth sky and shifts the whole
+        // prefilter.
+        let size = 4;
+        let mut faces: [Vec<Vec3>; FACES] = std::array::from_fn(|_| vec![Vec3::ZERO; 16]);
+
+        for (index, texel) in faces[Face::PositiveZ.layer()].iter_mut().enumerate() {
+            *texel = Vec3::splat(index as f32);
+        }
+
+        let cube = Cube { size, faces };
+
+        for y in 0..size {
+            for x in 0..size {
+                let direction = Cube::texel_direction(size, Face::PositiveZ, x, y);
+                let expected = (y * size + x) as f32;
+
+                assert!(
+                    (cube.sample(direction).x - expected).abs() < 1e-4,
+                    "texel ({x}, {y}) sampled to {:?}, expected {expected}",
+                    cube.sample(direction)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sampling_finds_the_face_a_direction_points_at() {
+        // Six faces, six distinct values, six directions. A face table that
+        // agreed with itself but assigned the wrong layer would pass
+        // `every_face_survives_the_round_trip` and fail this.
+        let faces: [Vec<Vec3>; FACES] =
+            std::array::from_fn(|layer| vec![Vec3::splat(layer as f32); 4]);
+        let cube = Cube { size: 2, faces };
+
+        for face in Face::ALL {
+            let direction = direction_of(face, 0.0, 0.0).normalize();
+
+            assert!(
+                (cube.sample(direction).x - face.layer() as f32).abs() < 1e-4,
+                "{face:?} sampled to {:?}",
+                cube.sample(direction)
+            );
+        }
     }
 
     #[test]

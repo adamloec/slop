@@ -53,6 +53,7 @@ mod import;
 mod panorama;
 mod reflection;
 mod sources;
+mod specular;
 
 use std::path::Path;
 

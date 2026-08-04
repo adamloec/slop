@@ -35,17 +35,19 @@ use anyhow::{Context, Result};
 use slop_asset::environment::Environment;
 use slop_asset::texture::Format;
 use slop_asset::{Cache, CacheKey};
+use slop_core::JobSystem;
 use slop_core::diagnostics::tracing::{debug, info, warn};
 
 use crate::cube::Cube;
 use crate::import::Summary;
 use crate::panorama::Panorama;
 use crate::sources::{self, Sources};
+use crate::specular;
 
 /// Bump to invalidate every cooked environment.
 ///
-/// 2 — the spherical-harmonic diffuse term joins the cube.
-const COOKER_VERSION: u32 = 2;
+/// 3 — the chain is prefiltered by roughness rather than box-filtered.
+const COOKER_VERSION: u32 = 3;
 
 /// Where source panoramas live, relative to the project root.
 const SOURCE_DIRECTORY: &str = "assets";
@@ -86,6 +88,13 @@ pub(crate) fn environments(root: &Path, force: bool) -> Result<Summary> {
 
     let mut summary = Summary::default();
 
+    // One pool for the whole run, built here rather than taken as a parameter.
+    // `docs/CONVENTIONS.md` §5.1 keeps context flowing downward, and the caller
+    // that would supply one — the editor — does not exist yet; when it does, this
+    // becomes an argument and nothing below it changes. Built lazily would be
+    // better still, but a cook with no panoramas returns above this line.
+    let jobs = JobSystem::new();
+
     for source in &sources {
         let relative = source
             .strip_prefix(&source_root)
@@ -115,7 +124,13 @@ pub(crate) fn environments(root: &Path, force: bool) -> Result<Summary> {
         let panorama = Panorama::decode_radiance(&bytes)
             .with_context(|| format!("decoding {}", source.display()))?;
 
-        let environment = cook(&panorama);
+        // Timed because it is the one genuinely expensive cook step — the
+        // prefilter is 1.44s single-threaded against 95ms across this machine's
+        // 32 cores, and a number in the log is what makes a regression in it
+        // visible rather than a vague sense that cooking got slower.
+        let started = std::time::Instant::now();
+        let environment = cook(&jobs, &panorama);
+        let elapsed = started.elapsed();
 
         cache.prepare(&artifact)?;
         std::fs::write(&artifact, environment.write())
@@ -129,6 +144,7 @@ pub(crate) fn environments(root: &Path, force: bool) -> Result<Summary> {
             size = environment.size,
             levels = environment.mip_levels,
             bytes = environment.texels.len(),
+            millis = elapsed.as_millis(),
             "cooked"
         );
         summary.cooked += 1;
@@ -141,7 +157,7 @@ pub(crate) fn environments(root: &Path, force: bool) -> Result<Summary> {
 ///
 /// Split from the walk above so the transformation is testable without a
 /// filesystem — which is most of what there is to get wrong here.
-fn cook(panorama: &Panorama) -> Environment {
+fn cook(jobs: &JobSystem, panorama: &Panorama) -> Environment {
     let base = Cube::from_panorama(panorama, SIZE);
 
     // Projected from the **base** level, before the chain halves it. Every level
@@ -150,7 +166,11 @@ fn cook(panorama: &Panorama) -> Environment {
     // sharpest level is the one whose solid angles are least approximate.
     let irradiance = base.harmonics();
 
-    let levels = base.chain();
+    // The chain is built first and then convolved, in that order and not the
+    // other: the prefilter reads the box-filtered chain to choose how blurry a
+    // source level each sample should come from, which is what keeps a bright
+    // sun from speckling the result. See `specular`.
+    let levels = specular::prefilter(jobs, base.chain());
 
     let mut texels = Vec::new();
     for level in &levels {
@@ -201,7 +221,7 @@ mod tests {
         // the format the runtime will read. A header that disagrees with the
         // payload it describes is caught here rather than at upload time, where
         // it would be a driver complaint about a copy region.
-        let cooked = cook(&flat(Vec3::ONE));
+        let cooked = cook(&JobSystem::new(), &flat(Vec3::ONE));
         let decoded = Environment::read(&cooked.write()).expect("the cooker writes valid bytes");
 
         assert_eq!(decoded, cooked);
@@ -215,14 +235,14 @@ mod tests {
         // and the format walks the chain — so this is a real check rather than a
         // restatement. An off-by-one in either is a payload the reader either
         // refuses or, worse, reads shifted.
-        let cooked = cook(&flat(Vec3::ONE));
+        let cooked = cook(&JobSystem::new(), &flat(Vec3::ONE));
 
         assert_eq!(cooked.texels.len(), cooked.payload_bytes());
     }
 
     #[test]
     fn every_face_of_every_level_is_present() {
-        let cooked = cook(&flat(Vec3::splat(0.5)));
+        let cooked = cook(&JobSystem::new(), &flat(Vec3::splat(0.5)));
 
         for level in 0..cooked.mip_levels {
             for face in 0..slop_asset::environment::FACES {
@@ -245,7 +265,7 @@ mod tests {
         // must light every direction by exactly its own radiance, and each stage
         // has its own way of being off by a constant factor.
         let radiance = Vec3::new(0.3, 0.45, 0.6);
-        let cooked = cook(&flat(radiance));
+        let cooked = cook(&JobSystem::new(), &flat(radiance));
 
         let sh = Sh9 {
             coefficients: cooked.irradiance.map(Vec3::from_array),
