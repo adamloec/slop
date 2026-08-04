@@ -55,7 +55,7 @@ use slop_asset::{AlphaMode, Cache, CacheKey, Instance, Material, Model, TextureS
 use slop_core::diagnostics::tracing::{debug, info, warn};
 
 use crate::geometry::{generate_flat_normals, generate_tangents};
-use crate::shader_import::Summary;
+use crate::import::Summary;
 use crate::sources::{self, Sources};
 
 /// What a glTF source file looks like.
@@ -495,7 +495,7 @@ fn image_path(relative: &Path, image: usize) -> String {
 
 /// Cook one image out of a glTF, if it is not already current.
 ///
-/// These do not go through `texture_import`, which scans for `.png` files on
+/// These do not go through `import::texture`, which scans for `.png` files on
 /// disk: a glTF's images may be embedded as base64 or live in a GLB's binary
 /// chunk, where there is no file to find. `gltf::import` has already decoded
 /// them, so this cooks the pixels it was handed.
@@ -530,9 +530,9 @@ fn cook_image(
 
     // Mips first, then compression: every level is compressed from filtered
     // RGBA8 rather than from a decoded parent, which is both faster and less
-    // lossy. See `texture_import::generate_mips`.
+    // lossy. See `import::texture::generate_mips`.
     let compressed =
-        crate::texture_import::compress(crate::texture_import::generate_mips(&decoded));
+        crate::import::texture::compress(crate::import::texture::generate_mips(&decoded));
 
     cache.prepare(&artifact)?;
     std::fs::write(&artifact, compressed.write())
@@ -552,7 +552,7 @@ fn cook_image(
 
 /// Expand a glTF image into eight-bit RGBA.
 ///
-/// The same widening `texture_import` does for PNGs, over the formats
+/// The same widening `import::texture` does for PNGs, over the formats
 /// `gltf::import` produces. Sixteen-bit samples are narrowed to their high byte,
 /// and formats without alpha gain an opaque one — a missing alpha channel read
 /// as zero is the failure that looks like the object vanished.

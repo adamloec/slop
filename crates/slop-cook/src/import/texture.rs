@@ -45,7 +45,7 @@ use slop_asset::texture::{Format, Texture};
 use slop_asset::{Cache, CacheKey};
 use slop_core::diagnostics::tracing::{debug, info, warn};
 
-use crate::shader_import::Summary;
+use crate::import::Summary;
 use crate::sources::{self, Sources};
 
 /// What a source image looks like.

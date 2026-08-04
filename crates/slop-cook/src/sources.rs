@@ -2,9 +2,9 @@
 //!
 //! Every importer starts by walking a tree and keeping the files it recognises,
 //! and each had written its own copy of that walk: `.gltf` and `.glb` in
-//! [`gltf_import`](crate::gltf_import), `.png` in
-//! [`texture_import`](crate::texture_import), `.slang` in
-//! [`shader_import`](crate::shader_import), and every file for the include
+//! [`import::gltf`](crate::import::gltf), `.png` in
+//! [`import::texture`](crate::import::texture), `.slang` in
+//! [`import::shader`](crate::import::shader), and every file for the include
 //! digest. Four copies of one loop, differing in the line that decides what to
 //! keep.
 //!

@@ -42,6 +42,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::import::Summary;
 use crate::reflection;
 use crate::sources::{self, Sources};
 use anyhow::{Context, Result, bail};
@@ -89,15 +90,6 @@ const SHADER_INCLUDES: Sources<'static> = Sources {
     extensions: &[],
     skip: None,
 };
-
-/// What a cook run did.
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct Summary {
-    /// Artifacts compiled this run.
-    pub cooked: usize,
-    /// Artifacts already up to date.
-    pub skipped: usize,
-}
 
 /// Cook every shader under `root/shaders` into `root/.slop/cache/shaders`.
 ///

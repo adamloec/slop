@@ -48,17 +48,15 @@
 //! one. `docs/PLAN.md` §6.1 carries the row.
 
 mod geometry;
-mod gltf_import;
+mod import;
 mod reflection;
-mod shader_import;
 mod sources;
-mod texture_import;
 
 use std::path::Path;
 
 use anyhow::{Context, Result};
 
-pub use shader_import::Summary;
+pub use import::Summary;
 
 /// Cook every shader, model and texture under `root`.
 ///
@@ -78,9 +76,9 @@ pub use shader_import::Summary;
 pub fn all(root: &Path, force: bool) -> Result<Summary> {
     let context = || format!("cooking assets under {}", root.display());
 
-    let shaders = shader_import::shaders(root, force).with_context(context)?;
-    let meshes = gltf_import::meshes(root, force).with_context(context)?;
-    let textures = texture_import::textures(root, force).with_context(context)?;
+    let shaders = import::shader::shaders(root, force).with_context(context)?;
+    let meshes = import::gltf::meshes(root, force).with_context(context)?;
+    let textures = import::texture::textures(root, force).with_context(context)?;
 
     Ok(Summary {
         cooked: shaders.cooked + meshes.cooked + textures.cooked,
@@ -94,7 +92,7 @@ pub fn all(root: &Path, force: bool) -> Result<Summary> {
 ///
 /// As [`all`], for shaders.
 pub fn shaders(root: &Path, force: bool) -> Result<Summary> {
-    shader_import::shaders(root, force)
+    import::shader::shaders(root, force)
 }
 
 /// Cook only the glTF files under `root/assets`, and the materials, images and
@@ -104,7 +102,7 @@ pub fn shaders(root: &Path, force: bool) -> Result<Summary> {
 ///
 /// As [`all`], for models.
 pub fn models(root: &Path, force: bool) -> Result<Summary> {
-    gltf_import::meshes(root, force)
+    import::gltf::meshes(root, force)
 }
 
 /// Cook only the PNGs under `root/assets`.
@@ -113,5 +111,5 @@ pub fn models(root: &Path, force: bool) -> Result<Summary> {
 ///
 /// As [`all`], for textures.
 pub fn textures(root: &Path, force: bool) -> Result<Summary> {
-    texture_import::textures(root, force)
+    import::texture::textures(root, force)
 }
