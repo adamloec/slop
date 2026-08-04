@@ -366,7 +366,7 @@ fn readback_buffer(allocator: &Arc<Allocator>) -> Buffer {
 
 /// The cooked triangle module, or `None` with an explanation if absent.
 fn cooked_triangle(device: &Arc<Device>) -> Option<ShaderModule> {
-    match Vfs::for_project(&workspace_root()).read("shaders/passes/triangle.spv") {
+    match Vfs::for_project(&workspace_root()).read("shaders/examples/triangle.spv") {
         Ok(bytes) => {
             Some(ShaderModule::from_bytes(device, &bytes).expect("cooked SPIR-V must load"))
         }

@@ -484,7 +484,10 @@ fn harness(
         None
     })?;
 
-    for logical in ["shaders/passes/model.spv", "shaders/passes/model.refl"] {
+    for logical in [
+        "shaders/passes/scene/model.spv",
+        "shaders/passes/scene/model.refl",
+    ] {
         if !vfs.exists(logical) {
             eprintln!("skipping: '{logical}' is not cooked — run `cargo run -p slop-cli -- cook`");
             return None;
@@ -592,13 +595,13 @@ impl Headless {
 
         let module = ShaderModule::from_bytes(
             device,
-            &vfs.read("shaders/passes/model.spv")
+            &vfs.read("shaders/passes/scene/model.spv")
                 .map_err(|error| error.to_string())?,
         )
         .map_err(|error| error.to_string())?;
 
         let reflection = slop_asset::Reflection::read(
-            &vfs.read("shaders/passes/model.refl")
+            &vfs.read("shaders/passes/scene/model.refl")
                 .map_err(|error| error.to_string())?,
         )
         .map_err(|error| error.to_string())?;
@@ -621,7 +624,7 @@ impl Headless {
 
         let tonemap_module = ShaderModule::from_bytes(
             device,
-            &vfs.read("shaders/passes/tonemap.spv")
+            &vfs.read("shaders/passes/post/tonemap.spv")
                 .map_err(|error| error.to_string())?,
         )
         .map_err(|error| error.to_string())?;
@@ -631,7 +634,7 @@ impl Headless {
             &mut heap,
             &tonemap_module,
             &slop_asset::Reflection::read(
-                &vfs.read("shaders/passes/tonemap.refl")
+                &vfs.read("shaders/passes/post/tonemap.refl")
                     .map_err(|error| error.to_string())?,
             )
             .map_err(|error| error.to_string())?,
@@ -698,13 +701,13 @@ impl Headless {
 
         let cluster_module = ShaderModule::from_bytes(
             device,
-            &vfs.read("shaders/passes/cluster_build.spv")
+            &vfs.read("shaders/passes/scene/cluster_build.spv")
                 .map_err(|error| error.to_string())?,
         )
         .map_err(|error| error.to_string())?;
 
         let cluster_reflection = slop_asset::Reflection::read(
-            &vfs.read("shaders/passes/cluster_build.refl")
+            &vfs.read("shaders/passes/scene/cluster_build.refl")
                 .map_err(|error| error.to_string())?,
         )
         .map_err(|error| error.to_string())?;

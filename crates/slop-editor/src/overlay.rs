@@ -63,7 +63,7 @@ const ATTRIBUTES: [(Format, u32); 3] = [
     (Format::Rgba8Unorm, 16),
 ];
 
-/// Per-draw constants, matching `PushConstants` in `shaders/passes/overlay.slang`.
+/// Per-draw constants, matching `PushConstants` in `shaders/passes/ui/overlay.slang`.
 ///
 /// Its size is checked against the shader's reflected block in [`Overlay::new`].
 #[repr(C)]

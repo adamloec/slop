@@ -45,7 +45,7 @@ fn cooked_triangle() -> Option<Vec<u8>> {
         .join("..")
         .join("..");
 
-    match Vfs::for_project(&project).read("shaders/passes/triangle.spv") {
+    match Vfs::for_project(&project).read("shaders/examples/triangle.spv") {
         Ok(bytes) => Some(bytes),
         Err(error) => {
             eprintln!("skipping: {error} — run `cargo run -p slop-cli -- cook`");

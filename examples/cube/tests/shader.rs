@@ -3,7 +3,7 @@
 //! These assertions used to be a hand-written attribute table in
 //! `src/mesh.rs` — `VERTEX_ATTRIBUTES`, `VERTEX_STRIDE`, and a test that they
 //! matched each other. The table is gone: the pipeline now derives its layout
-//! from `shaders/passes/cube.refl`, cooked from the same compile that produced
+//! from `shaders/examples/cube.refl`, cooked from the same compile that produced
 //! the SPIR-V.
 //!
 //! What is left is the join that reflection *cannot* check on its own. The
@@ -23,7 +23,7 @@ fn cooked() -> Option<Reflection> {
         .join("..")
         .join("..");
 
-    match Vfs::for_project(&project).read("shaders/passes/cube.refl") {
+    match Vfs::for_project(&project).read("shaders/examples/cube.refl") {
         Ok(bytes) => Some(Reflection::read(&bytes).expect("cooked reflection must decode")),
         Err(error) => {
             eprintln!("skipping: {error} — run `cargo run -p slop-cli -- cook`");

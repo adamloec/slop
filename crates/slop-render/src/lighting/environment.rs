@@ -12,7 +12,7 @@
 //! construction and putting it through the cluster build would be listing it
 //! 3456 times to learn nothing.
 //!
-//! §6.1 carried it as a `static const` in `shaders/passes/model.slang` through
+//! §6.1 carried it as a `static const` in `shaders/passes/scene/model.slang` through
 //! E4 for exactly that reason: making it data earlier would have been moving it
 //! for no reader. E5 is the reader — cascaded shadow maps are built along its
 //! direction, so the direction has to be a value the CPU chooses rather than a
@@ -63,7 +63,7 @@ pub struct DirectionalLight {
 }
 
 impl Default for DirectionalLight {
-    /// The values `shaders/passes/model.slang` had compiled into it before this
+    /// The values `shaders/passes/scene/model.slang` had compiled into it before this
     /// existed.
     ///
     /// Kept exactly, because that is what makes the change to data checkable:
@@ -86,7 +86,7 @@ impl Default for DirectionalLight {
 /// degenerate case of the one path — a sky that happens to be the same colour in
 /// every direction.
 ///
-/// The colour is the constant `shaders/passes/model.slang` held before any of
+/// The colour is the constant `shaders/passes/scene/model.slang` held before any of
 /// this existed, and it is kept exactly. That is what makes the change
 /// checkable: [`Sh9::diffuse`] of a constant field is that constant, so a caller
 /// that binds no environment renders **bit-identically** to how it did before

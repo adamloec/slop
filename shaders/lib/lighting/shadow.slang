@@ -5,7 +5,7 @@
 //
 // Include it as:
 //
-//     #include "lib/shadow.slang"
+//     #include "lib/lighting/shadow.slang"
 
 #ifndef SLOP_SHADOW_INCLUDED
 #define SLOP_SHADOW_INCLUDED

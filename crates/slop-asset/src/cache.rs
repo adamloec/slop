@@ -138,7 +138,7 @@ impl Cache {
 
     /// Where the artifact for `relative` lives.
     ///
-    /// `relative` is the cooked path — `shaders/passes/triangle.spv` — which is
+    /// `relative` is the cooked path — `shaders/examples/triangle.spv` — which is
     /// also what [`Vfs::read`](crate::Vfs::read) asks for. One path shape for
     /// both sides means the writer and the reader cannot disagree about layout.
     pub fn artifact(&self, relative: &str) -> PathBuf {
@@ -285,10 +285,10 @@ mod tests {
         let cache = Cache::new("cache");
 
         assert_eq!(
-            cache.artifact("shaders/passes/triangle.spv"),
+            cache.artifact("shaders/examples/triangle.spv"),
             Path::new("cache")
                 .join("shaders")
-                .join("passes")
+                .join("examples")
                 .join("triangle.spv")
         );
     }

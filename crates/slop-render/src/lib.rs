@@ -60,29 +60,28 @@
 //! The two golden images are what say the rewrite is equivalent: both examples
 //! render through this crate and neither reference moved.
 
-mod cluster;
-mod environment;
 mod error;
 mod frame;
 mod graph;
 mod hdr;
-mod light;
+mod lighting;
 mod mesh;
-mod shadow;
 mod vertex;
 mod view;
 
-pub use cluster::{ClusterCamera, ClusterGrid, Clusters, sphere_touches_box};
-pub use environment::{DirectionalLight, Environment, default_irradiance, irradiance_of};
 pub use error::RenderError;
 pub use frame::{Frame, FrameOutcome, FrameRenderer, FrameRendererConfig, Target};
 pub use graph::{
     BufferId, ComputePass, DepthTarget, Graph, ImageId, Imported, ImportedBuffer, RenderPass,
 };
 pub use hdr::{HdrTarget, Tonemap};
-pub use light::{Lights, PointLight};
+pub use lighting::cluster::{ClusterCamera, ClusterGrid, Clusters, sphere_touches_box};
+pub use lighting::environment::{DirectionalLight, Environment, default_irradiance, irradiance_of};
+pub use lighting::light::{Lights, PointLight};
+pub use lighting::shadow::{
+    CASCADES, CascadeFit, SPLIT_BLEND, ShadowConfig, Shadows, light_basis, splits,
+};
 pub use mesh::MeshRenderer;
-pub use shadow::{CASCADES, CascadeFit, SPLIT_BLEND, ShadowConfig, Shadows, light_basis, splits};
 pub use vertex::VertexBinding;
 pub use view::{NO_CLUSTERS, NO_SHADOWS, View};
 

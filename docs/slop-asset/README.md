@@ -130,7 +130,7 @@ Two rules, and both are load-bearing:
 
 ### 5.3 Logical paths
 
-A caller says `shaders/passes/triangle.spv`, never `.slop/cache/...`. Layout is
+A caller says `shaders/examples/triangle.spv`, never `.slop/cache/...`. Layout is
 this crate's business, which is what lets it change — to a packed archive for a
 shipped build, to an override directory for a mod — without a call site moving.
 
@@ -139,8 +139,8 @@ about where a thing is:
 
 | | Takes |
 |---|---|
-| `Cache::artifact` | `shaders/passes/triangle.spv` |
-| `Vfs::read` | `shaders/passes/triangle.spv` |
+| `Cache::artifact` | `shaders/examples/triangle.spv` |
+| `Vfs::read` | `shaders/examples/triangle.spv` |
 
 Separators are always `/`. A logical path is a name rather than something the OS
 sees, so letting it vary by platform would give one asset two names.

@@ -6,10 +6,10 @@
 // pipeline per surface.
 
 #include "lib/bindless.slang"
-#include "lib/cluster.slang"
-#include "lib/environment.slang"
-#include "lib/light.slang"
-#include "lib/shadow.slang"
+#include "lib/lighting/cluster.slang"
+#include "lib/lighting/environment.slang"
+#include "lib/lighting/light.slang"
+#include "lib/lighting/shadow.slang"
 
 // Per-material parameters, matching `MaterialGpu` in
 // `crates/slop-render/src/mesh.rs`.
@@ -88,7 +88,7 @@ struct PushConstants
 
     // The cluster grid, which is also where this frame's lights are. One index
     // rather than several, so that this shader and `cluster_build.slang` cannot
-    // hold different opinions about the grid — see `lib/cluster.slang`.
+    // hold different opinions about the grid — see `lib/lighting/cluster.slang`.
     uint grid;
     // The directional light and the ambient term. A second index rather than
     // fields in the grid buffer: that one describes where the *cells* are, and
@@ -348,7 +348,7 @@ float4 fragmentMain(VertexOut input) : SV_Target
         float distanceSquared = dot(toLight, toLight);
 
         // The same falloff the cluster build's radius test assumes, from the
-        // same place, so the two cannot drift — see `lib/light.slang`.
+        // same place, so the two cannot drift — see `lib/lighting/light.slang`.
         float attenuation = pointLightAttenuation(distanceSquared, light.radius);
 
         if (attenuation <= 0.0)

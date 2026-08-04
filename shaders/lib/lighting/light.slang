@@ -7,7 +7,7 @@
 //
 // Include it as:
 //
-//     #include "lib/light.slang"
+//     #include "lib/lighting/light.slang"
 
 #ifndef SLOP_LIGHT_INCLUDED
 #define SLOP_LIGHT_INCLUDED

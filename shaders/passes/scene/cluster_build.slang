@@ -19,8 +19,8 @@
 // first — is an implementation behind this same declaration.
 
 #include "lib/bindless.slang"
-#include "lib/cluster.slang"
-#include "lib/light.slang"
+#include "lib/lighting/cluster.slang"
+#include "lib/lighting/light.slang"
 
 // Matching `WORKGROUP` in `crates/slop-render/src/cluster.rs`. The cooked
 // reflection carries this number, and the Rust side reads it from there rather

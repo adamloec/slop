@@ -42,10 +42,10 @@ use winit::window::Window;
 use crate::{EditorError, Overlay};
 
 /// Where the overlay's cooked shader lives.
-const SHADER: &str = "shaders/passes/overlay.spv";
+const SHADER: &str = "shaders/passes/ui/overlay.spv";
 
 /// Where its reflection lives.
-const REFLECTION: &str = "shaders/passes/overlay.refl";
+const REFLECTION: &str = "shaders/passes/ui/overlay.refl";
 
 /// One frame's worth of declared UI, ready to draw.
 ///

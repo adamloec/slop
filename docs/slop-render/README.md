@@ -58,6 +58,30 @@ declaration rather than to a call order.
 
 ## 3. Key types
 
+The module tree, first, because four of these types moved into a directory:
+
+```
+src/
+├── lib.rs          table of contents; the public surface is named here
+├── frame.rs        the swapchain, frames in flight, and the loop between them
+├── graph.rs        passes declare what they touch; barriers are derived
+├── mesh.rs         loading a cooked model and drawing it
+├── hdr.rs          the float target and the pass that resolves it
+├── view.rs         what every draw in a frame shares
+├── vertex.rs       a pipeline's vertex layout, from cooked reflection
+├── error.rs        RenderError
+└── lighting/       where the light comes from, and what it reaches
+    ├── environment.rs   the sun, and the sky as nine SH coefficients
+    ├── light.rs         point lights and their falloff
+    ├── cluster.rs       which cell of the frustum each light reaches
+    └── shadow.rs        where the four cascades sit
+```
+
+Promoted at four modules under one subject, per `CONVENTIONS.md` §2.3. The
+`*Gpu` structs deliberately did **not** move together: each is one half of an ABI
+whose other half is a Slang struct, and they live beside the code that fills them
+so the two halves are read together. Collecting them would be a split by kind.
+
 | Type | Role |
 |---|---|
 | `FrameRenderer` | Owns the swapchain and per-frame synchronisation |
@@ -77,7 +101,7 @@ declaration rather than to a call order.
 | `Lights` | The GPU-side light buffer, one per frame in flight |
 | `View` | What every draw in a frame shares: the camera, and the cluster grid |
 | `DirectionalLight` | A light with no position — the sun |
-| `Environment` | The per-frame buffer holding the sun and the ambient term |
+| `Environment` | The per-frame buffer holding the sun and the sky's nine coefficients |
 | `ClusterGrid` | How the frustum is divided, and the depth-to-slice mapping |
 | `ClusterCamera` | What the build pass needs about the camera |
 | `Clusters` | The build pass and the per-cell light lists it fills |
@@ -365,9 +389,9 @@ Three pieces have to agree, and two of them are shaders:
 
 | Piece | Where |
 |---|---|
-| The grid, and the depth-to-slice mapping | `ClusterGrid`, mirrored in `shaders/lib/cluster.slang` |
-| Assignment — sphere against cell | `passes/cluster_build.slang`, twinned by `sphere_touches_box` |
-| Lookup — fragment to cell | `passes/model.slang`, through the same include |
+| The grid, and the depth-to-slice mapping | `ClusterGrid`, mirrored in `shaders/lib/lighting/cluster.slang` |
+| Assignment — sphere against cell | `passes/scene/cluster_build.slang`, twinned by `sphere_touches_box` |
+| Lookup — fragment to cell | `passes/scene/model.slang`, through the same include |
 
 **The grid is a buffer, not push constants**, and that is the reason: the build
 pass places lights into cells and the forward pass looks its own cell up, and

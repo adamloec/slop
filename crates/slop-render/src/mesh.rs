@@ -51,12 +51,12 @@ use crate::{RenderError, VertexBinding, View};
 ///
 /// Not zero: zero is a perfectly good heap slot, and a material with no albedo
 /// would sample whichever texture happened to land there. Matches `NO_TEXTURE`
-/// in `shaders/passes/model.slang`.
+/// in `shaders/passes/scene/model.slang`.
 const NO_TEXTURE: u32 = u32::MAX;
 
 /// Which bits of a material's `flags` hold its alpha mode.
 ///
-/// Matches `ALPHA_MODE_MASK_BITS` in `shaders/passes/model.slang`. Two bits, so
+/// Matches `ALPHA_MODE_MASK_BITS` in `shaders/passes/scene/model.slang`. Two bits, so
 /// the remaining thirty are free for the flags real shading will want.
 const ALPHA_MODE_BITS: u32 = 3;
 
@@ -69,7 +69,7 @@ const ALPHA_MODE_MASK: u32 = 1;
 
 /// One material as the shader reads it.
 ///
-/// Mirrors `MaterialGpu` in `shaders/passes/model.slang`. `#[repr(C)]` is
+/// Mirrors `MaterialGpu` in `shaders/passes/scene/model.slang`. `#[repr(C)]` is
 /// load-bearing for the same reason a vertex struct needs it, and the field
 /// order is chosen so std430 and Rust agree without padding on either side: the
 /// `[f32; 4]` needs sixteen-byte alignment and comes first, and the eight

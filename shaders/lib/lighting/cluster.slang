@@ -13,7 +13,7 @@
 //
 // Include it as:
 //
-//     #include "lib/cluster.slang"
+//     #include "lib/lighting/cluster.slang"
 
 #ifndef SLOP_CLUSTER_INCLUDED
 #define SLOP_CLUSTER_INCLUDED

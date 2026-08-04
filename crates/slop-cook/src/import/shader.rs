@@ -151,7 +151,7 @@ pub(crate) fn shaders(root: &Path, force: bool) -> Result<Summary> {
 
 /// The logical path a cooked shader is addressed by.
 ///
-/// `passes/triangle.slang` becomes `shaders/passes/triangle.spv`, which is what
+/// `examples/triangle.slang` becomes `shaders/examples/triangle.spv`, which is what
 /// both [`Cache::artifact`] and [`Vfs::read`](slop_asset::Vfs::read) take —
 /// writer and reader cannot disagree about layout because they are given the
 /// same string.
@@ -522,8 +522,20 @@ mod tests {
         // The one string both the cache and the VFS are handed, which is why
         // they cannot disagree about where an artifact lives.
         assert_eq!(
-            logical_path(Path::new("passes").join("triangle.slang").as_path()),
-            "shaders/passes/triangle.spv"
+            logical_path(Path::new("examples").join("triangle.slang").as_path()),
+            "shaders/examples/triangle.spv"
+        );
+        // Nested, which the frame-stage grouping under `passes/` now needs: the
+        // logical path mirrors the source tree however deep it goes, rather than
+        // flattening to a basename.
+        assert_eq!(
+            logical_path(
+                Path::new("passes")
+                    .join("scene")
+                    .join("model.slang")
+                    .as_path()
+            ),
+            "shaders/passes/scene/model.spv"
         );
         assert_eq!(logical_path(Path::new("cube.slang")), "shaders/cube.spv");
     }

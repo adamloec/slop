@@ -326,7 +326,7 @@ fn assets() -> Vfs {
 
 fn load_shader(device: &Arc<Device>) -> Result<ShaderModule, String> {
     let bytes = assets()
-        .read("shaders/passes/triangle.spv")
+        .read("shaders/examples/triangle.spv")
         .map_err(|error| format!("{error}. Run `cargo run -p slop-cli -- cook` first"))?;
 
     ShaderModule::from_bytes(device, &bytes).map_err(|error| error.to_string())

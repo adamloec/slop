@@ -30,7 +30,13 @@ slop/
 │
 ├── shaders/                Slang source — one tree, not per-crate (see below)
 │   ├── lib/                shared includes — NEVER cooked standalone
-│   └── passes/             entry points, one per render pass
+│   │   └── lighting/       grouped by subject, per §2.7
+│   ├── passes/             engine entry points, grouped by frame stage
+│   │   ├── scene/          everything that produces the lit HDR image
+│   │   ├── post/           everything that operates on it afterwards
+│   │   └── ui/             what draws over the resolved frame
+│   ├── examples/           entry points owned by examples/, not by the engine
+│   └── tests/              entry points that exist only to test the RHI
 │
 ├── assets/                 SOURCE assets only, committed. Never cooked output.
 │   ├── meshes/
@@ -339,6 +345,52 @@ Colocated `#[cfg(test)] mod tests` at the bottom of the file under test. When th
 tests outgrow the code — common for `slotmap.rs`, where the interesting cases are
 all about reuse and staleness — move them to `slotmap/tests.rs` rather than
 letting the file double in size.
+
+### 2.7 The same rule applies to `shaders/`
+
+A shader tree accumulates the way a module tree does — a pass per feature, an
+include per subsystem — and it has no compiler telling anyone when a directory
+has become a pile. So the rule from §2.2 and the promotion trigger from §2.3 are
+in force there too, and this section says what the axes are so that the answer is
+not re-argued each time.
+
+**`passes/` groups by frame stage**, which is `docs/PLAN.md` §9.4's own
+vocabulary and the same words `Graph::pass_names` reports:
+
+| | |
+|---|---|
+| `passes/scene/` | Everything producing the lit HDR image — the cluster build, the forward pass, the skybox |
+| `passes/post/` | Everything operating on it afterwards — tonemap, SSAO, bloom, TAA |
+| `passes/ui/` | What draws over the resolved frame |
+
+**`lib/` groups by subject**, exactly as a crate's modules do — `lib/lighting/`
+holds the cluster grid, the environment, point lights and the shadow cascades.
+`lib/bindless.slang` deliberately sits at the root: it is the descriptor-heap
+ABI, every shader includes it whatever it is about, and putting it in a group
+would be claiming it belongs to one.
+
+**A shader owned by an example is not an engine pass.** `examples/` is a
+sibling of `passes/`, not a stage within it. The two directories answer different
+questions — "which part of the frame is this" versus "who does this belong to" —
+and mixing them is how `cube.slang` and `triangle.slang` spent M0 through M3
+sitting among the renderer's own passes.
+
+**The trigger is §2.3's.** A stage directory is created when a third file wants
+it, not in advance — with one exception that costs nothing and buys real
+stability: a stage §9.4 has *already specified* may be created empty-ish, because
+the alternative is reorganising the tree in the middle of the feature that fills
+it. `post/` holding only `tonemap.slang` today is that case.
+
+Two consequences worth stating, because both are easy to get wrong later:
+
+- **A logical path mirrors the source tree, however deep.** `passes/scene/
+  model.slang` cooks to `shaders/passes/scene/model.spv`, and that is the string
+  both `Cache::artifact` and `Vfs::read` are handed. Flattening to a basename
+  would make two shaders in different stages collide silently.
+- **`lib/` is skipped by directory name, at any depth.** The cooker excludes the
+  whole subtree rather than the immediate children, so nesting inside it is free.
+  The include digest still walks all of it, which is what keeps a shared file's
+  edit invalidating every shader that includes it.
 
 ## 3. Naming
 

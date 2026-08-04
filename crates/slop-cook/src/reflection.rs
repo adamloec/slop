@@ -284,7 +284,7 @@ fn scalar_is_float(scalar: Option<&Value>) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// Reflection for a shader shaped like `shaders/passes/cube.slang`.
+    /// Reflection for a shader shaped like `shaders/examples/cube.slang`.
     const CUBE: &str = r#"{
         "parameters": [
             {

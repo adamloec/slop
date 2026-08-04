@@ -37,7 +37,10 @@ the diff.
 
 ```
 crates/        the engine — one directory per crate, workspace members
-shaders/       Slang source; lib/ is shared includes, passes/ is entry points
+shaders/       Slang source. lib/ shared includes, grouped by subject; passes/
+               engine entry points, grouped by frame stage (scene/post/ui);
+               examples/ and tests/ hold entry points the engine does not own.
+               CONVENTIONS.md §2.7 has the axes and the promotion trigger
 assets/        SOURCE assets only, committed. Never cooked output
 examples/      runnable demos, each its own workspace member owning main()
 docs/          all documentation except the root README

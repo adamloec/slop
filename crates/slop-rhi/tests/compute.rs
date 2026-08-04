@@ -477,8 +477,8 @@ fn graphics_reflection(
     device: &Arc<slop_rhi::Device>,
 ) -> Option<(ShaderModule, slop_asset::Reflection)> {
     let vfs = Vfs::discover(&std::env::current_dir().expect("a working directory")).ok()?;
-    let bytes = vfs.read("shaders/passes/model.spv").ok()?;
-    let reflection = vfs.read("shaders/passes/model.refl").ok()?;
+    let bytes = vfs.read("shaders/passes/scene/model.spv").ok()?;
+    let reflection = vfs.read("shaders/passes/scene/model.refl").ok()?;
 
     Some((
         ShaderModule::from_bytes(device, &bytes).expect("valid SPIR-V"),

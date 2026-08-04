@@ -63,11 +63,15 @@ fn a_cooked_artifact_reads_back_through_the_vfs() {
     let cache = Cache::for_project(scratch.path());
     let vfs = Vfs::for_project(scratch.path());
 
-    assert!(cook(&cache, "shaders/passes/triangle.spv", b"spirv bytes"));
+    assert!(cook(
+        &cache,
+        "shaders/examples/triangle.spv",
+        b"spirv bytes"
+    ));
 
-    assert!(vfs.exists("shaders/passes/triangle.spv"));
+    assert!(vfs.exists("shaders/examples/triangle.spv"));
     assert_eq!(
-        vfs.read("shaders/passes/triangle.spv").expect("cooked"),
+        vfs.read("shaders/examples/triangle.spv").expect("cooked"),
         b"spirv bytes"
     );
 }

@@ -3,7 +3,7 @@
 //! `docs/PLAN.md` §9.5 E4, first step. §9.4's clustered forward+ assigns lights
 //! to cells of a grid and has the forward pass read only its own cell — none of
 //! which can be built while the only light in the engine is a `static const`
-//! direction in `shaders/passes/model.slang`.
+//! direction in `shaders/passes/scene/model.slang`.
 //!
 //! # Why the radius is not a hint
 //!
@@ -78,7 +78,7 @@ pub struct PointLight {
 
 /// One light as the shader reads it.
 ///
-/// Mirrors `PointLightGpu` in `shaders/passes/model.slang`. Laid out so that
+/// Mirrors `PointLightGpu` in `shaders/passes/scene/model.slang`. Laid out so that
 /// std430 and `#[repr(C)]` agree without padding on either side: two rows of
 /// `float3` plus a scalar, which is exactly sixteen bytes each. Pairing the
 /// radius with the position rather than putting the two scalars together is

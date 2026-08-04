@@ -110,13 +110,13 @@ fn the_build_pass_assigns_each_light_to_the_cells_it_reaches() {
 
     let module = ShaderModule::from_bytes(
         &device,
-        &vfs.read("shaders/passes/cluster_build.spv")
+        &vfs.read("shaders/passes/scene/cluster_build.spv")
             .expect("cluster_build.spv must be cooked"),
     )
     .expect("valid SPIR-V");
 
     let reflection = slop_asset::Reflection::read(
-        &vfs.read("shaders/passes/cluster_build.refl")
+        &vfs.read("shaders/passes/scene/cluster_build.refl")
             .expect("its reflection must sit beside it"),
     )
     .expect("valid reflection");
@@ -243,12 +243,12 @@ fn a_light_behind_the_camera_is_in_no_cluster() {
 
     let module = ShaderModule::from_bytes(
         &device,
-        &vfs.read("shaders/passes/cluster_build.spv")
+        &vfs.read("shaders/passes/scene/cluster_build.spv")
             .expect("cluster_build.spv must be cooked"),
     )
     .expect("valid SPIR-V");
     let reflection = slop_asset::Reflection::read(
-        &vfs.read("shaders/passes/cluster_build.refl")
+        &vfs.read("shaders/passes/scene/cluster_build.refl")
             .expect("its reflection must sit beside it"),
     )
     .expect("valid reflection");

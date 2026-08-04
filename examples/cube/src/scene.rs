@@ -15,7 +15,7 @@ use slop_rhi::{
     SampledImage, Sampler, SamplerConfig, ShaderModule, ShaderStage, TextureSampler,
 };
 
-/// Per-draw data, matching `PushConstants` in `shaders/passes/cube.slang`.
+/// Per-draw data, matching `PushConstants` in `shaders/examples/cube.slang`.
 ///
 /// `#[repr(C)]` is load-bearing: Rust may reorder the fields of a default-layout
 /// struct, and the shader reads this block by offset.
@@ -814,7 +814,7 @@ fn cook_first(error: slop_asset::AssetError) -> String {
 /// Beside the SPIR-V and from the same compile, so the two cannot describe
 /// different shaders.
 fn load_reflection() -> Result<slop_asset::Reflection, String> {
-    load_reflection_at("shaders/passes/cube.refl")
+    load_reflection_at("shaders/examples/cube.refl")
 }
 
 /// Load any cooked reflection by logical path.
@@ -836,7 +836,7 @@ fn cooked(logical: &str) -> Result<Vec<u8>, String> {
 /// Through the asset VFS, so this names the shader rather than a path into the
 /// cache. Where cooked bytes live is `slop-asset`'s business.
 fn load_shader(device: &Arc<Device>) -> Result<ShaderModule, String> {
-    load_module(device, "shaders/passes/cube.spv")
+    load_module(device, "shaders/examples/cube.spv")
 }
 
 /// Load any cooked SPIR-V module by logical path.

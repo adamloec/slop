@@ -262,8 +262,8 @@ fn harness(device: &Arc<Device>, allocator: &Arc<Allocator>) -> Option<Headless>
     let vfs = slop_asset::Vfs::for_project(&project);
 
     for logical in [
-        "shaders/passes/cube.spv",
-        "shaders/passes/cube.refl",
+        "shaders/examples/cube.spv",
+        "shaders/examples/cube.refl",
         "meshes/cube.Cube.0.mesh",
         "textures/checker.tex",
     ] {
@@ -316,12 +316,12 @@ impl Headless {
         );
         let module = ShaderModule::from_bytes(
             device,
-            &vfs.read("shaders/passes/overlay.spv")
+            &vfs.read("shaders/passes/ui/overlay.spv")
                 .map_err(|error| error.to_string())?,
         )
         .map_err(|error| error.to_string())?;
         let reflection = slop_asset::Reflection::read(
-            &vfs.read("shaders/passes/overlay.refl")
+            &vfs.read("shaders/passes/ui/overlay.refl")
                 .map_err(|error| error.to_string())?,
         )
         .map_err(|error| error.to_string())?;

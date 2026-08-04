@@ -6,12 +6,12 @@
 //!
 //! ```ignore
 //! let vfs = Vfs::for_project(Path::new("."));
-//! let spirv = vfs.read("shaders/passes/triangle.spv")?;
+//! let spirv = vfs.read("shaders/examples/triangle.spv")?;
 //! ```
 //!
 //! # Logical paths, not filesystem paths
 //!
-//! A caller says `shaders/passes/triangle.spv` and never `.slop/cache/...`. The
+//! A caller says `shaders/examples/triangle.spv` and never `.slop/cache/...`. The
 //! layout is this crate's business, which is what lets it change — to a packed
 //! archive for a shipped build, to an override directory for a mod — without a
 //! single call site moving. Examples and tests previously hard-coded the cache
@@ -349,13 +349,15 @@ mod tests {
 
     #[test]
     fn a_logical_path_resolves_under_the_root() {
-        let resolved = vfs().resolve("shaders/passes/triangle.spv").expect("valid");
+        let resolved = vfs()
+            .resolve("shaders/examples/triangle.spv")
+            .expect("valid");
 
         assert_eq!(
             resolved,
             Path::new("cache")
                 .join("shaders")
-                .join("passes")
+                .join("examples")
                 .join("triangle.spv")
         );
     }

@@ -159,7 +159,7 @@ impl ClusterGrid {
     ///
     /// View space is where the cells are axis-aligned; in world space they are
     /// arbitrarily oriented and the sphere test stops being cheap. This is the
-    /// CPU twin of what `shaders/passes/cluster_build.slang` computes, and
+    /// CPU twin of what `shaders/passes/scene/cluster_build.slang` computes, and
     /// exists so that the shader's version can be checked against something
     /// rather than trusted.
     ///

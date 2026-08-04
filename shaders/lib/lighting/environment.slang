@@ -1,7 +1,7 @@
 // The lighting that has no position, as the GPU sees it.
 //
 // A directional light and the sky, the latter as nine spherical-harmonic
-// coefficients. Shared for the same reason `lib/light.slang` is: the shadow
+// coefficients. Shared for the same reason `lib/lighting/light.slang` is: the shadow
 // passes at `docs/PLAN.md` §9.5 E5 build their cascades along this direction,
 // and a copy per shader would be two declarations of one ABI.
 //
@@ -9,7 +9,7 @@
 //
 // Include it as:
 //
-//     #include "lib/environment.slang"
+//     #include "lib/lighting/environment.slang"
 
 #ifndef SLOP_ENVIRONMENT_INCLUDED
 #define SLOP_ENVIRONMENT_INCLUDED
