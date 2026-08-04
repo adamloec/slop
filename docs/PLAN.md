@@ -1200,7 +1200,7 @@ correct. The frame loop was the exception, and only the examples exercise it.
 | **E3** | Render graph — passes declare reads and writes, barriers derived | E4–E7 | **Landed, partially.** `Graph` derives every barrier between the scene and tonemap passes and emits the final transition; all six goldens pass unchanged. **Three things deferred and named:** compute passes are not expressible (a pass must have a colour attachment), the overlay still draws outside it, and `MeshRenderer`'s decomposition did not happen. E4 needs the first |
 | **E4** | Clustered forward+ — light list, cluster build, forward pass | E5 | **Landed.** The first compute-feeding-graphics dependency in the engine: a dispatch writes the per-cell light lists and the forward pass reads them, with the graph deriving the barrier from the two declarations. Arrived in four steps — compute passes and tracked buffers in the graph; the depth prepass; lights as data with a windowed falloff so a *radius* is something assignment can test; then the grid itself. Two things found on the way: a barrier bug where two passes in the *same* state need one anyway, which synchronization validation did not report; and that **the goldens cannot check the assignment at all** — adding clustering changed 0 of 65536 pixels, because a list containing every light renders identically to a correct one. `slop-render/tests/cluster.rs` compares the whole grid against a CPU twin instead |
 | **E5** | Cascaded shadow maps | E6 | **Landed.** Four cascades at 2048² in a `D32Float` array, blended log/uniform splits, sphere-fitted and texel-snapped so the boxes do not shimmer, slope-scaled bias plus a normal offset, 3×3 PCF. A cascade needs **no shader of its own** — it is the depth prepass drawn from the light's camera, which is why the alpha-masked cutout comes free. Also grew the RHI's array layers and taught the graph to attach one layer of an array, which is what E6's cubemap faces need too |
-| **E6** | IBL from an HDR environment | E7 | Needs a cooked environment format — new work in `slop-cook` |
+| **E6** | IBL from an HDR environment | E7 | Needs a cooked environment format — new work in `slop-cook`, which is where most of it lands. **Broken out in §9.7**, in five steps: the decisions it forces are the prefilter running offline on the CPU rather than on the GPU, spherical harmonics for the diffuse term and a cube map for the specular one, and that turning IBL on means turning **PBR** on — `metallic` and `roughness` are cooked, uploaded and read by nothing today |
 | **E7** | Post stack — SSAO, bloom, TAA | — | TAA last: it needs motion vectors, which need previous-frame transforms |
 
 **Why E2 comes before the graph.** Everything used to render straight into an
@@ -1282,3 +1282,126 @@ fast — a Stage A that looks right at 40ms has not met its own design brief.
 
 The number itself wants setting at E1, once the hardware is measured rather than
 guessed at.
+
+---
+
+### 9.7 E6 — image-based lighting, written down before it is built
+
+**Why this section exists.** §9.4 specified the whole Stage A frame in one box
+and left IBL as a single node reading "irradiance + prefiltered". That was the
+right resolution for designing a graph against and is not enough to build from:
+the node hides a source format, a cooked format, an offline integrator, a change
+to the shading model, and the first cube map in the engine. E5 was four commits
+because it was broken down first. This is the same exercise.
+
+E6 is the first E-step whose centre of gravity is **not** in `slop-render`. Most
+of it is `slop-cook` and `slop-asset`, which is what §9.5's one-line entry
+already said and what makes it larger than it looks.
+
+```mermaid
+flowchart TD
+    hdr[/"environment.hdr — Radiance RGBE, equirectangular"/] --> cook
+
+    subgraph cook["slop-cook — offline, content-hashed, CPU"]
+        face("equirect → cube faces") --> mips("source mip chain")
+        mips --> sh("project to SH L2")
+        mips --> pre("prefilter by roughness")
+    end
+
+    sh --> block[("EnvironmentGpu — 9 RGB coefficients")]
+    pre --> cube[("specular cube, Rgba16Float, 6 faces x N mips")]
+
+    block --> forward("forward — PBR, IBL")
+    cube --> forward
+    cube --> sky("skybox")
+```
+
+Nothing in the cook half runs on the GPU, and nothing in the runtime half runs
+more than once per environment. There are no new passes in §9.4's frame except
+the skybox.
+
+#### Decisions this section makes
+
+| Question | Decision | Why |
+|---|---|---|
+| Where the prefilter runs | **Cook time, on the CPU, in `slop-cook`** | Two reasons, and the second is the one that decided it. The arithmetic is small — an order-3 SH projection is one pass over a 64² cube, and the specular chain below mip zero is about 32k texels total, which is under a second single-threaded and trivially partitioned across `JobSystem::for_each_mut`. So the usual argument for the GPU, that this is too slow offline, is false at these resolutions and should not be assumed. What the CPU buys is that **the integrator becomes testable without a device**, which is the lesson E4 and E5 both paid for: `tests/cluster.rs` exists because the goldens could not see a wrong light assignment, and `snap_to_texel`'s `floor` bug was found by a CPU test and would not have been found by looking. A GPU prefilter's correctness is visible only in the final image, which is exactly the trap §6.1's shadow row already records |
+| Source format | **Radiance `.hdr` (RGBE), decoded here** | Written rather than taken, and the line is §3's. BC7 was taken because a compressor is a serious project — eight modes, partition tables, endpoint fitting. An RGBE decoder is a header, a scanline loop and a run-length case, and it is testable against known bytes. OpenEXR is the opposite: half and float variants, tiles, multi-part files, and four compression codecs, none of which is worth owning. **EXR arrives when a source asset demands it**, as a dependency, not before |
+| Diffuse irradiance | **Order-3 spherical harmonics — 9 RGB coefficients, in the environment buffer** | Irradiance is a very low-frequency signal; nine coefficients reconstruct it to within about a percent, which is the Ramamoorthi and Hanrahan result the whole industry sits on. That is 108 bytes in a buffer that already exists, against an irradiance cube map's image, view, sampler, heap slot and upload. §6.1's row says the ambient seam "does not move" when this lands, and with SH that is literally true: `ambient: float3` becomes nine of them in the same struct |
+| Specular | **A prefiltered cube map, `Rgba16Float`, 128² base, roughness across the mip chain** | Cube rather than octahedral, and the reason is seams. An octahedral map needs no RHI change at all — it samples through `g_textures` today — but its outer edge folds onto the diagonal, so bilinear filtering across it needs a hand-maintained border on every level, and the prefiltered chain's small levels are where that border is 25–50% of the image. Cube faces filter across each other in hardware. The RHI cost is one flag and one view type; E5 already grew the layer views the upload needs |
+| Split-sum BRDF term | **The analytic fit, not a LUT** | The environment BRDF is a function of roughness and *N·V* alone — it has nothing to do with the environment, so cooking it per-asset would be wrong and cooking it once is a second artifact kind for ten ALU. The fit is accurate to a fraction of a percent over GGX. Recorded in §6.1 with the LUT as its replacement, behind `environmentSpecular` — one function, so the swap is not an investigation |
+| Skybox | **In scope, as a pass** | §9.4's frame does not list one and this adds it. Not for looks: without it the reference image shows the environment only through its effect on surfaces, and "lit by the right environment" and "lit by *an* environment" are then not distinguishable — the same gap §6.1 records for the cascades. A fullscreen triangle sampling the cube by view ray at the far plane is the cheapest thing that closes it |
+
+#### What this is really changing, which is not only IBL
+
+**`MaterialGpu.metallic` and `MaterialGpu.roughness` are not read by anything
+today.** `model.slang` computes Lambert against the sun and the point lights and
+adds a flat ambient; the two PBR parameters have been cooked, uploaded and
+indexed since M2 and never sampled. An IBL specular term without a matching
+*direct* specular term is incoherent — the environment would produce highlights
+and the sun would not — so E6 is where the shading model actually becomes PBR,
+and that is a bigger diff to `model.slang` than the IBL lookups are.
+
+The consequence to state before anyone sees it in a diff: **every reference image
+moves, including the cube's.** That reference has been bit-identical through E4
+and E5 and has been doing real work as a control — it is what says clustering and
+shadows changed nothing they should not have. Losing it for one step is the cost
+of turning the shading model on, and it wants re-approving deliberately at E6d
+rather than being noticed as a failure.
+
+#### Traps worth naming before they cost a day
+
+- **A bright sun in the source produces fireflies in the prefiltered chain.**
+  Importance sampling a near-delta highlight at a few hundred samples per texel
+  gives a blotchy result that looks like a compression artefact. The standard fix
+  is to sample the source cube's *own* mip chain by solid angle, so a sample
+  covering a wide cone reads an already-filtered level. That is why the cook
+  builds a mip chain for the source cube before prefiltering it, and why the
+  chain is not an optimisation that can be skipped first and added later.
+- **Two ambient terms is the failure mode of a half-finished swap.** If the SH
+  evaluation is added while `default_ambient` is still in the shading sum,
+  everything is lit twice and the result is plausible enough to keep. The
+  function goes away in the same commit that adds the coefficients.
+- **The cube face table is the most error-prone thing in the feature and is
+  nearly invisible.** A wrong sign or a swapped axis in `direction_of(face, u, v)`
+  renders as an environment that is rotated, mirrored, or has two faces
+  transposed — which reads as "the HDR is odd" rather than as a bug. It is also
+  trivially testable on the CPU, in both directions, which is why the test is
+  written before the integrator.
+- **Diffuse and specular must not both collect the same energy.** Metals have no
+  diffuse lobe and dielectrics scale theirs by what the specular did not reflect.
+  Getting this wrong makes metals too bright and everything slightly milky, which
+  is a look, not an error.
+
+#### Prerequisites, found by checking rather than assuming
+
+1. **The RHI cannot make a cube map.** `ImageConfig` has `array_layers` but no
+   cube flag, and `Image::new` picks `TYPE_2D` or `TYPE_2D_ARRAY` and nothing
+   else. Needs `VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT` and a `TYPE_CUBE` view.
+2. **The upload path cannot address an array layer.**
+   `copy_buffer_to_image_level` takes a mip level; a cube face is a layer, and
+   six faces times a mip chain is a two-dimensional loop over a copy region that
+   currently has room for one of them.
+3. **The bindless heap has no cube declaration.** Binding 0 is already aliased as
+   `Texture2D` and `Texture2DArray`; `TextureCube<float4>` is a third alias of the
+   same binding rather than a new one — the descriptor type is view-agnostic, so
+   this costs a declaration in `lib/bindless.slang` and a matching note in
+   `descriptor.rs`, not a layout change that would invalidate every pipeline.
+4. **No environment asset exists.** `fetch` knows about Sponza; it needs an HDR
+   environment beside it, since `assets/` holds source only and an HDR panorama
+   is not something to commit.
+
+#### The order
+
+Five steps, at E5's granularity, each landing on `main` on its own.
+
+| | Step | Lands | Verified by |
+|---|---|---|---|
+| **E6a** | `.hdr` decode, equirect → cube, the cooked format, `fetch` an environment | `slop-cook`, `slop-asset` | RGBE decode against known bytes, RLE and flat scanlines; face direction round-trip in both directions; format round-trip, truncation and version refused |
+| **E6b** | SH projection at cook time; `ambient` becomes nine coefficients; the shader evaluates it | `slop-cook`, `slop-render`, `model.slang` | A constant environment reconstructs to that constant in every direction — the property that catches a wrong normalisation, which is the classic SH bug. Irradiance of a constant radiance field is π times it |
+| **E6c** | The prefiltered chain; cube images in the RHI; layers in the upload path; the heap's cube alias | `slop-rhi`, `slop-render`, `slop-cook` | A constant environment stays constant at every roughness level, which catches solid-angle weighting; higher levels are strictly smoother |
+| **E6d** | GGX direct specular and IBL specular; metallic and roughness finally read | `model.slang`, `shaders/lib/` | White furnace: a constant environment with no direct light leaves an unlit surface at its albedo, within tolerance. **All references re-approved here, deliberately** |
+| **E6e** | The skybox pass | `slop-render`, `examples/model` | The reference now shows the environment it is lit by, so the two are checkable against each other |
+
+E6a and E6b together are the whole feature's risk: after them the environment is
+on disk in a form the renderer reads, and everything left is integration with a
+CPU test standing behind it.
