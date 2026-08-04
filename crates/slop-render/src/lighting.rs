@@ -35,3 +35,4 @@ pub(crate) mod cluster;
 pub(crate) mod environment;
 pub(crate) mod light;
 pub(crate) mod shadow;
+pub(crate) mod sky;

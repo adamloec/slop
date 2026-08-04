@@ -39,13 +39,13 @@ use slop_core::FxHashMap;
 use slop_core::diagnostics::tracing::warn;
 use slop_math::Mat4;
 use slop_rhi::{
-    Allocator, BindlessHeap, Blend, Buffer, BufferConfig, BufferState, BufferUsage, CommandBuffer,
-    CommandPool, Device, Extent2D, Format, GraphicsPipeline, GraphicsPipelineConfig, Image,
-    ImageConfig, ImageKind, ImageState, ImageUsage, MemoryLocation, PipelineLayout,
-    PipelineLayoutConfig, SampledImage, Sampler, SamplerConfig, ShaderModule, ShaderStage,
-    StorageBuffer, Subresource, TextureSampler,
+    Allocator, BindlessHeap, Blend, Buffer, BufferConfig, BufferState, BufferUsage, Device,
+    Extent2D, Format, GraphicsPipeline, GraphicsPipelineConfig, Image, ImageConfig, ImageKind,
+    ImageState, ImageUsage, MemoryLocation, PipelineLayout, PipelineLayoutConfig, SampledImage,
+    Sampler, SamplerConfig, ShaderModule, ShaderStage, StorageBuffer, Subresource, TextureSampler,
 };
 
+use crate::upload::Uploads;
 use crate::{RenderError, VertexBinding, View};
 
 /// What a material's texture index holds when it has no texture.
@@ -141,6 +141,19 @@ struct InstanceGpu {
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct PushConstants {
     view_projection: Mat4,
+    /// Where the camera is, which specular needs and diffuse never did.
+    ///
+    /// Per frame rather than per draw, and pushed per draw for the same reason
+    /// `view_projection` is: the block is one push either way, and a per-frame
+    /// buffer holding one vector would be machinery for nothing.
+    ///
+    /// **Placed immediately after the matrix, not appended at the end**, and
+    /// that is a layout requirement rather than a preference. A `float3` has
+    /// sixteen-byte alignment in a push-constant block, so at the end of the
+    /// seven indices it would land at offset 92 and the shader would silently
+    /// move it to 96 — leaving Rust and Slang reading the same bytes as
+    /// different fields. Offset 64 is already aligned.
+    eye: [f32; 3],
     instances: u32,
     instance: u32,
     materials: u32,
@@ -148,7 +161,7 @@ struct PushConstants {
     grid: u32,
     environment: u32,
     shadows: u32,
-    _pad: u32,
+    _pad: [u32; 2],
 }
 
 /// Loads a cooked model and draws it.
@@ -810,7 +823,8 @@ impl MeshRenderer {
             grid: view.grid,
             environment: view.environment,
             shadows: view.shadows,
-            _pad: 0,
+            eye: view.eye.to_array(),
+            _pad: [0; 2],
         })
     }
 
@@ -895,82 +909,6 @@ fn read_asset<T: slop_asset::Asset>(vfs: &Vfs, logical: &str) -> Result<T, Rende
     })
 }
 
-/// Every transfer for one [`MeshRenderer::load`], recorded into one command
-/// buffer and submitted once.
-///
-/// The shape this replaces submitted and blocked *per resource*: a queue submit
-/// and a full `wait_idle` for each vertex buffer, each index buffer and each
-/// texture, with a staging allocation created and freed around every one. Sponza
-/// is 103 primitives and 25 materials, so that was several hundred round trips
-/// to the GPU to move data that could travel together.
-///
-/// Staging buffers live in `staging` rather than being freed at the end of the
-/// call that made them, because the copies reading them have not run yet. That
-/// is the whole reason the per-resource version had to block: it had nowhere to
-/// keep them.
-///
-/// Still one blocking submit at the end. `docs/PLAN.md` §6.1 records the real
-/// answer — an async transfer queue with a staging ring — and this is not it;
-/// it is the same blunt instrument used once instead of hundreds of times.
-struct Uploads {
-    command: CommandBuffer,
-    staging: Vec<Buffer>,
-    /// Declared after `command`, since the pool must outlive the buffer it
-    /// allocated.
-    _pool: CommandPool,
-}
-
-impl Uploads {
-    /// Open a batch and begin recording.
-    fn new(device: &Arc<Device>) -> Result<Self, RenderError> {
-        let pool = CommandPool::new(device, device.queue_families().graphics)?;
-        let command = pool
-            .allocate(1)?
-            .pop()
-            .expect("one command buffer was requested");
-
-        command.begin()?;
-
-        Ok(Self {
-            command,
-            staging: Vec::new(),
-            _pool: pool,
-        })
-    }
-
-    /// Copy `bytes` into a fresh host-visible buffer and keep it alive.
-    fn stage(&mut self, allocator: &Arc<Allocator>, bytes: &[u8]) -> Result<&Buffer, RenderError> {
-        let mut staging = Buffer::new(
-            allocator,
-            &BufferConfig {
-                name: "model staging",
-                size: bytes.len() as u64,
-                usage: BufferUsage::TRANSFER_SRC,
-                location: MemoryLocation::Upload,
-            },
-        )?;
-
-        staging.mapped_mut()?[..bytes.len()].copy_from_slice(bytes);
-        self.staging.push(staging);
-
-        Ok(self
-            .staging
-            .last()
-            .expect("a staging buffer was just pushed"))
-    }
-
-    /// Submit everything recorded and block until the GPU has it.
-    ///
-    /// Consumes the batch, so the staging buffers are freed after the wait and
-    /// not before it.
-    fn finish(self, device: &Arc<Device>) -> Result<(), RenderError> {
-        self.command.end()?;
-        slop_rhi::submit_recorded_and_wait(device, &self.command)?;
-
-        Ok(())
-    }
-}
-
 /// Upload one mesh's vertex and index buffers.
 fn upload_mesh(
     allocator: &Arc<Allocator>,
@@ -1024,7 +962,7 @@ fn upload_buffer(
         },
     )?;
 
-    let staging = uploads.stage(allocator, bytes)?.handle();
+    let staging = uploads.stage(allocator, "mesh staging", bytes)?.handle();
 
     uploads
         .command
@@ -1057,7 +995,9 @@ fn upload_texture(
         },
     )?;
 
-    let staging = uploads.stage(allocator, &texture.pixels)?.handle();
+    let staging = uploads
+        .stage(allocator, "texture staging", &texture.pixels)?
+        .handle();
 
     // Covers every level: `transition_image` names the whole chain, which
     // is what leaves no level behind in UNDEFINED.

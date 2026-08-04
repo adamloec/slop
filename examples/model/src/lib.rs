@@ -112,11 +112,21 @@ pub fn camera(aspect: f32, centre: Vec3, angle: f32, settings: OrbitCamera) -> M
 /// same arguments and hoping.
 #[must_use]
 pub fn view_of(centre: Vec3, angle: f32, settings: OrbitCamera) -> Mat4 {
-    let distance = settings.distance;
-    let eye = centre
-        + Quat::from_rotation_y(angle) * Vec3::new(0.0, distance * settings.height, distance);
+    slop_math::look_at(eye_of(centre, angle, settings), centre, slop_math::UP)
+}
 
-    slop_math::look_at(eye, centre, slop_math::UP)
+/// Where the camera is, in world space.
+///
+/// Split out for the same reason [`view_of`] was: E6d's specular needs the eye
+/// itself rather than a matrix containing it, and deriving one from the other by
+/// inverting would be a second statement of where the camera is. A reflection
+/// computed against a camera the frame is not drawn from looks like a broken
+/// normal rather than like a mismatch.
+#[must_use]
+pub fn eye_of(centre: Vec3, angle: f32, settings: OrbitCamera) -> Vec3 {
+    let distance = settings.distance;
+
+    centre + Quat::from_rotation_y(angle) * Vec3::new(0.0, distance * settings.height, distance)
 }
 
 /// What the cluster build needs to know about the camera.
@@ -215,7 +225,12 @@ pub fn lights(centre: Vec3, radius: f32) -> Vec<slop_render::PointLight> {
     // Inverse-square over that distance: a surface at the centre is about
     // `radius` away, so the intensity has to carry a factor of `radius²` before
     // anything reads as lit at all.
-    let intensity = radius * radius * 1.6;
+    //
+    // The `π` arrived at E6d with Lambert's missing divisor, for the reason
+    // `DirectionalLight::default` gives: shading used to multiply albedo by the
+    // light directly, and the correct form divides by π. This keeps the rig as
+    // bright as it was rather than letting a units fix read as a lighting change.
+    let intensity = radius * radius * 1.6 * std::f32::consts::PI;
 
     [
         (Vec3::new(1.0, 0.6, -1.0), Vec3::new(1.0, 0.82, 0.62)),
@@ -233,27 +248,31 @@ pub fn lights(centre: Vec3, radius: f32) -> Vec<slop_render::PointLight> {
     .collect()
 }
 
-/// The sky a scene is lit by: a cooked environment, or a uniform fallback.
+/// The cooked environment a scene is lit by, when one has been fetched.
 ///
-/// Read from the cooked artifact rather than approximated, for the reason
-/// [`bounds`] gives — a viewer that needed hand-tuned lighting per asset would
-/// be a demo. `logical` naming something absent is **not** an error: a fresh
-/// clone has fetched no panorama, and
-/// [`default_irradiance`](slop_render::default_irradiance) is the same nine
-/// coefficients describing a sky that happens to be one colour everywhere. So
-/// there is one code path, not two, and the fallback is its degenerate case.
+/// Read from the artifact rather than approximated, for the reason [`bounds`]
+/// gives — a viewer that needed hand-tuned lighting per asset would be a demo.
+/// `logical` naming something absent is **not** an error: a fresh clone has
+/// fetched no panorama, and [`irradiance_of`] falls back to a uniform sky, which
+/// is the same nine coefficients describing a sky that happens to be one colour.
+/// So there is one code path and its degenerate case, not two paths.
 ///
-/// A cooked environment that fails to *decode*, though, is a failure worth
-/// seeing rather than silently falling back on: it means the cooker wrote
-/// something the runtime cannot read, which the fallback would hide.
+/// A cooked environment that fails to *decode*, though, is worth seeing rather
+/// than silently falling back on: it means the cooker wrote something the
+/// runtime cannot read, which a fallback would hide.
+///
+/// Returns the whole artifact rather than just the coefficients because both
+/// halves come from it — the diffuse term and the cube [`Sky`] uploads — and
+/// reading the file twice would be two chances to disagree about which
+/// environment the frame is lit by.
+///
+/// [`Sky`]: slop_render::Sky
 #[must_use]
-pub fn irradiance(vfs: &Vfs, logical: &str) -> Sh9 {
-    let Ok(bytes) = vfs.read(logical) else {
-        return slop_render::default_irradiance();
-    };
+pub fn environment(vfs: &Vfs, logical: &str) -> Option<slop_asset::Environment> {
+    let bytes = vfs.read(logical).ok()?;
 
     match slop_asset::Environment::read(&bytes) {
-        Ok(environment) => slop_render::irradiance_of(&environment),
+        Ok(environment) => Some(environment),
         Err(failure) => {
             slop_core::diagnostics::tracing::error!(
                 logical,
@@ -261,9 +280,15 @@ pub fn irradiance(vfs: &Vfs, logical: &str) -> Sh9 {
                 "the cooked environment could not be read; falling back to a uniform sky"
             );
 
-            slop_render::default_irradiance()
+            None
         }
     }
+}
+
+/// The diffuse term for a scene lit by `environment`, or by a uniform sky.
+#[must_use]
+pub fn irradiance_of(environment: Option<&slop_asset::Environment>) -> Sh9 {
+    environment.map_or_else(slop_render::default_irradiance, slop_render::irradiance_of)
 }
 
 /// Cooked assets, found by walking up from wherever this was run.

@@ -9,7 +9,7 @@
 //! applies exactly: adding a field does not fork every call site, and two `u32`
 //! that read the same at a call site cannot be swapped silently.
 
-use slop_math::Mat4;
+use slop_math::{Mat4, Vec3};
 
 use crate::{Clusters, Environment};
 
@@ -18,6 +18,17 @@ use crate::{Clusters, Environment};
 pub struct View {
     /// World space to clip space.
     pub view_projection: Mat4,
+    /// Where the camera is, in world space.
+    ///
+    /// **Specular is the reason this exists.** Diffuse shading depends only on
+    /// the surface — its normal against the light — so nothing here needed a
+    /// camera position through E5. A reflection depends on where it is being
+    /// looked at from, so E6d's `V` vector has to come from somewhere, and the
+    /// alternative is inverting the view-projection per fragment.
+    ///
+    /// Whatever a pass that shades nothing passes is unread: a depth prepass and
+    /// a shadow cascade compute no specular. They pass the origin.
+    pub eye: Vec3,
     /// Heap index of the cluster grid this frame's draws read.
     ///
     /// The grid carries the light buffer's index as well as the cell layout, so
@@ -66,6 +77,7 @@ impl View {
     #[must_use]
     pub fn new(
         view_projection: Mat4,
+        eye: Vec3,
         environment: &Environment,
         clusters: &Clusters,
         shadows: Option<&crate::Shadows>,
@@ -73,6 +85,7 @@ impl View {
     ) -> Self {
         Self {
             view_projection,
+            eye,
             grid: clusters.handle(slot),
             environment: environment.handle(slot),
             shadows: shadows.map_or(NO_SHADOWS, |shadows| shadows.handle(slot)),
@@ -88,6 +101,10 @@ impl View {
     pub fn unclustered(view_projection: Mat4, environment: &Environment, slot: usize) -> Self {
         Self {
             view_projection,
+            // Unread: an unclustered view is a depth or shadow pass, and neither
+            // shades. Naming the origin rather than threading a camera position
+            // through a pass that would ignore it.
+            eye: Vec3::ZERO,
             grid: NO_CLUSTERS,
             environment: environment.handle(slot),
             shadows: NO_SHADOWS,

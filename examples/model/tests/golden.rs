@@ -70,7 +70,8 @@ fn the_cube_model_matches_its_reference() {
         return;
     };
 
-    let Some(mut renderer) = harness(&device, &allocator, "models/cube.model", Sky::Uniform) else {
+    let Some(mut renderer) = harness(&device, &allocator, "models/cube.model", Lighting::Uniform)
+    else {
         return;
     };
 
@@ -96,7 +97,7 @@ fn sponza_matches_its_reference() {
         return;
     };
 
-    let Some(mut renderer) = harness(&device, &allocator, SPONZA, Sky::Uniform) else {
+    let Some(mut renderer) = harness(&device, &allocator, SPONZA, Lighting::Uniform) else {
         return;
     };
 
@@ -129,7 +130,7 @@ fn sponza_under_a_cooked_environment_matches_its_reference() {
         return;
     };
 
-    let Some(mut renderer) = harness(&device, &allocator, SPONZA, Sky::Cooked(HELIPAD)) else {
+    let Some(mut renderer) = harness(&device, &allocator, SPONZA, Lighting::Cooked(HELIPAD)) else {
         return;
     };
 
@@ -158,11 +159,11 @@ fn a_cooked_environment_actually_changes_the_image() {
         return;
     };
 
-    let Some(mut uniform) = harness(&device, &allocator, SPONZA, Sky::Uniform) else {
+    let Some(mut uniform) = harness(&device, &allocator, SPONZA, Lighting::Uniform) else {
         return;
     };
 
-    let Some(mut cooked) = harness(&device, &allocator, SPONZA, Sky::Cooked(HELIPAD)) else {
+    let Some(mut cooked) = harness(&device, &allocator, SPONZA, Lighting::Cooked(HELIPAD)) else {
         return;
     };
 
@@ -171,6 +172,42 @@ fn a_cooked_environment_actually_changes_the_image() {
         cooked.render(CAPTURED_FRAME),
         "a cooked environment renders identically to a flat one, so it is not \
          reaching the shader"
+    );
+}
+
+#[test]
+fn the_specular_cube_reaches_the_shader() {
+    // The E6d counterpart of the band test below, and needed for the same
+    // reason. Both references that use a cooked environment bind *both* halves —
+    // the nine coefficients and the prefiltered cube — so a specular lookup that
+    // silently found nothing would still change the image relative to a uniform
+    // sky, and `a_cooked_environment_actually_changes_the_image` would pass.
+    //
+    // The two renders here differ in exactly one thing: whether the cube was
+    // uploaded. Same model, same coefficients, same lights.
+    let Some((device, allocator)) = headless() else {
+        return;
+    };
+
+    let Some(mut both) = harness(&device, &allocator, SPONZA, Lighting::Cooked(HELIPAD)) else {
+        return;
+    };
+
+    let Some(mut diffuse_only) = harness(
+        &device,
+        &allocator,
+        SPONZA,
+        Lighting::CookedDiffuse(HELIPAD),
+    ) else {
+        return;
+    };
+
+    assert_ne!(
+        both.render(CAPTURED_FRAME),
+        diffuse_only.render(CAPTURED_FRAME),
+        "the prefiltered cube changes nothing, so the specular lookup is not \
+         reaching it — every reflection in the frame is coming from the diffuse \
+         term alone"
     );
 }
 
@@ -208,13 +245,17 @@ fn the_shader_reads_more_than_the_constant_band() {
         &device,
         &allocator,
         "models/cube.model",
-        Sky::Given(directional),
+        Lighting::Given(directional),
     ) else {
         return;
     };
 
-    let Some(mut lit_evenly) = harness(&device, &allocator, "models/cube.model", Sky::Given(flat))
-    else {
+    let Some(mut lit_evenly) = harness(
+        &device,
+        &allocator,
+        "models/cube.model",
+        Lighting::Given(flat),
+    ) else {
         return;
     };
 
@@ -236,7 +277,8 @@ fn the_same_frame_renders_identically_every_time() {
         return;
     };
 
-    let Some(mut renderer) = harness(&device, &allocator, "models/cube.model", Sky::Uniform) else {
+    let Some(mut renderer) = harness(&device, &allocator, "models/cube.model", Lighting::Uniform)
+    else {
         return;
     };
 
@@ -261,7 +303,8 @@ fn consecutive_frames_actually_differ() {
         return;
     };
 
-    let Some(mut renderer) = harness(&device, &allocator, "models/cube.model", Sky::Uniform) else {
+    let Some(mut renderer) = harness(&device, &allocator, "models/cube.model", Lighting::Uniform)
+    else {
         return;
     };
 
@@ -290,7 +333,8 @@ fn resizing_between_frames_replaces_the_depth_buffer_safely() {
         return;
     };
 
-    let Some(mut renderer) = harness(&device, &allocator, "models/cube.model", Sky::Uniform) else {
+    let Some(mut renderer) = harness(&device, &allocator, "models/cube.model", Lighting::Uniform)
+    else {
         return;
     };
 
@@ -343,7 +387,8 @@ fn loading_a_second_time_replaces_rather_than_accumulates() {
         return;
     };
 
-    let Some(mut renderer) = harness(&device, &allocator, "models/cube.model", Sky::Uniform) else {
+    let Some(mut renderer) = harness(&device, &allocator, "models/cube.model", Lighting::Uniform)
+    else {
         return;
     };
 
@@ -393,18 +438,46 @@ const SPONZA: &str = "models/vendor/sponza/Sponza.model";
 /// skip check and the thing being skipped are the same string.
 const HELIPAD: &str = example_model::DEFAULT_ENVIRONMENT;
 
+/// The cooked environment, or `None` after printing the named skip.
+///
+/// The same discipline the model gets: only the *vendored* environment may be
+/// absent on a working checkout, checked by name, because a blanket skip is what
+/// once let this suite report green while the demo refused to start.
+fn fetched_environment(vfs: &slop_asset::Vfs, logical: &str) -> Option<slop_asset::Environment> {
+    if !vfs.exists(logical) {
+        assert_eq!(
+            logical, HELIPAD,
+            "'{logical}' is not cooked, and only the fetched environment is allowed \
+             to be absent"
+        );
+
+        eprintln!(
+            "skipping: helipad is not fetched — run `cargo run -p slop-cli -- fetch helipad`"
+        );
+        return None;
+    }
+
+    example_model::environment(vfs, logical)
+}
+
 /// What lights a scene, chosen by the test rather than discovered.
 ///
 /// Discovery is the thing to avoid: an environment picked up because it happened
 /// to be cooked would make one test render two different images depending on
 /// whether someone had run `fetch`, and one reference cannot be right for both.
 #[derive(Debug, Clone, Copy)]
-enum Sky {
+enum Lighting {
     /// The uniform fallback — what every reference from before E6b was approved
     /// against, and what they must still produce.
     Uniform,
     /// A cooked environment, skipped by name when it has not been fetched.
     Cooked(&'static str),
+    /// The same environment's **diffuse half only** — its nine coefficients,
+    /// with no cube uploaded.
+    ///
+    /// Exists to isolate the specular term. Against [`Cooked`](Lighting::Cooked)
+    /// the two differ in exactly one thing.
+    CookedDiffuse(&'static str),
     /// Coefficients the test builds itself, for asserting on the shape of the
     /// reconstruction rather than on any particular sky.
     Given(slop_math::Sh9),
@@ -478,7 +551,7 @@ fn harness(
     device: &Arc<Device>,
     allocator: &Arc<Allocator>,
     model: &str,
-    environment: Sky,
+    environment: Lighting,
 ) -> Option<Headless> {
     let vfs = example_model::assets().ok().or_else(|| {
         eprintln!("skipping: nothing is cooked — run `cargo run -p slop-cli -- cook`");
@@ -513,30 +586,28 @@ fn harness(
     // on whether someone had run `fetch`, and one reference cannot be right for
     // both. The default is the same nine coefficients describing a sky that
     // happens to be one colour, so there is no second code path either way.
-    let irradiance = match environment {
-        Sky::Uniform => slop_render::default_irradiance(),
-        Sky::Given(sh) => sh,
-        Sky::Cooked(logical) => {
-            if !vfs.exists(logical) {
-                // The same named skip the model above gets, for the same reason.
-                assert_eq!(
-                    logical, HELIPAD,
-                    "'{logical}' is not cooked, and only the fetched environment is \
-                     allowed to be absent"
-                );
+    // The cooked artifact is carried alongside the coefficients rather than
+    // discarded: `Sky` uploads the specular cube from the same bytes, and
+    // reading the file twice would be two chances to light the diffuse and
+    // specular halves of one frame from different environments.
+    let (irradiance, cooked) = match environment {
+        Lighting::Uniform => (slop_render::default_irradiance(), None),
+        Lighting::Given(sh) => (sh, None),
+        Lighting::CookedDiffuse(logical) => {
+            let cooked = fetched_environment(&vfs, logical)?;
 
-                eprintln!(
-                    "skipping: helipad is not fetched — run \
-                     `cargo run -p slop-cli -- fetch helipad`"
-                );
-                return None;
-            }
+            // The coefficients kept, the artifact dropped — so no cube is
+            // uploaded and the specular lookup finds `NO_SKY`.
+            (example_model::irradiance_of(Some(&cooked)), None)
+        }
+        Lighting::Cooked(logical) => {
+            let cooked = fetched_environment(&vfs, logical)?;
 
-            example_model::irradiance(&vfs, logical)
+            (example_model::irradiance_of(Some(&cooked)), Some(cooked))
         }
     };
 
-    match Headless::new(device, allocator, &vfs, model, irradiance) {
+    match Headless::new(device, allocator, &vfs, model, irradiance, cooked.as_ref()) {
         Ok(headless) => Some(headless),
         Err(failure) => panic!("the renderer must build once its assets are cooked: {failure}"),
     }
@@ -566,6 +637,11 @@ struct Headless {
     /// would render two different images depending on whether someone had run
     /// `fetch`, and one reference cannot be right for both.
     irradiance: slop_math::Sh9,
+    /// The prefiltered cube, when the test asked for a cooked environment.
+    ///
+    /// `None` for the uniform and synthetic cases, which have no image to
+    /// reflect — the shader tests for it and adds nothing.
+    sky: Option<slop_render::Sky>,
     /// The same four cascades the window renders, so the references cover the
     /// shadow path rather than a simplified stand-in.
     shadows: slop_render::Shadows,
@@ -585,6 +661,7 @@ impl Headless {
         vfs: &slop_asset::Vfs,
         model: &str,
         irradiance: slop_math::Sh9,
+        cooked: Option<&slop_asset::Environment>,
     ) -> Result<Self, String> {
         let extent = Extent2D {
             width: SIZE,
@@ -687,6 +764,18 @@ impl Headless {
         let environment = slop_render::Environment::new(allocator, &mut heap, 1)
             .map_err(|error| error.to_string())?;
 
+        // A failed upload is a failure, not a fallback. The windowed viewer logs
+        // and carries on because a viewer with no reflections beats one that
+        // refuses to start; a test that quietly rendered without the thing it
+        // asked for would approve a reference against the wrong image.
+        let sky = match cooked {
+            None => None,
+            Some(cooked) => Some(
+                slop_render::Sky::upload(device, allocator, &mut heap, cooked)
+                    .map_err(|error| error.to_string())?,
+            ),
+        };
+
         let shadows = slop_render::Shadows::new(
             device,
             allocator,
@@ -748,6 +837,7 @@ impl Headless {
             clusters,
             environment,
             irradiance,
+            sky,
             shadows,
             placed_lights,
             heap,
@@ -843,6 +933,7 @@ impl Headless {
                 0,
                 &slop_render::DirectionalLight::default(),
                 &self.irradiance,
+                self.sky.as_ref(),
             )
             .expect("the environment must be writable");
 
@@ -865,6 +956,7 @@ impl Headless {
 
         let view = slop_render::View::new(
             camera(aspect, self.centre, angle, self.settings),
+            example_model::eye_of(self.centre, angle, self.settings),
             &self.environment,
             &self.clusters,
             Some(&self.shadows),

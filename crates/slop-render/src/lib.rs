@@ -66,6 +66,7 @@ mod graph;
 mod hdr;
 mod lighting;
 mod mesh;
+mod upload;
 mod vertex;
 mod view;
 
@@ -76,11 +77,14 @@ pub use graph::{
 };
 pub use hdr::{HdrTarget, Tonemap};
 pub use lighting::cluster::{ClusterCamera, ClusterGrid, Clusters, sphere_touches_box};
-pub use lighting::environment::{DirectionalLight, Environment, default_irradiance, irradiance_of};
+pub use lighting::environment::{
+    DirectionalLight, Environment, NO_SKY, default_irradiance, irradiance_of,
+};
 pub use lighting::light::{Lights, PointLight};
 pub use lighting::shadow::{
     CASCADES, CascadeFit, SPLIT_BLEND, ShadowConfig, Shadows, light_basis, splits,
 };
+pub use lighting::sky::Sky;
 pub use mesh::MeshRenderer;
 pub use vertex::VertexBinding;
 pub use view::{NO_CLUSTERS, NO_SHADOWS, View};

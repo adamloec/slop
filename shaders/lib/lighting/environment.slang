@@ -14,6 +14,9 @@
 #ifndef SLOP_ENVIRONMENT_INCLUDED
 #define SLOP_ENVIRONMENT_INCLUDED
 
+// For the cube lookup below. Guarded, so including both is free.
+#include "lib/bindless.slang"
+
 // How many coefficients an order-3 expansion has. Matches
 // `slop_math::COEFFICIENTS` and `slop_asset::environment::COEFFICIENTS`.
 static const uint SH_COEFFICIENTS = 9;
@@ -40,8 +43,23 @@ struct EnvironmentGpu
     // **Raw coefficients**, not pre-convolved: the cosine weighting happens in
     // `irradianceFrom` below, so these are the same numbers the cooked artifact
     // holds and there is exactly one place the convolution lives.
+    // The prefiltered cube, or NO_SKY when the frame has none. See
+    // `slop_render::NO_SKY` — not zero, because zero is a real heap slot and a
+    // frame without an environment would sample whatever landed there.
+    uint specular;
+    uint specularSampler;
+    // How many roughness levels the chain has. Written by the CPU rather than
+    // assumed: the cooker decides the length from the cube's size, and a shader
+    // that guessed would map roughness onto the wrong level — a reflection that
+    // never quite blurs out, which reads as a material authoring problem.
+    uint specularLevels;
+    uint _pad2;
+
     float4 irradiance[SH_COEFFICIENTS];
 };
+
+// Matching `slop_render::NO_SKY`.
+static const uint NO_SKY = 0xFFFFFFFF;
 
 // What a Lambertian albedo facing `normal` multiplies.
 //
@@ -110,6 +128,37 @@ float3 irradianceFrom(EnvironmentGpu environment, float3 normal)
     // ambient term subtracts light, which shows as black patches on surfaces
     // facing away from the sun rather than as anything resembling its cause.
     return max(total, float3(0.0));
+}
+
+// The environment reflected off a surface of `roughness`, along `direction`.
+//
+// The prefiltered half of the split-sum approximation — `slop-cook`'s `specular`
+// module did the integral, and this is the lookup. Multiply by
+// `environmentBrdf` to get the reflected radiance.
+//
+// # The roughness-to-level mapping is an ABI
+//
+// Linear from level zero at roughness zero to the last level at roughness one,
+// which is exactly what `specular::roughness_of` inverts on the cooker's side.
+// The two are stated separately because a file format cannot carry a function,
+// and `specularLevels` is written into the buffer so at least the *length* is
+// not guessed twice.
+//
+// Returns black when the frame has no environment, so a caller adds nothing
+// rather than branching around this.
+float3 specularFrom(EnvironmentGpu environment, float3 direction, float roughness)
+{
+    if (environment.specular == NO_SKY || environment.specularLevels == 0)
+    {
+        return float3(0.0);
+    }
+
+    TextureHandle cube = { environment.specular };
+    SamplerHandle sampler = { environment.specularSampler };
+
+    float level = saturate(roughness) * float(environment.specularLevels - 1);
+
+    return sampleCubeLevel(cube, sampler, direction, level).rgb;
 }
 
 #endif // SLOP_ENVIRONMENT_INCLUDED

@@ -6,6 +6,7 @@
 // pipeline per surface.
 
 #include "lib/bindless.slang"
+#include "lib/lighting/brdf.slang"
 #include "lib/lighting/cluster.slang"
 #include "lib/lighting/environment.slang"
 #include "lib/lighting/light.slang"
@@ -37,6 +38,15 @@ struct MaterialGpu
 // Matches `NO_TEXTURE` on the Rust side. Not zero: zero is a perfectly good
 // slot, and a material with no albedo would sample somebody else's.
 static const uint NO_TEXTURE = 0xFFFFFFFF;
+
+// The smoothest a surface may claim to be.
+//
+// A perfectly smooth surface has a delta lobe, which `distributionGGX` expresses
+// as a division by roughness to the fourth: zero divides by zero, and just above
+// it one pixel catches the whole highlight and blows out to white. The number is
+// the one everyone converges on, and it corresponds to a highlight a few pixels
+// across rather than to any material property.
+static const float MIN_ROUGHNESS = 0.045;
 
 // Alpha modes, matching `slop_asset::AlphaMode`'s discriminants.
 static const uint ALPHA_MODE_MASK_BITS = 3;
@@ -80,6 +90,16 @@ struct PushConstants
     // for one value would be machinery for nothing.
     float4x4 viewProjection;
 
+    // Where the camera is, which specular needs and diffuse never did. Matches
+    // `View::eye`; a pass that shades nothing passes the origin and never reads
+    // it.
+    //
+    // **Immediately after the matrix**, because a `float3` is sixteen-byte
+    // aligned in a push block: appended after the indices below it would land at
+    // 92 and be moved to 96, while `#[repr(C)]` on the Rust side would keep it
+    // at 92. Offset 64 is already aligned, so both agree.
+    float3 eye;
+
     uint instances;
     uint instance;
 
@@ -97,7 +117,8 @@ struct PushConstants
     // The cascades, or `NO_SHADOWS` while a pass has none — which is every
     // shadow render itself, since a cascade does not shadow itself.
     uint shadows;
-    uint _pad;
+
+    uint2 _pad;
 };
 
 [[vk::push_constant]] PushConstants g_push;
@@ -314,18 +335,81 @@ float4 fragmentMain(VertexOut input) : SV_Target
             viewDepth);
     }
 
-    // The sky, from nine coefficients rather than one colour — `docs/PLAN.md`
-    // §9.7 E6b. A surface facing a bright window and one facing a dark wall now
-    // differ, which a flat term could not express.
-    float3 lit = irradianceFrom(environment, normal)
-               + environment.sunColor * environment.sunIntensity * sunlight
-                     * saturate(dot(normal, environment.sunDirection));
+    // The two parameters that have been cooked, uploaded and indexed since M2
+    // and read by nothing until E6d.
+    float metallic = material.metallic;
+    float roughness = material.roughness;
+
+    if (material.metallicRoughnessTexture != NO_TEXTURE)
+    {
+        TextureHandle texture = { material.metallicRoughnessTexture };
+        SamplerHandle sampler = { material.sampler };
+
+        // glTF's packing, which is not arbitrary and is not guessable: occlusion
+        // in red, roughness in **green**, metallic in **blue**. Reading the
+        // wrong pair gives a scene of plausible-looking materials that are all
+        // the wrong ones.
+        float4 sampled = sampleTexture(texture, sampler, input.uv);
+
+        roughness *= sampled.g;
+        metallic *= sampled.b;
+    }
+
+    // Floored rather than clamped to zero. A perfectly smooth surface has a
+    // delta lobe: `distributionGGX` divides by roughness to the fourth, so at
+    // zero it is a division by zero, and just above it a single pixel catches
+    // the whole highlight and blows out. Every engine floors this.
+    roughness = clamp(roughness, MIN_ROUGHNESS, 1.0);
+    metallic = saturate(metallic);
+
+    // The metallic workflow, in two lines. A metal reflects its own colour and
+    // scatters nothing; a dielectric scatters its colour and reflects four
+    // percent whatever it is. One parameter interpolates between them, which is
+    // why a material needs a spectrum for neither.
+    float3 diffuseColor = albedo.rgb * (1.0 - metallic);
+    float3 f0 = lerp(DIELECTRIC_F0, albedo.rgb, metallic);
+
+    float3 view = normalize(g_push.eye - input.worldPosition);
+    // Nudged off zero: at exactly grazing incidence the visibility term divides
+    // by it, and a silhouette edge is where that happens on every curved
+    // surface.
+    float NoV = saturate(dot(normal, view)) + 1e-5;
+
+    // Image-based lighting, both halves. Diffuse is the nine coefficients E6b
+    // projected; specular is the prefiltered cube E6c wrote, indexed by
+    // roughness.
+    float3 reflection = reflect(-view, normal);
+
+    float2 environmentBias = environmentBrdf(NoV, roughness);
+    float3 environmentFresnel = fresnelSchlickRoughness(NoV, f0, roughness);
+
+    float3 lit = irradianceFrom(environment, normal) * diffuseColor
+                     * (float3(1.0) - environmentFresnel)
+               + specularFrom(environment, reflection, roughness)
+                     * (f0 * environmentBias.x + environmentBias.y);
+
+    // The sun, through the full BRDF rather than as a Lambert term.
+    float sunCosine = saturate(dot(normal, environment.sunDirection));
+
+    if (sunCosine > 0.0)
+    {
+        lit += surfaceResponse(
+                   diffuseColor,
+                   f0,
+                   roughness,
+                   normal,
+                   view,
+                   environment.sunDirection,
+                   NoV,
+                   sunCosine)
+             * environment.sunColor * environment.sunIntensity * sunlight * sunCosine;
+    }
 
     // Matching `slop_render::NO_CLUSTERS`. Not zero, because zero is a real heap
     // slot and a view without a grid would read whatever landed there.
     if (g_push.grid == 0xFFFFFFFF)
     {
-        return float4(albedo.rgb * lit, albedo.a);
+        return float4(lit, albedo.a);
     }
 
     ClusterGridGpu grid = loadFromBuffer<ClusterGridGpu>(BufferHandle(g_push.grid), 0);
@@ -356,10 +440,27 @@ float4 fragmentMain(VertexOut input) : SV_Target
             continue;
         }
 
-        float lambert = saturate(dot(normal, normalize(toLight)));
+        float3 direction = normalize(toLight);
+        float cosine = saturate(dot(normal, direction));
 
-        lit += light.color * light.intensity * lambert * attenuation;
+        if (cosine <= 0.0)
+        {
+            continue;
+        }
+
+        // The same BRDF the sun goes through. A point light's highlight and the
+        // sun's differ only in where the light is and how much of it arrives.
+        lit += surfaceResponse(
+                   diffuseColor,
+                   f0,
+                   roughness,
+                   normal,
+                   view,
+                   direction,
+                   NoV,
+                   cosine)
+             * light.color * light.intensity * cosine * attenuation;
     }
 
-    return float4(albedo.rgb * lit, albedo.a);
+    return float4(lit, albedo.a);
 }

@@ -131,6 +131,12 @@ struct Renderer {
     /// nothing moves it yet. Hot-reloading it belongs with whatever lets the
     /// inspector choose an environment at all.
     irradiance: slop_math::Sh9,
+    /// The prefiltered cube reflections read, when there is one.
+    ///
+    /// `None` on a checkout that has not fetched a panorama, which is what makes
+    /// the specular term additive rather than required — the shader tests for it
+    /// and adds nothing.
+    sky: Option<slop_render::Sky>,
     /// The four cascades the sun casts into.
     shadows: Shadows,
     /// Which way the sun points. A field so E5's cascades and the shading read
@@ -192,8 +198,8 @@ impl Renderer {
             .map_err(|error| error.to_string())?;
 
         let vfs = assets()?;
-        let module = load_shader(gpu.device(), &vfs, "model")?;
-        let reflection = load_reflection(&vfs, "model")?;
+        let module = load_shader(gpu.device(), &vfs, "passes/scene/model")?;
+        let reflection = load_reflection(&vfs, "passes/scene/model")?;
 
         let mut meshes = MeshRenderer::new(
             gpu.device(),
@@ -211,12 +217,12 @@ impl Renderer {
         let hdr = HdrTarget::new(gpu.allocator(), &mut heap, frames.extent())
             .map_err(|error| error.to_string())?;
 
-        let tonemap_module = load_shader(gpu.device(), &vfs, "tonemap")?;
+        let tonemap_module = load_shader(gpu.device(), &vfs, "passes/post/tonemap")?;
         let tonemap = Tonemap::new(
             gpu.device(),
             &mut heap,
             &tonemap_module,
-            &load_reflection(&vfs, "tonemap")?,
+            &load_reflection(&vfs, "passes/post/tonemap")?,
             // The swapchain's, because this is the pass that writes it.
             frames.format(),
         )
@@ -258,6 +264,28 @@ impl Renderer {
         let environment = Environment::new(gpu.allocator(), &mut heap, frames.frames_in_flight())
             .map_err(|error| error.to_string())?;
 
+        // Read once, used twice: the diffuse coefficients go into the per-frame
+        // buffer and the cube is uploaded below. Reading the file twice would be
+        // two chances to disagree about which environment lights the scene.
+        let cooked_environment =
+            example_model::environment(&vfs, example_model::DEFAULT_ENVIRONMENT);
+
+        let sky = match cooked_environment.as_ref() {
+            None => None,
+            Some(cooked) => {
+                match slop_render::Sky::upload(gpu.device(), gpu.allocator(), &mut heap, cooked) {
+                    Ok(sky) => Some(sky),
+                    Err(failure) => {
+                        // Logged rather than fatal: a viewer with no reflections
+                        // is worse than one with them and far better than one
+                        // that refuses to start.
+                        error!(error = %failure, "the environment cube was not uploaded");
+                        None
+                    }
+                }
+            }
+        };
+
         // The shadowed range follows the model, as the clustering range does.
         // A fixed hundred metres would put a cube entirely in cascade zero and
         // leave most of Sponza past the last one.
@@ -274,13 +302,13 @@ impl Renderer {
         )
         .map_err(|error| error.to_string())?;
 
-        let cluster_module = load_shader(gpu.device(), &vfs, "cluster_build")?;
+        let cluster_module = load_shader(gpu.device(), &vfs, "passes/scene/cluster_build")?;
         let clusters = Clusters::new(
             gpu.device(),
             gpu.allocator(),
             &mut heap,
             &cluster_module,
-            &load_reflection(&vfs, "cluster_build")?,
+            &load_reflection(&vfs, "passes/scene/cluster_build")?,
             grid,
             frames.frames_in_flight(),
         )
@@ -320,7 +348,8 @@ impl Renderer {
             lights,
             clusters,
             environment,
-            irradiance: example_model::irradiance(&vfs, example_model::DEFAULT_ENVIRONMENT),
+            irradiance: example_model::irradiance_of(cooked_environment.as_ref()),
+            sky,
             shadows,
             sun: DirectionalLight::default(),
             placed_lights,
@@ -390,6 +419,7 @@ impl Renderer {
         let shadows = &mut self.shadows;
         let sun = self.sun;
         let irradiance = &self.irradiance;
+        let sky = self.sky.as_ref();
         let placed_lights = &self.placed_lights;
         let ui = &mut self.ui;
         let allocator = self.gpu.allocator();
@@ -432,7 +462,7 @@ impl Renderer {
                     error!(error = %failure, "this frame's cluster grid was not written");
                 }
 
-                if let Err(failure) = environment.write(frame.slot, &sun, irradiance) {
+                if let Err(failure) = environment.write(frame.slot, &sun, irradiance, sky) {
                     error!(error = %failure, "this frame's environment was not written");
                 }
 
@@ -460,6 +490,7 @@ impl Renderer {
 
                 let view = View::new(
                     camera(aspect, centre, angle, settings),
+                    example_model::eye_of(centre, angle, settings),
                     environment,
                     clusters,
                     Some(shadows),
@@ -707,7 +738,7 @@ impl Renderer {
 
 fn load_shader(device: &Arc<Device>, vfs: &Vfs, name: &str) -> Result<ShaderModule, String> {
     let bytes = vfs
-        .read(&format!("shaders/passes/{name}.spv"))
+        .read(&format!("shaders/{name}.spv"))
         .map_err(|error| format!("{error}. Run `cargo run -p slop-cli -- cook` first"))?;
 
     ShaderModule::from_bytes(device, &bytes).map_err(|error| error.to_string())
@@ -715,7 +746,7 @@ fn load_shader(device: &Arc<Device>, vfs: &Vfs, name: &str) -> Result<ShaderModu
 
 fn load_reflection(vfs: &Vfs, name: &str) -> Result<slop_asset::Reflection, String> {
     let bytes = vfs
-        .read(&format!("shaders/passes/{name}.refl"))
+        .read(&format!("shaders/{name}.refl"))
         .map_err(|error| format!("{error}. Run `cargo run -p slop-cli -- cook` first"))?;
 
     slop_asset::Reflection::read(&bytes).map_err(|error| error.to_string())

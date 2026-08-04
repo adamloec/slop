@@ -63,16 +63,30 @@ pub struct DirectionalLight {
 }
 
 impl Default for DirectionalLight {
-    /// The values `shaders/passes/scene/model.slang` had compiled into it before this
-    /// existed.
+    /// The direction `shaders/passes/scene/model.slang` had compiled into it
+    /// before this existed, and an intensity re-based at E6d.
     ///
-    /// Kept exactly, because that is what makes the change to data checkable:
-    /// the reference images must not move when a constant becomes a value.
+    /// The direction is kept exactly, because that is what made the change from
+    /// constant to data checkable: the reference images did not move when it
+    /// became a value.
+    ///
+    /// **The intensity changed from 1 to π, and that is a change of units rather
+    /// than of brightness.** Shading through E6c multiplied albedo by the light
+    /// directly; Lambert's law is `albedo/π · E`, and E6d added the divisor that
+    /// had been missing. Every direct light therefore became three times dimmer
+    /// for a reason that had nothing to do with the scene. Multiplying by π
+    /// restores exactly what was there and leaves the *specular* term as the only
+    /// difference E6d makes to the diffuse look.
+    ///
+    /// `docs/PLAN.md` §6.1 carries the row this leaves behind: an intensity is
+    /// still a number someone picked, in no unit anyone can name. Real
+    /// photometry — lux for a sun, lumens for a point — is what makes two lights
+    /// authored by different people agree.
     fn default() -> Self {
         Self {
             direction: Vec3::new(0.4, 0.8, 0.45).normalize(),
             color: Vec3::ONE,
-            intensity: 1.0,
+            intensity: std::f32::consts::PI,
         }
     }
 }
@@ -96,6 +110,14 @@ impl Default for DirectionalLight {
 pub fn default_irradiance() -> Sh9 {
     Sh9::constant(Vec3::new(0.18, 0.19, 0.22))
 }
+
+/// The specular index meaning "there is no environment cube".
+///
+/// Not zero, for the reason [`NO_CLUSTERS`](crate::NO_CLUSTERS) is not zero:
+/// zero is a perfectly good heap slot, and a frame with no environment would
+/// sample whichever image happened to land there. The shader tests for it before
+/// reading anything, and falls back to the diffuse term alone.
+pub const NO_SKY: u32 = u32::MAX;
 
 /// The diffuse term a cooked environment carries.
 ///
@@ -128,6 +150,18 @@ struct EnvironmentGpu {
     sun_intensity: f32,
     sun_color: [f32; 3],
     _pad: f32,
+    /// Heap index of the prefiltered cube, or [`NO_SKY`].
+    specular: u32,
+    /// The sampler that reads it.
+    specular_sampler: u32,
+    /// How many roughness levels the chain has.
+    ///
+    /// Written rather than assumed: the cooker decides the chain's length from
+    /// the cube's size, and a shader that guessed would map roughness onto the
+    /// wrong level — which is a reflection that never quite blurs out, and looks
+    /// like a material authoring problem.
+    specular_levels: u32,
+    _pad2: u32,
     /// Nine raw spherical-harmonic coefficients — see [`Sh9`].
     ///
     /// Raw, not pre-convolved: the cosine weighting is the shader's, in
@@ -204,6 +238,7 @@ impl Environment {
         slot: usize,
         sun: &DirectionalLight,
         irradiance: &Sh9,
+        sky: Option<&crate::Sky>,
     ) -> Result<(), RenderError> {
         let Some(target) = self.slots.get_mut(slot) else {
             return Err(RenderError::Layout {
@@ -216,6 +251,10 @@ impl Environment {
             sun_intensity: sun.intensity,
             sun_color: sun.color.to_array(),
             _pad: 0.0,
+            specular: sky.map_or(NO_SKY, crate::Sky::handle),
+            specular_sampler: sky.map_or(NO_SKY, crate::Sky::sampler),
+            specular_levels: sky.map_or(0, crate::Sky::levels),
+            _pad2: 0,
             irradiance: irradiance
                 .coefficients
                 .map(|coefficient| [coefficient.x, coefficient.y, coefficient.z, 0.0]),
@@ -257,24 +296,36 @@ mod tests {
 
     #[test]
     fn the_environment_row_matches_what_the_shader_reads() {
-        // Two sixteen-byte rows, then nine of sixteen. If this and
-        // `EnvironmentGpu` in `lib/environment.slang` disagree, the shader reads
-        // the sun's colour as a coefficient and nothing reports it.
-        assert_eq!(size_of::<EnvironmentGpu>(), 32 + 9 * 16);
+        // Three sixteen-byte rows, then nine of sixteen. If this and
+        // `EnvironmentGpu` in `lib/lighting/environment.slang` disagree, the
+        // shader reads the sun's colour as a coefficient and nothing reports it.
+        assert_eq!(size_of::<EnvironmentGpu>(), 48 + 9 * 16);
         assert_eq!(align_of::<EnvironmentGpu>(), 4);
     }
 
     #[test]
-    fn the_default_sun_is_the_constant_the_shader_used_to_hold() {
-        // What makes the move from constant to data checkable: the reference
-        // images must not move. If these values drift, the change stops being
-        // a refactor and the goldens stop being evidence of one.
+    fn the_default_sun_points_where_the_shader_constant_did() {
+        // The direction is what makes the E5 move from constant to data
+        // checkable, and it has not changed since: the reference images did not
+        // move when it became a value.
         let sun = DirectionalLight::default();
         let expected = Vec3::new(0.4, 0.8, 0.45).normalize();
 
         assert!((sun.direction - expected).length() < 1e-6);
         assert_eq!(sun.color, Vec3::ONE);
-        assert_eq!(sun.intensity, 1.0);
+    }
+
+    #[test]
+    fn the_default_sun_intensity_carries_lamberts_divisor() {
+        // **A change of units, not of brightness.** Shading through E6c
+        // multiplied albedo by the light directly; Lambert's law divides by π,
+        // and E6d added the divisor. An intensity of one would therefore have
+        // made every direct light three times dimmer for a reason that has
+        // nothing to do with the scene.
+        //
+        // Asserted rather than left as a literal so that a later change to the
+        // shading model has to come back here and say what it did to the units.
+        assert!((DirectionalLight::default().intensity - std::f32::consts::PI).abs() < 1e-6);
     }
 
     #[test]
