@@ -44,8 +44,8 @@ use crate::sources::{self, Sources};
 
 /// Bump to invalidate every cooked environment.
 ///
-/// 1 — the source panorama projected onto a cube, with a mip chain.
-const COOKER_VERSION: u32 = 1;
+/// 2 — the spherical-harmonic diffuse term joins the cube.
+const COOKER_VERSION: u32 = 2;
 
 /// Where source panoramas live, relative to the project root.
 const SOURCE_DIRECTORY: &str = "assets";
@@ -142,7 +142,15 @@ pub(crate) fn environments(root: &Path, force: bool) -> Result<Summary> {
 /// Split from the walk above so the transformation is testable without a
 /// filesystem — which is most of what there is to get wrong here.
 fn cook(panorama: &Panorama) -> Environment {
-    let levels = Cube::from_panorama(panorama, SIZE).chain();
+    let base = Cube::from_panorama(panorama, SIZE);
+
+    // Projected from the **base** level, before the chain halves it. Every level
+    // integrates to the same coefficients — a box filter preserves the mean —
+    // so this is a resolution choice rather than a correctness one, and the
+    // sharpest level is the one whose solid angles are least approximate.
+    let irradiance = base.harmonics();
+
+    let levels = base.chain();
 
     let mut texels = Vec::new();
     for level in &levels {
@@ -153,6 +161,9 @@ fn cook(panorama: &Panorama) -> Environment {
         size: SIZE,
         mip_levels: u32::try_from(levels.len()).expect("a mip chain is far shorter than u32::MAX"),
         format: Format::Rgba16Float,
+        irradiance: irradiance
+            .coefficients
+            .map(|coefficient| coefficient.to_array()),
         texels,
     }
 }
@@ -172,7 +183,7 @@ fn logical_path(relative: &Path) -> String {
 mod tests {
     use super::*;
     use slop_asset::texture::full_mip_chain;
-    use slop_math::Vec3;
+    use slop_math::{Sh9, Vec3};
 
     /// A panorama of constant radiance, which is the one input whose correct
     /// output is known without reimplementing the cooker to check it.
@@ -224,6 +235,29 @@ mod tests {
                     "level {level} face {face} runs past the payload"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_uniform_sky_cooks_to_coefficients_that_reconstruct_it() {
+        // The whole diffuse path in one assertion: panorama, cube, solid angles,
+        // projection, and the array-of-arrays the artifact stores. A uniform sky
+        // must light every direction by exactly its own radiance, and each stage
+        // has its own way of being off by a constant factor.
+        let radiance = Vec3::new(0.3, 0.45, 0.6);
+        let cooked = cook(&flat(radiance));
+
+        let sh = Sh9 {
+            coefficients: cooked.irradiance.map(Vec3::from_array),
+        };
+
+        for normal in [Vec3::Y, Vec3::NEG_Z, Vec3::new(0.5, -0.5, 0.7).normalize()] {
+            let reconstructed = sh.diffuse(normal);
+
+            assert!(
+                (reconstructed - radiance).length() < 1e-3,
+                "{normal:?} reconstructed to {reconstructed:?}, not {radiance:?}"
+            );
         }
     }
 

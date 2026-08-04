@@ -62,9 +62,11 @@
 /// like an import someone chose at random.
 pub mod scalar;
 
+mod harmonics;
 mod projection;
 mod transform;
 
+pub use harmonics::{COEFFICIENTS, Sh9, basis};
 pub use projection::{look_at, orthographic, perspective};
 pub use transform::Transform;
 

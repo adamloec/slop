@@ -2109,6 +2109,7 @@ dependencies = [
  "blake3",
  "bytemuck",
  "slop-core",
+ "slop-math",
  "thiserror 2.0.19",
 ]
 

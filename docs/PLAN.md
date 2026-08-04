@@ -1399,7 +1399,7 @@ Five steps, at E5's granularity, each landing on `main` on its own.
 | | Step | Lands | Verified by |
 |---|---|---|---|
 | **E6a** | `.hdr` decode, equirect → cube, the cooked format, `fetch` an environment | `slop-cook`, `slop-asset` | **Landed.** RGBE against known bytes in all three encodings — flat, adaptive and the old run-length one, which is decoded rather than refused because ignoring it produces garbage with no error; the two encodings of the same pixels compared against each other; the cube's face table round-tripped in both directions; the format round-tripped with truncation, version, face count and an unusable pixel format each refused by name. `helipad.hdr` cooks to a 4.2 MB artifact in under a second. See below for what it cost |
-| **E6b** | SH projection at cook time; `ambient` becomes nine coefficients; the shader evaluates it | `slop-cook`, `slop-render`, `model.slang` | A constant environment reconstructs to that constant in every direction — the property that catches a wrong normalisation, which is the classic SH bug. Irradiance of a constant radiance field is π times it |
+| **E6b** | SH projection at cook time; `ambient` becomes nine coefficients; the shader evaluates it | `slop-math`, `slop-cook`, `slop-render`, `model.slang` | **Landed.** A constant environment reconstructs to that constant in every direction, at three levels — the basis alone, the cube's solid angles driving it, and the cooker end to end. A light from one side is brightest facing it and dimmest facing away, on all six axes, by equal amounts. **Every reference image is unchanged**, which is the claim `default_irradiance` exists to make: a uniform sky is the same one code path in its degenerate case, so a caller that binds no environment renders bit-identically to how it did before spherical harmonics existed. Two new tests cover what the references cannot — see below |
 | **E6c** | The prefiltered chain; cube images in the RHI; layers in the upload path; the heap's cube alias | `slop-rhi`, `slop-render`, `slop-cook` | A constant environment stays constant at every roughness level, which catches solid-angle weighting; higher levels are strictly smoother |
 | **E6d** | GGX direct specular and IBL specular; metallic and roughness finally read | `model.slang`, `shaders/lib/` | White furnace: a constant environment with no direct light leaves an unlit surface at its albedo, within tolerance. **All references re-approved here, deliberately** |
 | **E6e** | The skybox pass | `slop-render`, `examples/model` | The reference now shows the environment it is lit by, so the two are checkable against each other |
@@ -1435,6 +1435,7 @@ so the sentinel check passes and the confusing message arrives three steps later
 from the decoder. `Vendored::magic` turns that into one message naming git-lfs.
 
 **The real-content test was wrong the first time, in the instructive direction.**
+(E6a.)
 Every other test in `panorama.rs` is self-consistent — it builds a panorama with
 this module's own convention and reads it back with the same one — so a decoder
 that had `-Y` backwards would pass all of them and turn every environment upside
@@ -1445,3 +1446,35 @@ against 0.55. That is a fact about the content and says nothing about the
 decoder. The hemispheres read 1.04 against 0.43, and the brightest texel — the
 sun — sits at row 786 of 1600, just above the horizon. Both are true of any
 outdoor daytime panorama, and both catch a vertical flip.
+
+#### What E6b found: a reference cannot see a missing band
+
+The goldens are approved images, so they answer "did this change?" and never
+"does this do anything?" — §6.1 already carries that as the gap for the shadow
+cascades. E6b hits it in a sharper form, because **every reference in the
+repository binds a sky that is the same in every direction.** A shader that
+evaluated only the constant band — dropped the other eight coefficients, or
+weighted them by zero — would render all of them identically and pass.
+
+The obvious guard does not close it. `a_cooked_environment_actually_changes_the_
+image` renders Sponza under the cooked helipad and under the uniform fallback and
+asserts they differ; they do, because the two have different *constant* bands. It
+passes just as happily with bands one and two switched off.
+
+What closes it is a sky lit from one side against a uniform sky carrying the
+**same** band zero. The two differ only in the bands under test, and a cube has
+faces pointing six ways to show it. Synthetic coefficients, so it needs no fetch.
+
+Verified by breaking it on purpose, which is §3.1's discipline and is what makes
+the claim above a measurement rather than an argument. With the second and third
+band weights set to zero in `lib/environment.slang`:
+
+| Test | Result |
+|---|---|
+| `the_shader_reads_more_than_the_constant_band` | **fails** |
+| `sponza_under_a_cooked_environment_matches_its_reference` | **fails** |
+| `a_cooked_environment_actually_changes_the_image` | passes |
+| every uniform-sky reference — cube, Sponza | passes |
+
+The third row is the point. It is the test that looks like it covers this and
+does not.

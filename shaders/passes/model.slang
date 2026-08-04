@@ -314,7 +314,10 @@ float4 fragmentMain(VertexOut input) : SV_Target
             viewDepth);
     }
 
-    float3 lit = environment.ambient
+    // The sky, from nine coefficients rather than one colour — `docs/PLAN.md`
+    // §9.7 E6b. A surface facing a bright window and one facing a dark wall now
+    // differ, which a flat term could not express.
+    float3 lit = irradianceFrom(environment, normal)
                + environment.sunColor * environment.sunIntensity * sunlight
                      * saturate(dot(normal, environment.sunDirection));
 

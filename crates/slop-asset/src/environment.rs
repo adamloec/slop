@@ -14,8 +14,18 @@
 //! mip_levels u32      how many levels follow, including level zero
 //! format     u32      a texture::Format discriminant
 //! faces      u32      always FACES; written so a change is a format change
+//! irradiance 108      nine RGB f32 coefficients — the diffuse half
 //! texels              every level, largest first; six faces within each level
 //! ```
+//!
+//! # Why the diffuse term is nine numbers and not an image
+//!
+//! Diffuse irradiance is the environment convolved with a cosine lobe, and that
+//! lobe is wide enough that everything above the second spherical-harmonic band
+//! is already gone — Ramamoorthi and Hanrahan's result, and the reason every
+//! engine stores ambient this way. So 108 bytes, against an irradiance cube
+//! map's image, view, sampler, heap slot and upload. `slop_math::Sh9` is the
+//! type; the projection is the cooker's, and the evaluation is the shader's.
 //!
 //! # Why the faces are inside the levels, not the other way round
 //!
@@ -49,14 +59,28 @@ use crate::texture::{Format, full_mip_chain, halve};
 const MAGIC: &[u8; 8] = b"SLOPENV0";
 
 /// What this module knows how to read.
-pub const VERSION: u32 = 1;
+///
+/// Bumped to 2 when the spherical-harmonic coefficients were added. The header
+/// grew rather than a field changing meaning, so a version 1 artifact is rejected
+/// outright instead of being read as a version 2 with its texels 108 bytes early
+/// — a cooked cache from before the change regenerates, which the content hash
+/// already forces.
+pub const VERSION: u32 = 2;
+
+/// How many spherical-harmonic coefficients the diffuse term has.
+///
+/// Restated from `slop_math::COEFFICIENTS` rather than imported, because this
+/// is a **file format**: the number of coefficients on disk cannot follow a
+/// library constant that something might change. `the_coefficient_count_matches_
+/// the_maths` is what keeps them equal while they are.
+pub const COEFFICIENTS: usize = 9;
 
 /// Bytes before the texel data.
 ///
-/// The magic and five `u32`. Stated as one number rather than summed at each use
-/// so the reader and the writer cannot disagree, and asserted against the layout
-/// by `the_header_is_where_the_layout_says`.
-const HEADER: usize = 28;
+/// The magic, five `u32`, and nine RGB coefficients. Stated as one number rather
+/// than summed at each use so the reader and the writer cannot disagree, and
+/// asserted against the layout by `the_header_is_where_the_layout_says`.
+const HEADER: usize = 28 + COEFFICIENTS * 12;
 
 /// Faces in a cube, which is also its array layer count.
 ///
@@ -134,7 +158,11 @@ pub enum EnvironmentError {
 }
 
 /// An environment, decoded.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Not `Eq`, unlike every other cooked type here: the coefficients are floats.
+/// Comparison is still exact — these are bytes that round-tripped, not values
+/// that were computed twice — so the derived `PartialEq` is what tests use.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Environment {
     /// Level zero's edge length, in texels. Faces are square.
     pub size: u32,
@@ -142,6 +170,13 @@ pub struct Environment {
     pub mip_levels: u32,
     /// How the texels are stored.
     pub format: Format,
+    /// The diffuse term: nine RGB spherical-harmonic coefficients.
+    ///
+    /// **Raw projections of radiance onto the basis**, with no shading
+    /// convention baked in — the cosine convolution happens at evaluation, so
+    /// this number means the same thing whatever a renderer does with it. Load
+    /// into a `slop_math::Sh9` to evaluate one on the CPU.
+    pub irradiance: [[f32; 3]; COEFFICIENTS],
     /// Every level's texels, largest first, six faces within each level.
     ///
     /// One allocation rather than a nested `Vec`, for [`Texture`]'s reason: an
@@ -173,6 +208,13 @@ impl Environment {
         out.extend_from_slice(&self.mip_levels.to_le_bytes());
         out.extend_from_slice(&self.format.code().to_le_bytes());
         out.extend_from_slice(&FACES.to_le_bytes());
+
+        for coefficient in &self.irradiance {
+            for channel in coefficient {
+                out.extend_from_slice(&channel.to_le_bytes());
+            }
+        }
+
         out.extend_from_slice(&self.texels);
 
         out
@@ -280,12 +322,20 @@ impl Environment {
             });
         }
 
+        let mut irradiance = [[0.0; 3]; COEFFICIENTS];
+        for (index, coefficient) in irradiance.iter_mut().enumerate() {
+            for (channel, value) in coefficient.iter_mut().enumerate() {
+                *value = read_f32(bytes, 28 + (index * 3 + channel) * 4);
+            }
+        }
+
         // Built without its texels so `payload_bytes` can walk the chain, then
         // filled in — the alternative is duplicating the walk here.
         let mut environment = Self {
             size,
             mip_levels,
             format,
+            irradiance,
             texels: Vec::new(),
         };
 
@@ -307,6 +357,10 @@ fn read_u32(bytes: &[u8], at: usize) -> u32 {
     u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes"))
 }
 
+fn read_f32(bytes: &[u8], at: usize) -> f32 {
+    f32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,6 +371,11 @@ mod tests {
             size,
             mip_levels: full_mip_chain(size, size),
             format: Format::Rgba16Float,
+            // Distinct per coefficient and per channel, so a round trip that
+            // transposed or truncated them would not still compare equal.
+            irradiance: std::array::from_fn(|index| {
+                std::array::from_fn(|channel| (index * 3 + channel) as f32 * 0.25 - 1.0)
+            }),
             texels: Vec::new(),
         };
         environment.texels = (0..environment.payload_bytes())
@@ -344,11 +403,41 @@ mod tests {
         assert_eq!(read_u32(&bytes, 20), 2, "Rgba16Float");
         assert_eq!(read_u32(&bytes, 24), FACES);
 
+        // The coefficients begin immediately after the fixed fields, and there
+        // are nine of three.
+        assert_eq!(read_f32(&bytes, 28), -1.0, "the first coefficient's red");
+        assert_eq!(
+            read_f32(&bytes, 28 + (COEFFICIENTS * 3 - 1) * 4),
+            (COEFFICIENTS * 3 - 1) as f32 * 0.25 - 1.0,
+            "the last coefficient's blue"
+        );
+
         // Where the payload starts, which is the one thing `HEADER` claims and
         // the field offsets above do not. A `HEADER` that disagrees with the
         // fields reads every texel four bytes late — which decodes without an
         // error and renders as noise.
         assert_eq!(bytes.len(), HEADER + chained(4).payload_bytes());
+    }
+
+    #[test]
+    fn the_coefficient_count_matches_the_maths() {
+        // Restated rather than imported, because a file format cannot follow a
+        // library constant — but they must be equal while they are, and a
+        // mismatch would write nine and read however many `slop_math` had.
+        assert_eq!(COEFFICIENTS, slop_math::COEFFICIENTS);
+    }
+
+    #[test]
+    fn the_coefficients_survive_a_round_trip_in_order() {
+        // Nine RGB values is 27 floats, and a transposition between them would
+        // still round-trip to the same *set* of numbers. Checked elementwise
+        // against a pattern that is distinct in both indices.
+        let environment = chained(4);
+        let decoded = Environment::read(&environment.write()).expect("valid");
+
+        assert_eq!(decoded.irradiance, environment.irradiance);
+        assert_eq!(decoded.irradiance[0][0], -1.0);
+        assert_eq!(decoded.irradiance[1][0], 0.25f32.mul_add(3.0, -1.0));
     }
 
     #[test]
@@ -525,6 +614,7 @@ mod tests {
             size: 0,
             mip_levels: 1,
             format: Format::Rgba16Float,
+            irradiance: [[0.0; 3]; COEFFICIENTS],
             texels: Vec::new(),
         };
 

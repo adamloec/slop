@@ -28,7 +28,7 @@
 //! about which texel a direction lands on, which is not a thing that can be
 //! debugged from an image.
 
-use slop_math::Vec3;
+use slop_math::{Sh9, Vec3, scalar};
 
 use crate::panorama::Panorama;
 
@@ -182,6 +182,69 @@ impl Cube {
         let v = (y as f32 + 0.5).mul_add(step, -1.0);
 
         direction_of(face, u, v).normalize()
+    }
+
+    /// How much sky the texel at `(x, y)` covers, in steradians.
+    ///
+    /// **Not `4π / (6 · size²)`.** A cube's texels are equal in area on the cube
+    /// and very unequal on the sphere: a corner texel of a face subtends roughly
+    /// a fifth of what a centre texel does, because it is further from the centre
+    /// and more steeply inclined. Weighting an integral by texel count instead of
+    /// solid angle overweights the eight corners of the cube by a factor of five,
+    /// which tilts the reconstructed lighting towards whatever happens to be
+    /// diagonal from the origin.
+    ///
+    /// The closed form is the spherical excess of the texel's rectangle, which is
+    /// exact rather than a small-angle approximation — and exactness is what
+    /// makes `the_solid_angles_of_a_cube_sum_to_the_whole_sphere` a real check
+    /// rather than a tolerance chosen to pass.
+    #[must_use]
+    pub(crate) fn texel_solid_angle(size: u32, x: u32, y: u32) -> f32 {
+        // The area of the spherical rectangle from the face centre out to
+        // `(u, v)`, which the four corners below combine by inclusion-exclusion.
+        fn corner(u: f32, v: f32) -> f32 {
+            scalar::atan2(u * v, u.mul_add(u, v.mul_add(v, 1.0)).sqrt())
+        }
+
+        let step = 2.0 / size as f32;
+
+        let u0 = (x as f32).mul_add(step, -1.0);
+        let u1 = u0 + step;
+        let v0 = (y as f32).mul_add(step, -1.0);
+        let v1 = v0 + step;
+
+        corner(u0, v0) - corner(u0, v1) - corner(u1, v0) + corner(u1, v1)
+    }
+
+    /// Project this cube onto spherical harmonics.
+    ///
+    /// The diffuse half of image-based lighting: nine coefficients that replace
+    /// `docs/PLAN.md` §6.1's flat ambient term. Every texel contributes weighted
+    /// by the solid angle it covers, which is the whole reason the projection
+    /// happens on a cube rather than on the source panorama — see this module's
+    /// documentation.
+    #[must_use]
+    pub(crate) fn harmonics(&self) -> Sh9 {
+        let mut sh = Sh9::ZERO;
+
+        for face in Face::ALL {
+            let texels = &self.faces[face.layer()];
+
+            for y in 0..self.size {
+                for x in 0..self.size {
+                    let radiance = texels[(y * self.size + x) as usize];
+                    let direction = Self::texel_direction(self.size, face, x, y);
+
+                    sh.accumulate(
+                        direction,
+                        radiance,
+                        Self::texel_solid_angle(self.size, x, y),
+                    );
+                }
+            }
+        }
+
+        sh
     }
 
     /// Project a panorama onto a cube of `size` texels per edge.
@@ -465,6 +528,101 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_solid_angles_of_a_cube_sum_to_the_whole_sphere() {
+        // The one check that says the weights are right rather than merely
+        // plausible. Six faces of texels must cover 4π steradians exactly, and
+        // any weighting that is uniform-per-texel, off by a factor, or using the
+        // wrong face parameterisation misses it.
+        for size in [1, 2, 8, 32] {
+            let per_face: f32 = (0..size)
+                .flat_map(|y| (0..size).map(move |x| (x, y)))
+                .map(|(x, y)| Cube::texel_solid_angle(size, x, y))
+                .sum();
+
+            let whole = per_face * FACES as f32;
+
+            assert!(
+                (whole - 4.0 * std::f32::consts::PI).abs() < 1e-4,
+                "a {size}x{size} cube covers {whole} steradians, not 4π"
+            );
+        }
+    }
+
+    #[test]
+    fn a_corner_texel_covers_far_less_sky_than_a_centre_one() {
+        // Why the solid angle is computed at all. If texels were equal on the
+        // sphere this would be one, and the projection could weight by count —
+        // the shortcut that overweights the cube's eight corners.
+        let size = 32;
+
+        let centre = Cube::texel_solid_angle(size, size / 2, size / 2);
+        let corner = Cube::texel_solid_angle(size, 0, 0);
+
+        assert!(
+            centre > corner * 4.0,
+            "a centre texel covers {centre} and a corner {corner} — too close for \
+             the weighting to matter, which means one of them is wrong"
+        );
+    }
+
+    #[test]
+    fn a_constant_environment_projects_to_a_constant_reconstruction() {
+        // End to end through the projection: a uniform sky must light every
+        // direction by exactly its own radiance. This is `Sh9`'s own property
+        // driven through the cube's solid angles, so it fails if the weights do
+        // not sum to 4π even when each one is individually plausible.
+        let radiance = Vec3::new(0.25, 0.5, 0.75);
+        let panorama = Panorama {
+            width: 16,
+            height: 8,
+            texels: vec![radiance; 128],
+        };
+
+        let sh = Cube::from_panorama(&panorama, 16).harmonics();
+
+        for direction in [
+            Vec3::X,
+            Vec3::NEG_Y,
+            Vec3::Z,
+            Vec3::new(0.4, 0.5, -0.7).normalize(),
+        ] {
+            let reconstructed = sh.diffuse(direction);
+
+            assert!(
+                (reconstructed - radiance).length() < 1e-3,
+                "{direction:?} reconstructed to {reconstructed:?}, not {radiance:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_sky_brighter_above_reconstructs_brighter_facing_up() {
+        // Direction, which a constant sky cannot check. A projection that had
+        // the cube's vertical axis inverted — or the basis's — would light every
+        // surface from below, and that is entirely plausible to look at.
+        let mut panorama = Panorama {
+            width: 32,
+            height: 16,
+            texels: vec![Vec3::splat(0.1); 512],
+        };
+
+        for y in 0..8 {
+            for x in 0..32 {
+                panorama.texels[y * 32 + x] = Vec3::ONE;
+            }
+        }
+
+        let sh = Cube::from_panorama(&panorama, 16).harmonics();
+
+        assert!(
+            sh.diffuse(Vec3::Y).x > sh.diffuse(Vec3::NEG_Y).x * 2.0,
+            "up reads {:?} and down {:?}",
+            sh.diffuse(Vec3::Y),
+            sh.diffuse(Vec3::NEG_Y)
+        );
     }
 
     #[test]

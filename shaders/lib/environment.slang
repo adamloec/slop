@@ -1,9 +1,9 @@
 // The lighting that has no position, as the GPU sees it.
 //
-// A directional light and a constant ambient term. Shared for the same reason
-// `lib/light.slang` is: the shadow passes at `docs/PLAN.md` §9.5 E5 build their
-// cascades along this direction, and a copy per shader would be two declarations
-// of one ABI.
+// A directional light and the sky, the latter as nine spherical-harmonic
+// coefficients. Shared for the same reason `lib/light.slang` is: the shadow
+// passes at `docs/PLAN.md` §9.5 E5 build their cascades along this direction,
+// and a copy per shader would be two declarations of one ABI.
 //
 // The Rust half is `EnvironmentGpu` in `crates/slop-render/src/environment.rs`.
 //
@@ -13,6 +13,10 @@
 
 #ifndef SLOP_ENVIRONMENT_INCLUDED
 #define SLOP_ENVIRONMENT_INCLUDED
+
+// How many coefficients an order-3 expansion has. Matches
+// `slop_math::COEFFICIENTS` and `slop_asset::environment::COEFFICIENTS`.
+static const uint SH_COEFFICIENTS = 9;
 
 struct EnvironmentGpu
 {
@@ -26,11 +30,86 @@ struct EnvironmentGpu
     float3 sunColor;
     float _pad;
 
-    // Flat, and a placeholder. Real ambient light arrives from different
-    // directions with different colours, which is what E6's image-based
-    // lighting captures and a constant cannot.
-    float3 ambient;
-    float _pad2;
+    // The sky, projected onto spherical harmonics — `docs/PLAN.md` §9.7 E6b.
+    // This replaced a single `float3 ambient`, which could not express that real
+    // ambient light arrives from different directions with different colours.
+    //
+    // `float4` because an array of `float3` has a sixteen-byte stride anyway;
+    // `w` is padding that exists either way and is never read.
+    //
+    // **Raw coefficients**, not pre-convolved: the cosine weighting happens in
+    // `irradianceFrom` below, so these are the same numbers the cooked artifact
+    // holds and there is exactly one place the convolution lives.
+    float4 irradiance[SH_COEFFICIENTS];
 };
+
+// What a Lambertian albedo facing `normal` multiplies.
+//
+// The irradiance arriving there **divided by π**, because a Lambertian surface
+// reflects `albedo / π · E` and returning `E` would leave every caller to
+// remember the division.
+//
+// # The two sets of constants
+//
+// `K*` are the normalisations of the real spherical harmonic basis. `BANDS` are
+// the cosine lobe's own expansion `Â_l` divided by π — `Â_0 = π`, `Â_1 = 2π/3`,
+// `Â_2 = π/4`. The second set is the entire reason nine coefficients are enough:
+// the lobe has almost no energy above the third band, so there is nothing there
+// worth storing.
+//
+// The polar axis of the basis is Z and the world's up axis is Y. That is a
+// rotation of the basis and nothing more — it is complete either way, and the
+// projection in `slop-cook` uses the same assignment. Stated because it looks
+// like a bug on first reading.
+//
+// `Sh9::diffuse` in `slop-math` is the CPU twin of this function, in the sense
+// `slop-render/tests/cluster.rs` established: the same formula written twice, so
+// that a wrong band weight — invisible in a rendered image — is caught by a test
+// that needs no GPU.
+float3 irradianceFrom(EnvironmentGpu environment, float3 normal)
+{
+    const float K0 = 0.28209479;  // 1/2 · √(1/π)
+    const float K1 = 0.48860251;  // √(3/4π)
+    const float K2 = 1.09254840;  // 1/2 · √(15/π)
+    const float K20 = 0.31539157; // 1/4 · √(5/π)
+    const float K22 = 0.54627420; // 1/4 · √(15/π)
+
+    float x = normal.x;
+    float y = normal.y;
+    float z = normal.z;
+
+    float basis[SH_COEFFICIENTS] = {
+        K0,
+        K1 * y,
+        K1 * z,
+        K1 * x,
+        K2 * x * y,
+        K2 * y * z,
+        K20 * (3.0 * z * z - 1.0),
+        K2 * x * z,
+        K22 * (x * x - y * y),
+    };
+
+    // Â_l / π, per band: one coefficient in band 0, three in band 1, five in
+    // band 2.
+    float bands[SH_COEFFICIENTS] = {
+        1.0,
+        2.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0,
+        0.25, 0.25, 0.25, 0.25, 0.25,
+    };
+
+    float3 total = float3(0.0);
+
+    for (uint index = 0; index < SH_COEFFICIENTS; ++index)
+    {
+        total += environment.irradiance[index].xyz * (basis[index] * bands[index]);
+    }
+
+    // Clamped at zero. A second-order reconstruction of a high-contrast sky can
+    // ring below zero — the classic spherical-harmonic artefact — and a negative
+    // ambient term subtracts light, which shows as black patches on surfaces
+    // facing away from the sun rather than as anything resembling its cause.
+    return max(total, float3(0.0));
+}
 
 #endif // SLOP_ENVIRONMENT_INCLUDED

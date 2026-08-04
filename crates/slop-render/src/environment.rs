@@ -1,8 +1,8 @@
 //! The lighting that has no position.
 //!
-//! `docs/PLAN.md` §9.5 E5's prerequisite. A directional light and a constant
-//! ambient term — the two things every fragment gets regardless of where it is,
-//! and therefore the two things clustering has nothing to say about.
+//! `docs/PLAN.md` §9.5 E5's prerequisite. A directional light and the sky — the
+//! two things every fragment gets regardless of where it is, and therefore the
+//! two things clustering has nothing to say about.
 //!
 //! # Why this is separate from [`Lights`](crate::Lights)
 //!
@@ -18,16 +18,24 @@
 //! direction, so the direction has to be a value the CPU chooses rather than a
 //! number compiled into a shader.
 //!
-//! # What arrives here next
+//! # What the sky is, and what it is not
 //!
-//! The cascades themselves, and at E6 the image-based lighting that replaces the
-//! constant ambient term with something directional. Both are per-frame values
-//! every shading pass needs, which is what this buffer is.
+//! Nine spherical-harmonic coefficients — `docs/PLAN.md` §9.7 E6b — which
+//! replaced the single `Vec3` that was here through E5. That is the **diffuse**
+//! half of image-based lighting and deliberately only that half: nine
+//! coefficients reconstruct an irradiance field to within about a percent
+//! precisely because it is the environment convolved with a very wide cosine
+//! lobe. A sharp reflection is the high-frequency content this basis discards,
+//! and it arrives at E6c as a prefiltered cube rather than as more coefficients.
+//!
+//! A caller with no cooked environment passes [`default_irradiance`], which is a
+//! uniform field — the same one path, in its degenerate case, rather than a
+//! second one.
 
 use std::sync::Arc;
 
 use slop_core::Handle;
-use slop_math::Vec3;
+use slop_math::{Sh9, Vec3};
 use slop_rhi::{
     Allocator, BindlessHeap, Buffer, BufferConfig, BufferUsage, MemoryLocation, StorageBuffer,
 };
@@ -69,21 +77,50 @@ impl Default for DirectionalLight {
     }
 }
 
-/// What a fragment receives before any light is considered.
+/// What a fragment receives before any light is considered, with no environment.
 ///
-/// A flat term, and a placeholder for what E6 replaces it with: real ambient
-/// light arrives from different directions with different colours, which is what
-/// image-based lighting captures and a constant cannot.
+/// A **uniform** field, expressed in the same nine coefficients a cooked
+/// environment uses. `docs/PLAN.md` §6.1's row said the flat ambient term would
+/// be replaced by image-based lighting, and this is what replacing it left
+/// behind: not a second code path for callers without an environment, but the
+/// degenerate case of the one path — a sky that happens to be the same colour in
+/// every direction.
+///
+/// The colour is the constant `shaders/passes/model.slang` held before any of
+/// this existed, and it is kept exactly. That is what makes the change
+/// checkable: [`Sh9::diffuse`] of a constant field is that constant, so a caller
+/// that binds no environment renders **bit-identically** to how it did before
+/// spherical harmonics arrived. Any reference image that moves at E6b is a
+/// caller that opted in, not a side effect.
 #[must_use]
-pub fn default_ambient() -> Vec3 {
-    Vec3::new(0.18, 0.19, 0.22)
+pub fn default_irradiance() -> Sh9 {
+    Sh9::constant(Vec3::new(0.18, 0.19, 0.22))
+}
+
+/// The diffuse term a cooked environment carries.
+///
+/// The artifact stores nine RGB coefficients as plain arrays, because a file
+/// format should not name a library's vector type; this is where they become the
+/// maths again.
+#[must_use]
+pub fn irradiance_of(cooked: &slop_asset::Environment) -> Sh9 {
+    Sh9 {
+        coefficients: cooked.irradiance.map(Vec3::from_array),
+    }
 }
 
 /// The environment as the shader reads it.
 ///
 /// Mirrors `EnvironmentGpu` in `shaders/lib/environment.slang`. Laid out so
 /// std430 and `#[repr(C)]` agree without padding on either side: two rows of a
-/// `float3` and a scalar, which is sixteen bytes each.
+/// `float3` and a scalar, which is sixteen bytes each, then nine four-component
+/// rows.
+///
+/// **Four components per coefficient, and only three are read.** An array of
+/// `float3` has a sixteen-byte stride in std430 regardless, so the fourth
+/// component is padding that exists either way — writing it explicitly is what
+/// keeps `#[repr(C)]` and the shader's view of the same bytes identical, and what
+/// lets `bytemuck::Pod` derive at all.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct EnvironmentGpu {
@@ -91,8 +128,12 @@ struct EnvironmentGpu {
     sun_intensity: f32,
     sun_color: [f32; 3],
     _pad: f32,
-    ambient: [f32; 3],
-    _pad2: f32,
+    /// Nine raw spherical-harmonic coefficients — see [`Sh9`].
+    ///
+    /// Raw, not pre-convolved: the cosine weighting is the shader's, in
+    /// `irradianceFrom`, so this buffer holds the same numbers the cooked
+    /// artifact does and there is one place where the convolution lives.
+    irradiance: [[f32; 4]; slop_math::COEFFICIENTS],
 }
 
 /// The per-frame environment buffer, one per frame in flight.
@@ -162,7 +203,7 @@ impl Environment {
         &mut self,
         slot: usize,
         sun: &DirectionalLight,
-        ambient: Vec3,
+        irradiance: &Sh9,
     ) -> Result<(), RenderError> {
         let Some(target) = self.slots.get_mut(slot) else {
             return Err(RenderError::Layout {
@@ -175,8 +216,9 @@ impl Environment {
             sun_intensity: sun.intensity,
             sun_color: sun.color.to_array(),
             _pad: 0.0,
-            ambient: ambient.to_array(),
-            _pad2: 0.0,
+            irradiance: irradiance
+                .coefficients
+                .map(|coefficient| [coefficient.x, coefficient.y, coefficient.z, 0.0]),
         };
 
         let bytes = bytemuck::bytes_of(&written);
@@ -215,7 +257,10 @@ mod tests {
 
     #[test]
     fn the_environment_row_matches_what_the_shader_reads() {
-        assert_eq!(size_of::<EnvironmentGpu>(), 48);
+        // Two sixteen-byte rows, then nine of sixteen. If this and
+        // `EnvironmentGpu` in `lib/environment.slang` disagree, the shader reads
+        // the sun's colour as a coefficient and nothing reports it.
+        assert_eq!(size_of::<EnvironmentGpu>(), 32 + 9 * 16);
         assert_eq!(align_of::<EnvironmentGpu>(), 4);
     }
 
@@ -230,7 +275,51 @@ mod tests {
         assert!((sun.direction - expected).length() < 1e-6);
         assert_eq!(sun.color, Vec3::ONE);
         assert_eq!(sun.intensity, 1.0);
-        assert_eq!(default_ambient(), Vec3::new(0.18, 0.19, 0.22));
+    }
+
+    #[test]
+    fn the_default_irradiance_is_the_flat_term_it_replaced() {
+        // What makes E6b's change checkable: a caller that binds no environment
+        // must render exactly as it did when the ambient term was one colour.
+        // The nine coefficients are a different representation of the same
+        // number, not a different number, and this is the assertion — every
+        // direction reconstructs to the constant the shader used to hold.
+        let expected = Vec3::new(0.18, 0.19, 0.22);
+        let sh = default_irradiance();
+
+        for normal in [
+            Vec3::Y,
+            Vec3::NEG_Y,
+            Vec3::X,
+            Vec3::NEG_Z,
+            Vec3::new(0.3, 0.5, -0.8).normalize(),
+        ] {
+            assert!(
+                (sh.diffuse(normal) - expected).length() < 1e-5,
+                "{normal:?} reconstructs to {:?}, not {expected:?}",
+                sh.diffuse(normal)
+            );
+        }
+    }
+
+    #[test]
+    fn a_cooked_environment_becomes_the_coefficients_it_stores() {
+        // The artifact holds plain arrays so a file format does not name a
+        // library's vector type; this is the one place that conversion happens,
+        // and a transposed index here would rotate every environment's lighting.
+        let mut cooked = slop_asset::Environment {
+            size: 1,
+            mip_levels: 1,
+            format: slop_asset::Format::Rgba16Float,
+            irradiance: [[0.0; 3]; slop_math::COEFFICIENTS],
+            texels: Vec::new(),
+        };
+        cooked.irradiance[3] = [1.0, 2.0, 3.0];
+
+        assert_eq!(
+            irradiance_of(&cooked).coefficients[3],
+            Vec3::new(1.0, 2.0, 3.0)
+        );
     }
 
     #[test]

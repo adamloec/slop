@@ -12,10 +12,16 @@
 //! and none of it is what a golden image is checking.
 
 use slop_asset::Vfs;
-use slop_math::{Mat4, Quat, Vec3};
+use slop_math::{Mat4, Quat, Sh9, Vec3};
 
 /// Which model to draw, when nothing says otherwise.
 pub const DEFAULT_MODEL: &str = "models/cube.model";
+
+/// Which environment lights it, when one has been fetched and cooked.
+///
+/// Vendored rather than committed, like Sponza — an 11 MB panorama is the same
+/// permanent-in-git-history problem a 51 MB model is. `slop-cli fetch helipad`.
+pub const DEFAULT_ENVIRONMENT: &str = "environments/vendor/helipad/helipad.env";
 
 /// Vertical field of view, in degrees.
 pub const FIELD_OF_VIEW: f32 = 55.0;
@@ -225,6 +231,39 @@ pub fn lights(centre: Vec3, radius: f32) -> Vec<slop_render::PointLight> {
         radius: reach,
     })
     .collect()
+}
+
+/// The sky a scene is lit by: a cooked environment, or a uniform fallback.
+///
+/// Read from the cooked artifact rather than approximated, for the reason
+/// [`bounds`] gives — a viewer that needed hand-tuned lighting per asset would
+/// be a demo. `logical` naming something absent is **not** an error: a fresh
+/// clone has fetched no panorama, and
+/// [`default_irradiance`](slop_render::default_irradiance) is the same nine
+/// coefficients describing a sky that happens to be one colour everywhere. So
+/// there is one code path, not two, and the fallback is its degenerate case.
+///
+/// A cooked environment that fails to *decode*, though, is a failure worth
+/// seeing rather than silently falling back on: it means the cooker wrote
+/// something the runtime cannot read, which the fallback would hide.
+#[must_use]
+pub fn irradiance(vfs: &Vfs, logical: &str) -> Sh9 {
+    let Ok(bytes) = vfs.read(logical) else {
+        return slop_render::default_irradiance();
+    };
+
+    match slop_asset::Environment::read(&bytes) {
+        Ok(environment) => slop_render::irradiance_of(&environment),
+        Err(failure) => {
+            slop_core::diagnostics::tracing::error!(
+                logical,
+                error = %failure,
+                "the cooked environment could not be read; falling back to a uniform sky"
+            );
+
+            slop_render::default_irradiance()
+        }
+    }
 }
 
 /// Cooked assets, found by walking up from wherever this was run.

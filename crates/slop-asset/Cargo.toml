@@ -15,5 +15,14 @@ blake3 = { workspace = true }
 thiserror = { workspace = true }
 bytemuck.workspace = true
 
+[dev-dependencies]
+# Tests only, and deliberately not a real dependency. `environment::COEFFICIENTS`
+# is a property of a **file format** and must not follow a library constant that
+# something could change — but the two have to be equal while they are, and
+# `the_coefficient_count_matches_the_maths` is what says so. A cooked artifact
+# holds `[f32; 3]`, never a `Vec3`, which is what keeps this edge out of the
+# shipped graph.
+slop-math = { workspace = true }
+
 [lints]
 workspace = true

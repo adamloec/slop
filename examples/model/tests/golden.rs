@@ -69,7 +69,7 @@ fn the_cube_model_matches_its_reference() {
         return;
     };
 
-    let Some(mut renderer) = harness(&device, &allocator, "models/cube.model") else {
+    let Some(mut renderer) = harness(&device, &allocator, "models/cube.model", Sky::Uniform) else {
         return;
     };
 
@@ -95,7 +95,7 @@ fn sponza_matches_its_reference() {
         return;
     };
 
-    let Some(mut renderer) = harness(&device, &allocator, SPONZA) else {
+    let Some(mut renderer) = harness(&device, &allocator, SPONZA, Sky::Uniform) else {
         return;
     };
 
@@ -114,6 +114,118 @@ fn sponza_matches_its_reference() {
 }
 
 #[test]
+fn sponza_under_a_cooked_environment_matches_its_reference() {
+    // The only thing that renders nine spherical-harmonic coefficients rather
+    // than the degenerate one-colour case. Every other reference here binds
+    // `default_irradiance`, which is a *uniform* sky — so if the shader's band
+    // weights or basis constants were wrong beyond the constant term, all of
+    // them would still pass. This is what covers the rest of the formula.
+    //
+    // Sponza rather than the cube because the effect is a directional one: an
+    // arcade with sky above and stone below is where a sky that varies with
+    // direction looks different from a sky that does not.
+    let Some((device, allocator)) = headless() else {
+        return;
+    };
+
+    let Some(mut renderer) = harness(&device, &allocator, SPONZA, Sky::Cooked(HELIPAD)) else {
+        return;
+    };
+
+    let image = renderer.render(CAPTURED_FRAME);
+
+    let difference = Golden {
+        reference: &reference_path("sponza-helipad.png"),
+        failures: &failures_path(),
+        tolerance: Tolerance::HARDWARE,
+        mode: Mode::from_env(),
+    }
+    .check(&image)
+    .unwrap_or_else(|failure| panic!("sponza under helipad did not match: {failure}"));
+
+    println!("sponza + helipad, frame {CAPTURED_FRAME}: {difference}");
+}
+
+#[test]
+fn a_cooked_environment_actually_changes_the_image() {
+    // The trap `docs/PLAN.md` §6.1 records for the cascades, avoided here: a
+    // reference proves a frame did not *change*, never that a feature does
+    // anything. If `irradiance` silently fell back to the uniform sky — a
+    // mistyped logical path would do it — the reference above would still pass,
+    // having been approved against whatever it produced.
+    let Some((device, allocator)) = headless() else {
+        return;
+    };
+
+    let Some(mut uniform) = harness(&device, &allocator, SPONZA, Sky::Uniform) else {
+        return;
+    };
+
+    let Some(mut cooked) = harness(&device, &allocator, SPONZA, Sky::Cooked(HELIPAD)) else {
+        return;
+    };
+
+    assert_ne!(
+        uniform.render(CAPTURED_FRAME),
+        cooked.render(CAPTURED_FRAME),
+        "a cooked environment renders identically to a flat one, so it is not \
+         reaching the shader"
+    );
+}
+
+#[test]
+fn the_shader_reads_more_than_the_constant_band() {
+    // What neither reference above can isolate. Every other test binds a sky
+    // that is the same in every direction, so a shader that dropped bands one
+    // and two — kept only the constant term, or weighted the rest by zero —
+    // would render all of them identically and pass. Even the cooked
+    // environment would still *differ* from the uniform one, because its
+    // constant term differs, so `a_cooked_environment_actually_changes_the_
+    // image` does not catch it either.
+    //
+    // So: a sky lit from one side, against a uniform sky carrying the **same**
+    // constant band. The two differ only in bands one and two, and a cube has
+    // faces pointing six ways to show it. Synthetic coefficients rather than a
+    // cooked file, so this needs no fetch and runs on every checkout.
+    let Some((device, allocator)) = headless() else {
+        return;
+    };
+
+    let mut directional = slop_math::Sh9::ZERO;
+    directional.accumulate(Vec3::Y, Vec3::splat(0.6), 1.0);
+
+    // The same band zero, so band zero cannot be what distinguishes them.
+    let flat = slop_math::Sh9 {
+        coefficients: {
+            let mut coefficients = [Vec3::ZERO; slop_math::COEFFICIENTS];
+            coefficients[0] = directional.coefficients[0];
+            coefficients
+        },
+    };
+
+    let Some(mut lit_from_above) = harness(
+        &device,
+        &allocator,
+        "models/cube.model",
+        Sky::Given(directional),
+    ) else {
+        return;
+    };
+
+    let Some(mut lit_evenly) = harness(&device, &allocator, "models/cube.model", Sky::Given(flat))
+    else {
+        return;
+    };
+
+    assert_ne!(
+        lit_from_above.render(CAPTURED_FRAME),
+        lit_evenly.render(CAPTURED_FRAME),
+        "a sky lit from +Y renders the same as a uniform one with the same constant \
+         band, so the shader is reading only band zero"
+    );
+}
+
+#[test]
 fn the_same_frame_renders_identically_every_time() {
     // The property the references rest on, asserted independently of them.
     // Exact comparison: the same frame on the same GPU in the same process has
@@ -123,7 +235,7 @@ fn the_same_frame_renders_identically_every_time() {
         return;
     };
 
-    let Some(mut renderer) = harness(&device, &allocator, "models/cube.model") else {
+    let Some(mut renderer) = harness(&device, &allocator, "models/cube.model", Sky::Uniform) else {
         return;
     };
 
@@ -148,7 +260,7 @@ fn consecutive_frames_actually_differ() {
         return;
     };
 
-    let Some(mut renderer) = harness(&device, &allocator, "models/cube.model") else {
+    let Some(mut renderer) = harness(&device, &allocator, "models/cube.model", Sky::Uniform) else {
         return;
     };
 
@@ -177,7 +289,7 @@ fn resizing_between_frames_replaces_the_depth_buffer_safely() {
         return;
     };
 
-    let Some(mut renderer) = harness(&device, &allocator, "models/cube.model") else {
+    let Some(mut renderer) = harness(&device, &allocator, "models/cube.model", Sky::Uniform) else {
         return;
     };
 
@@ -230,7 +342,7 @@ fn loading_a_second_time_replaces_rather_than_accumulates() {
         return;
     };
 
-    let Some(mut renderer) = harness(&device, &allocator, "models/cube.model") else {
+    let Some(mut renderer) = harness(&device, &allocator, "models/cube.model", Sky::Uniform) else {
         return;
     };
 
@@ -272,6 +384,30 @@ fn loading_a_second_time_replaces_rather_than_accumulates() {
 
 /// Where Sponza's cooked model lives, when it has been fetched.
 const SPONZA: &str = "models/vendor/sponza/Sponza.model";
+
+/// Where the cooked environment lives, when it has been fetched.
+///
+/// The second vendored asset, and the second legitimate skip. Named here rather
+/// than reached for through `example_model::DEFAULT_ENVIRONMENT` so that the
+/// skip check and the thing being skipped are the same string.
+const HELIPAD: &str = example_model::DEFAULT_ENVIRONMENT;
+
+/// What lights a scene, chosen by the test rather than discovered.
+///
+/// Discovery is the thing to avoid: an environment picked up because it happened
+/// to be cooked would make one test render two different images depending on
+/// whether someone had run `fetch`, and one reference cannot be right for both.
+#[derive(Debug, Clone, Copy)]
+enum Sky {
+    /// The uniform fallback — what every reference from before E6b was approved
+    /// against, and what they must still produce.
+    Uniform,
+    /// A cooked environment, skipped by name when it has not been fetched.
+    Cooked(&'static str),
+    /// Coefficients the test builds itself, for asserting on the shape of the
+    /// reconstruction rather than on any particular sky.
+    Given(slop_math::Sh9),
+}
 
 /// What each cascade's pass is called, matching the windowed viewer.
 const CASCADE_NAMES: [&str; slop_render::CASCADES] = [
@@ -337,7 +473,12 @@ fn headless() -> Option<(Arc<Device>, Arc<Allocator>)> {
 ///   `slop-cli fetch sponza`.
 ///
 /// Anything else panics.
-fn harness(device: &Arc<Device>, allocator: &Arc<Allocator>, model: &str) -> Option<Headless> {
+fn harness(
+    device: &Arc<Device>,
+    allocator: &Arc<Allocator>,
+    model: &str,
+    environment: Sky,
+) -> Option<Headless> {
     let vfs = example_model::assets().ok().or_else(|| {
         eprintln!("skipping: nothing is cooked — run `cargo run -p slop-cli -- cook`");
         None
@@ -363,7 +504,35 @@ fn harness(device: &Arc<Device>, allocator: &Arc<Allocator>, model: &str) -> Opt
         return None;
     }
 
-    match Headless::new(device, allocator, &vfs, model) {
+    // A uniform sky unless a test asks for something else. **Not "whichever is
+    // cooked"**: that would render two different images from one test depending
+    // on whether someone had run `fetch`, and one reference cannot be right for
+    // both. The default is the same nine coefficients describing a sky that
+    // happens to be one colour, so there is no second code path either way.
+    let irradiance = match environment {
+        Sky::Uniform => slop_render::default_irradiance(),
+        Sky::Given(sh) => sh,
+        Sky::Cooked(logical) => {
+            if !vfs.exists(logical) {
+                // The same named skip the model above gets, for the same reason.
+                assert_eq!(
+                    logical, HELIPAD,
+                    "'{logical}' is not cooked, and only the fetched environment is \
+                     allowed to be absent"
+                );
+
+                eprintln!(
+                    "skipping: helipad is not fetched — run \
+                     `cargo run -p slop-cli -- fetch helipad`"
+                );
+                return None;
+            }
+
+            example_model::irradiance(&vfs, logical)
+        }
+    };
+
+    match Headless::new(device, allocator, &vfs, model, irradiance) {
         Ok(headless) => Some(headless),
         Err(failure) => panic!("the renderer must build once its assets are cooked: {failure}"),
     }
@@ -383,9 +552,16 @@ struct Headless {
     /// otherwise the references stop covering the pass that decides which lights
     /// reach a fragment at all.
     clusters: slop_render::Clusters,
-    /// The sun and ambient term, with the values the shader used to hold as
+    /// The sun and the sky, with the values the shader used to hold as
     /// constants — see `DirectionalLight::default`.
     environment: slop_render::Environment,
+    /// The sky's nine coefficients.
+    ///
+    /// **Passed in rather than discovered**, which is the whole point: if this
+    /// read a cooked environment when one happened to be present, the same test
+    /// would render two different images depending on whether someone had run
+    /// `fetch`, and one reference cannot be right for both.
+    irradiance: slop_math::Sh9,
     /// The same four cascades the window renders, so the references cover the
     /// shadow path rather than a simplified stand-in.
     shadows: slop_render::Shadows,
@@ -404,6 +580,7 @@ impl Headless {
         allocator: &Arc<Allocator>,
         vfs: &slop_asset::Vfs,
         model: &str,
+        irradiance: slop_math::Sh9,
     ) -> Result<Self, String> {
         let extent = Extent2D {
             width: SIZE,
@@ -566,6 +743,7 @@ impl Headless {
             lights,
             clusters,
             environment,
+            irradiance,
             shadows,
             placed_lights,
             heap,
@@ -660,7 +838,7 @@ impl Headless {
             .write(
                 0,
                 &slop_render::DirectionalLight::default(),
-                slop_render::default_ambient(),
+                &self.irradiance,
             )
             .expect("the environment must be writable");
 

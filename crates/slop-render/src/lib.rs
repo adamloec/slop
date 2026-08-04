@@ -73,7 +73,7 @@ mod vertex;
 mod view;
 
 pub use cluster::{ClusterCamera, ClusterGrid, Clusters, sphere_touches_box};
-pub use environment::{DirectionalLight, Environment, default_ambient};
+pub use environment::{DirectionalLight, Environment, default_irradiance, irradiance_of};
 pub use error::RenderError;
 pub use frame::{Frame, FrameOutcome, FrameRenderer, FrameRendererConfig, Target};
 pub use graph::{

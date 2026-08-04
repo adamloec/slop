@@ -122,8 +122,15 @@ struct Renderer {
     lights: Lights,
     /// The cluster grid, and the compute pass that fills it.
     clusters: Clusters,
-    /// The sun and the ambient term, one buffer per frame in flight.
+    /// The sun and the sky, one buffer per frame in flight.
     environment: Environment,
+    /// The sky's nine coefficients, from a cooked environment when one has been
+    /// fetched and a uniform fallback when not.
+    ///
+    /// Read once rather than per frame: it is a property of the scene, and
+    /// nothing moves it yet. Hot-reloading it belongs with whatever lets the
+    /// inspector choose an environment at all.
+    irradiance: slop_math::Sh9,
     /// The four cascades the sun casts into.
     shadows: Shadows,
     /// Which way the sun points. A field so E5's cascades and the shading read
@@ -313,6 +320,7 @@ impl Renderer {
             lights,
             clusters,
             environment,
+            irradiance: example_model::irradiance(&vfs, example_model::DEFAULT_ENVIRONMENT),
             shadows,
             sun: DirectionalLight::default(),
             placed_lights,
@@ -381,6 +389,7 @@ impl Renderer {
         let environment = &mut self.environment;
         let shadows = &mut self.shadows;
         let sun = self.sun;
+        let irradiance = &self.irradiance;
         let placed_lights = &self.placed_lights;
         let ui = &mut self.ui;
         let allocator = self.gpu.allocator();
@@ -423,9 +432,7 @@ impl Renderer {
                     error!(error = %failure, "this frame's cluster grid was not written");
                 }
 
-                if let Err(failure) =
-                    environment.write(frame.slot, &sun, slop_render::default_ambient())
-                {
+                if let Err(failure) = environment.write(frame.slot, &sun, irradiance) {
                     error!(error = %failure, "this frame's environment was not written");
                 }
 
