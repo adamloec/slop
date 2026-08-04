@@ -788,6 +788,8 @@ nothing about the tree.
 | The shadow bias is tuned by eye on two scenes | `slop-render/src/shadow.rs` | Either a normal-offset-only scheme, or per-scene values | **Extended.** `depth_bias` and `slope_bias` were chosen by looking at Sponza and the cube. Nothing says they hold for a scene at a different scale, and the failure modes are opposite — stripes if too small, shadows detached from their casters if too large. Both are fields rather than constants, so a scene can override them; what is missing is a way to know it needs to. | M3 |
 | Nothing verifies the cascades independently of the final image | `slop-render/src/shadow.rs` | A readback test over the depth array, as `tests/cluster.rs` does for clusters | **Extended.** The fitting maths is tested on the CPU and the reference images show shadows appearing where a roof is overhead — but "everything is shadowed" and "correctly shadowed" are not distinguishable from one interior view. What currently stands in: the *cube*'s reference is bit-identical, so unoccluded lit faces stay lit, and an exterior Sponza render shows a sunlit roof. That is three consistent observations, not a test. | M3 |
 | A cascade's texels are not filtered across its edge | `shaders/lib/shadow.slang` | Blending between neighbouring cascades over a band | **Extended.** A fragment takes one cascade's answer, so the boundary between two is a visible step wherever their resolutions differ. The usual fix is to sample both across a narrow band and blend. Cheap to add; wants a scene where the seam is actually visible to tune the band against. | M3, E7 |
+| A cube's mip chain is box-filtered within each face | `slop-cook/src/cube.rs` | Resampling across the face boundary | **Extended.** The four texels averaged for an edge texel are the four that exist; the neighbouring face's are not consulted, so each level's outermost ring is filtered against a boundary that is not there. The error is confined to one texel per edge and shrinks with the level, which is what every offline pipeline accepts here — and the hardware filters *across* faces when sampling, so the artefact is in the source of the prefilter rather than in the lookup. Doing it properly means resampling across the seam, which is a different and much larger piece of work than mip generation. | M3 |
+| An environment cooks at one fixed size with no per-asset settings | `slop-cook/src/import/environment.rs` | Import settings, as the texture rows want | **Extended.** `SIZE` is a constant of the cooker rather than a property of the asset, so a small studio HDR and a 8K outdoor capture both become 256. It is an input to the cache key, so changing it recooks correctly — what is missing is any way for one asset to say something different. The same missing per-asset import settings as the two mip rows above, and it closes with them. | M3 |
 | The ambient term is a flat colour | `slop-render/src/environment.rs` | Image-based lighting | **Replaced at E6.** Real ambient light arrives from different directions with different colours; a constant cannot express that and makes every surface's unlit side the same shade. Already a field in the environment buffer, so the seam does not move. | M3, E6 |
 | ~~The forward pass loops over every light~~ | `shaders/passes/model.slang` | — | **Resolved at E4.** It reads its own cluster's list, and the loop body did not change — only where the indices come from, exactly as the row predicted. | ✅ |
 | A cluster's light list has a fixed stride | `slop-render/src/cluster.rs` | A compacted list with an atomic allocator | **Replaced.** The default grid at the default stride is under a megabyte, so the waste is bounded and known. The seam is already the compacted one: a cluster's range is written as an offset *and* a count rather than derived from its index, so compaction changes how the offset is produced and nothing that reads it. | M3, E7 |
@@ -1396,7 +1398,7 @@ Five steps, at E5's granularity, each landing on `main` on its own.
 
 | | Step | Lands | Verified by |
 |---|---|---|---|
-| **E6a** | `.hdr` decode, equirect → cube, the cooked format, `fetch` an environment | `slop-cook`, `slop-asset` | RGBE decode against known bytes, RLE and flat scanlines; face direction round-trip in both directions; format round-trip, truncation and version refused |
+| **E6a** | `.hdr` decode, equirect → cube, the cooked format, `fetch` an environment | `slop-cook`, `slop-asset` | **Landed.** RGBE against known bytes in all three encodings — flat, adaptive and the old run-length one, which is decoded rather than refused because ignoring it produces garbage with no error; the two encodings of the same pixels compared against each other; the cube's face table round-tripped in both directions; the format round-tripped with truncation, version, face count and an unusable pixel format each refused by name. `helipad.hdr` cooks to a 4.2 MB artifact in under a second. See below for what it cost |
 | **E6b** | SH projection at cook time; `ambient` becomes nine coefficients; the shader evaluates it | `slop-cook`, `slop-render`, `model.slang` | A constant environment reconstructs to that constant in every direction — the property that catches a wrong normalisation, which is the classic SH bug. Irradiance of a constant radiance field is π times it |
 | **E6c** | The prefiltered chain; cube images in the RHI; layers in the upload path; the heap's cube alias | `slop-rhi`, `slop-render`, `slop-cook` | A constant environment stays constant at every roughness level, which catches solid-angle weighting; higher levels are strictly smoother |
 | **E6d** | GGX direct specular and IBL specular; metallic and roughness finally read | `model.slang`, `shaders/lib/` | White furnace: a constant environment with no direct light leaves an unlit surface at its albedo, within tolerance. **All references re-approved here, deliberately** |
@@ -1405,3 +1407,41 @@ Five steps, at E5's granularity, each landing on `main` on its own.
 E6a and E6b together are the whole feature's risk: after them the environment is
 on disk in a form the renderer reads, and everything left is integration with a
 CPU test standing behind it.
+
+#### What E6a found
+
+Four things, none of them predicted by the section above.
+
+**The tree walk had four copies of itself and the cooker had no home for its
+importers.** Both landed as their own commits before E6a's own work, because the
+environment importer would have been the fifth copy of the walk and the fourth
+`*_import.rs` at the crate root — and `CONVENTIONS.md` names three as the point
+where each becomes a directory. `Summary` moved with them: it had been defined in
+the shader importer for as long as that was the only importer, and the other
+three reached across for it.
+
+**`Texture::stride` hardcoded four bytes per texel.** Correct for both formats
+that existed and silently half a row for `Rgba16Float`. It now asks
+`Format::payload_bytes` for one row, which is the same arithmetic the payload
+already uses — so a format added later cannot make the two disagree.
+
+**The environment repository is Git LFS, and `--filter=blob:none` does nothing
+about it.** The two mechanisms do not know about each other: the LFS smudge
+filter runs during checkout and fetches **every** tracked file, which is 376 MB
+to obtain 11 MB. `GIT_LFS_SKIP_SMUDGE` on the clone plus a targeted `git lfs
+pull` is 2.7 MB plus 11 MB. The failure when git-lfs is absent is also worth the
+line of code that catches it: a 133-byte text pointer lands under the right name,
+so the sentinel check passes and the confusing message arrives three steps later
+from the decoder. `Vendored::magic` turns that into one message naming git-lfs.
+
+**The real-content test was wrong the first time, in the instructive direction.**
+Every other test in `panorama.rs` is self-consistent — it builds a panorama with
+this module's own convention and reads it back with the same one — so a decoder
+that had `-Y` backwards would pass all of them and turn every environment upside
+down. The check that closes that gap has to be against real content. The first
+attempt compared the top row against the bottom and **failed**: at golden hour
+the zenith is deep blue and dimmer than the sunlit ground at the nadir, 0.42
+against 0.55. That is a fact about the content and says nothing about the
+decoder. The hemispheres read 1.04 against 0.43, and the brightest texel — the
+sun — sits at row 786 of 1600, just above the horizon. Both are true of any
+outdoor daytime panorama, and both catch a vertical flip.

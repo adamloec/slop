@@ -767,6 +767,11 @@ fn vulkan_format(format: slop_asset::Format) -> Format {
     match format {
         slop_asset::Format::Rgba8 => Format::Rgba8Unorm,
         slop_asset::Format::Bc7 => Format::Bc7Unorm,
+        // The cube's texture is a cooked PNG and never a float image. Naming the
+        // format anyway rather than reaching for a wildcard: this is the second
+        // copy of this mapping (`docs/reviews/2026-08-03.md` item 3), and a
+        // wildcard is exactly how the two copies would start to disagree.
+        slop_asset::Format::Rgba16Float => Format::Rgba16Float,
     }
 }
 

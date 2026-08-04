@@ -2133,6 +2133,7 @@ dependencies = [
  "serde_json",
  "slop-asset",
  "slop-core",
+ "slop-math",
 ]
 
 [[package]]

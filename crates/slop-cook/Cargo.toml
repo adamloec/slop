@@ -20,6 +20,11 @@ png = { workspace = true }
 serde_json = { workspace = true }
 slop-asset = { workspace = true }
 slop-core = { workspace = true }
+# Vectors and directions, for the environment cooker: projecting an
+# equirectangular panorama onto cube faces is spherical geometry, and
+# `clippy.toml` disallows the `std` transcendentals everywhere — including here —
+# so `slop_math::scalar` is the only way to call one at all.
+slop-math = { workspace = true }
 
 [lints]
 workspace = true

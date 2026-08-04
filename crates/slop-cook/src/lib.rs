@@ -47,8 +47,10 @@
 //! editor that shows a missing-texture failure differently from a malformed-file
 //! one. `docs/PLAN.md` §6.1 carries the row.
 
+mod cube;
 mod geometry;
 mod import;
+mod panorama;
 mod reflection;
 mod sources;
 
@@ -58,7 +60,7 @@ use anyhow::{Context, Result};
 
 pub use import::Summary;
 
-/// Cook every shader, model and texture under `root`.
+/// Cook every shader, model, texture and environment under `root`.
 ///
 /// Incremental: an artifact whose stamp still matches its source is left alone.
 /// `force` ignores stamps, which is the escape hatch for when the cache is
@@ -79,10 +81,11 @@ pub fn all(root: &Path, force: bool) -> Result<Summary> {
     let shaders = import::shader::shaders(root, force).with_context(context)?;
     let meshes = import::gltf::meshes(root, force).with_context(context)?;
     let textures = import::texture::textures(root, force).with_context(context)?;
+    let environments = import::environment::environments(root, force).with_context(context)?;
 
     Ok(Summary {
-        cooked: shaders.cooked + meshes.cooked + textures.cooked,
-        skipped: shaders.skipped + meshes.skipped + textures.skipped,
+        cooked: shaders.cooked + meshes.cooked + textures.cooked + environments.cooked,
+        skipped: shaders.skipped + meshes.skipped + textures.skipped + environments.skipped,
     })
 }
 
@@ -112,4 +115,13 @@ pub fn models(root: &Path, force: bool) -> Result<Summary> {
 /// As [`all`], for textures.
 pub fn textures(root: &Path, force: bool) -> Result<Summary> {
     import::texture::textures(root, force)
+}
+
+/// Cook only the HDR panoramas under `root/assets`.
+///
+/// # Errors
+///
+/// As [`all`], for environments.
+pub fn environments(root: &Path, force: bool) -> Result<Summary> {
+    import::environment::environments(root, force)
 }

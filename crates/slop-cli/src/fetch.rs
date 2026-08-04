@@ -34,12 +34,38 @@ struct Vendored {
     name: &'static str,
     /// Upstream repository.
     repository: &'static str,
-    /// The directory within it to check out, and to copy from.
-    path: &'static str,
+    /// A directory to narrow the checkout to, or `None` for the whole tree.
+    ///
+    /// `None` is not "fetch everything": with `--filter=blob:none` the clone
+    /// holds no file contents at all, so narrowing only matters when the blobs
+    /// are about to be pulled. An LFS-backed repository does its own narrowing
+    /// through [`lfs`](Self::lfs) instead, which is finer-grained.
+    sparse: Option<&'static str>,
+    /// Large files to pull by name, for a repository using Git LFS.
+    ///
+    /// Empty for one that does not. `--filter=blob:none` says nothing to LFS:
+    /// its smudge filter would fetch **every** tracked file on checkout, which
+    /// for the environment repository is 376 MB to obtain 11 MB. The clone runs
+    /// with the filter disabled and this is what is fetched afterwards.
+    lfs: &'static [&'static str],
+    /// What to copy out of the clone — a directory, whose files are copied one
+    /// level deep, or a single file.
+    ///
+    /// Licence and readme files are looked for **beside** it, which is where
+    /// upstream puts them in both shapes: next to a model's `glTF` directory,
+    /// and at the root of a repository whose assets are loose files.
+    copy: &'static str,
     /// Where it lands under `assets/vendor/`.
     destination: &'static str,
     /// A file that must exist afterwards, so a partial fetch is detectable.
     sentinel: &'static str,
+    /// Bytes the sentinel must start with, for a format with a magic.
+    ///
+    /// Existence alone is not enough for an LFS-backed asset: a clone made
+    /// without git-lfs installed leaves a 133-byte text pointer under the right
+    /// name, and every consumer downstream then reports something confusing
+    /// about the *format*. This turns that into one message naming git-lfs.
+    magic: Option<&'static [u8]>,
     /// Shown when listing, and worth stating because these carry licences.
     about: &'static str,
 }
@@ -48,14 +74,33 @@ struct Vendored {
 ///
 /// Each entry is a third-party asset under its own licence, which is why the
 /// upstream `LICENSE.md` is copied alongside the files rather than left behind.
-const CATALOGUE: &[Vendored] = &[Vendored {
-    name: "sponza",
-    repository: "https://github.com/KhronosGroup/glTF-Sample-Assets.git",
-    path: "Models/Sponza",
-    destination: "sponza",
-    sentinel: "Sponza.gltf",
-    about: "Crytek Sponza as glTF 2.0 — 103 primitives, 25 materials, 71 files, 51 MB",
-}];
+const CATALOGUE: &[Vendored] = &[
+    Vendored {
+        name: "sponza",
+        repository: "https://github.com/KhronosGroup/glTF-Sample-Assets.git",
+        sparse: Some("Models/Sponza"),
+        lfs: &[],
+        copy: "Models/Sponza/glTF",
+        destination: "sponza",
+        sentinel: "Sponza.gltf",
+        magic: None,
+        about: "Crytek Sponza as glTF 2.0 — 103 primitives, 25 materials, 71 files, 51 MB",
+    },
+    Vendored {
+        name: "helipad",
+        repository: "https://github.com/KhronosGroup/glTF-Sample-Environments.git",
+        // No narrowing: the blobless clone is 2.7 MB of pointers and the LFS
+        // pull below is what actually costs anything.
+        sparse: None,
+        lfs: &["helipad.hdr"],
+        copy: "helipad.hdr",
+        destination: "helipad",
+        sentinel: "helipad.hdr",
+        magic: Some(b"#?RADIANCE"),
+        about: "Helipad Goldenhour, 3200x1600 Radiance HDR — an outdoor \
+                environment with a sun, 11 MB. Needs git-lfs",
+    },
+];
 
 /// Print what can be fetched.
 pub(crate) fn list() {
@@ -111,28 +156,50 @@ pub(crate) fn fetch(root: &Path, name: &str, force: bool) -> Result<()> {
     // then `--sparse` narrows the working tree to nothing. Together they turn a
     // multi-gigabyte repository into a metadata-only clone, and the checkout
     // below is what pulls the blobs for one directory.
-    git(
-        root,
-        &[
-            "clone",
-            "--depth",
-            "1",
-            "--filter=blob:none",
-            "--sparse",
-            asset.repository,
-            &staging.to_string_lossy(),
-        ],
-    )
-    .context("the blobless clone failed — is `git` on PATH, and is the network reachable?")?;
+    let mut clone = vec!["clone", "--depth", "1", "--filter=blob:none"];
+    if asset.sparse.is_some() {
+        clone.push("--sparse");
+    }
+    clone.push(asset.repository);
+    let staging_argument = staging.to_string_lossy().into_owned();
+    clone.push(&staging_argument);
 
-    git(&staging, &["sparse-checkout", "set", asset.path])
-        .with_context(|| format!("narrowing the checkout to {}", asset.path))?;
+    // `GIT_LFS_SKIP_SMUDGE` on the clone and nowhere else. Without it the smudge
+    // filter fetches every LFS-tracked file in the repository during checkout,
+    // which `--filter=blob:none` does nothing to prevent — the two mechanisms do
+    // not know about each other.
+    git(root, &clone, &[("GIT_LFS_SKIP_SMUDGE", "1")])
+        .context("the blobless clone failed — is `git` on PATH, and is the network reachable?")?;
 
-    let source = staging.join(asset.path);
-    if !source.is_dir() {
+    if let Some(narrow) = asset.sparse {
+        git(&staging, &["sparse-checkout", "set", narrow], &[])
+            .with_context(|| format!("narrowing the checkout to {narrow}"))?;
+    }
+
+    // After the checkout, never during it — see `Vendored::lfs`. One `--include`
+    // per file rather than one call per file, so a repository with several large
+    // assets is still one round trip.
+    if !asset.lfs.is_empty() {
+        let include = asset.lfs.join(",");
+
+        git(
+            &staging,
+            &["lfs", "pull", &format!("--include={include}")],
+            &[],
+        )
+        .with_context(|| {
+            format!(
+                "fetching {include} through git-lfs — is git-lfs installed? \
+                 `git lfs install` sets it up"
+            )
+        })?;
+    }
+
+    let source = staging.join(asset.copy);
+    if !source.exists() {
         bail!(
             "upstream no longer has '{}' — the catalogue entry for {} is stale",
-            asset.path,
+            asset.copy,
             asset.name
         );
     }
@@ -144,13 +211,27 @@ pub(crate) fn fetch(root: &Path, name: &str, force: bool) -> Result<()> {
     std::fs::create_dir_all(&destination)
         .with_context(|| format!("creating {}", destination.display()))?;
 
-    // The model's files sit in a `glTF` subdirectory and its licence sits beside
-    // that subdirectory, so both are copied and the nesting is flattened away.
-    // A licence left behind upstream is the kind of omission that is invisible
-    // until it matters.
-    let mut copied = copy_into(&source.join("glTF"), &destination)?;
+    // A directory's files, or the one file. Both shapes exist upstream: a glTF
+    // model is a directory of buffers and images, and an environment is a single
+    // panorama at the root of a repository full of them.
+    let mut copied = if source.is_dir() {
+        copy_into(&source, &destination)?
+    } else {
+        let name = source
+            .file_name()
+            .expect("a file path has a final component");
+
+        std::fs::copy(&source, destination.join(name))
+            .with_context(|| format!("copying {}", source.display()))?;
+
+        1
+    };
+
+    // Beside whatever was copied. A licence left behind upstream is the kind of
+    // omission that is invisible until it matters.
+    let beside = source.parent().unwrap_or(&staging);
     for licence in ["LICENSE.md", "README.md"] {
-        let from = source.join(licence);
+        let from = beside.join(licence);
         if from.is_file() {
             std::fs::copy(&from, destination.join(licence))
                 .with_context(|| format!("copying {licence}"))?;
@@ -160,12 +241,35 @@ pub(crate) fn fetch(root: &Path, name: &str, force: bool) -> Result<()> {
 
     std::fs::remove_dir_all(&staging).with_context(|| format!("clearing {}", staging.display()))?;
 
-    if !destination.join(asset.sentinel).exists() {
+    let landed = destination.join(asset.sentinel);
+    if !landed.exists() {
         bail!(
             "fetched {} files but '{}' is not among them — the catalogue's sentinel is wrong",
             copied,
             asset.sentinel
         );
+    }
+
+    // What a clone made without git-lfs leaves behind: a text pointer under the
+    // right name, of the right kind of nothing. Caught here so the message names
+    // git-lfs, rather than three steps later where the cooker reports that a
+    // 133-byte file is not a valid panorama.
+    if let Some(magic) = asset.magic {
+        let head = std::fs::read(&landed)
+            .with_context(|| format!("reading {}", landed.display()))?
+            .into_iter()
+            .take(magic.len())
+            .collect::<Vec<u8>>();
+
+        if head != magic {
+            bail!(
+                "'{}' does not start with {:?} — this is almost certainly a Git LFS \
+                 pointer rather than the file. Install git-lfs, run `git lfs install`, \
+                 and refetch with --force",
+                asset.sentinel,
+                String::from_utf8_lossy(magic)
+            );
+        }
     }
 
     info!(asset = asset.name, files = copied, path = %destination.display(), "fetched");
@@ -202,12 +306,19 @@ fn copy_into(from: &Path, to: &Path) -> Result<usize> {
 /// Git reports the interesting part of a failure on stderr and says nothing
 /// useful in its exit code, so discarding stderr would turn "no network" and
 /// "no such branch" into the same message.
-fn git(directory: &Path, arguments: &[&str]) -> Result<()> {
-    let output = Command::new("git")
-        .current_dir(directory)
-        .args(arguments)
-        .output()
-        .context("could not run `git`")?;
+///
+/// `environment` is how the clone disables the LFS smudge filter. That has to be
+/// an environment variable rather than an argument, because the filter runs
+/// inside the checkout rather than being something the command line names.
+fn git(directory: &Path, arguments: &[&str], environment: &[(&str, &str)]) -> Result<()> {
+    let mut command = Command::new("git");
+    command.current_dir(directory).args(arguments);
+
+    for (name, value) in environment {
+        command.env(name, value);
+    }
+
+    let output = command.output().context("could not run `git`")?;
 
     if !output.status.success() {
         bail!(
@@ -247,6 +358,40 @@ mod tests {
         names.dedup();
 
         assert_eq!(names.len(), count, "catalogue has duplicate names");
+    }
+
+    #[test]
+    fn an_lfs_backed_asset_declares_a_magic_to_check() {
+        // The pairing that makes the LFS failure legible. Without a magic, a
+        // clone made on a machine with no git-lfs leaves a 133-byte pointer
+        // under the sentinel's name, the existence check passes, and the
+        // confusing message arrives from the cooker instead.
+        for asset in CATALOGUE {
+            if !asset.lfs.is_empty() {
+                assert!(
+                    asset.magic.is_some(),
+                    "{} is LFS-backed and has no magic to check",
+                    asset.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_sentinel_is_something_the_fetch_actually_copies() {
+        // A sentinel naming a file the copy never places would fail every fetch;
+        // one naming a file that is always there would never fail. For a
+        // single-file asset the two must be the same name, which is the case
+        // this catches — `copy` and `sentinel` drifting apart.
+        for asset in CATALOGUE {
+            if !asset.copy.contains('/') && asset.copy.contains('.') {
+                assert_eq!(
+                    asset.copy, asset.sentinel,
+                    "{}'s sentinel is not the file it copies",
+                    asset.name
+                );
+            }
+        }
     }
 
     #[test]

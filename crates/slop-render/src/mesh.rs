@@ -1102,6 +1102,11 @@ fn vulkan_format(format: slop_asset::Format) -> Format {
     match format {
         slop_asset::Format::Rgba8 => Format::Rgba8Unorm,
         slop_asset::Format::Bc7 => Format::Bc7Unorm,
+        // A material's texture, which is what this uploads. An HDR environment
+        // uses the same storage and is not one — it arrives through
+        // `slop_asset::Environment` and its own upload, so a material naming a
+        // float image here is a cook that produced the wrong artifact.
+        slop_asset::Format::Rgba16Float => Format::Rgba16Float,
     }
 }
 

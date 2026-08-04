@@ -25,6 +25,7 @@
 //! folding them in would make this a directory of "files to do with cooking",
 //! which is the split-by-kind that the same rule bans.
 
+pub(crate) mod environment;
 pub(crate) mod gltf;
 pub(crate) mod shader;
 pub(crate) mod texture;

@@ -79,6 +79,20 @@ pub enum Format {
     /// one texture unusable as a normal map.
     Rgba8,
 
+    /// Sixteen-bit floating point, four channels, tightly packed.
+    ///
+    /// What an HDR environment is stored as — `docs/PLAN.md` §9.7. Eight bytes
+    /// per texel, against `Rgba32Float`'s sixteen, and the size is not why it was
+    /// picked: **linear filtering of a 32-bit float format is optional in Vulkan
+    /// and widely absent**, while the 16-bit one is supported everywhere. A
+    /// prefiltered environment that cannot be filtered is not an environment.
+    ///
+    /// Four channels rather than three, for the same kind of reason:
+    /// `R16G16B16_SFLOAT` exists in the specification and almost nowhere in
+    /// hardware. The fourth channel is a third of the bytes and buys a format
+    /// that can actually be sampled.
+    Rgba16Float,
+
     /// BC7, four bits per texel, in 4×4 blocks of sixteen bytes.
     ///
     /// The desktop colour-texture format: four channels, and the only BC format
@@ -101,17 +115,22 @@ const BC7_BLOCK_BYTES: usize = 16;
 
 impl Format {
     /// The discriminant written into the header.
-    const fn code(self) -> u32 {
+    ///
+    /// Assigned once and never reused: a variant added later takes the next
+    /// number, so an artifact cooked before it existed still decodes as what it
+    /// was rather than as whatever now sits at its code.
+    pub(crate) const fn code(self) -> u32 {
         match self {
             Self::Rgba8 => 0,
             Self::Bc7 => 1,
+            Self::Rgba16Float => 2,
         }
     }
 
     /// Whether the payload is 4×4 blocks rather than loose pixels.
     pub const fn is_block_compressed(self) -> bool {
         match self {
-            Self::Rgba8 => false,
+            Self::Rgba8 | Self::Rgba16Float => false,
             Self::Bc7 => true,
         }
     }
@@ -128,14 +147,16 @@ impl Format {
 
         match self {
             Self::Rgba8 => width * height * 4,
+            Self::Rgba16Float => width * height * 8,
             Self::Bc7 => width.div_ceil(BLOCK) * height.div_ceil(BLOCK) * BC7_BLOCK_BYTES,
         }
     }
 
-    fn from_code(code: u32) -> Option<Self> {
+    pub(crate) fn from_code(code: u32) -> Option<Self> {
         match code {
             0 => Some(Self::Rgba8),
             1 => Some(Self::Bc7),
+            2 => Some(Self::Rgba16Float),
             _ => None,
         }
     }
@@ -407,7 +428,11 @@ impl Texture {
             "a block-compressed texture has no row stride"
         );
 
-        self.width as usize * 4
+        // One row's worth of the same arithmetic the payload uses, rather than a
+        // second statement of how wide a texel is. `Rgba16Float` is what made
+        // that matter: a hardcoded four bytes was right for the only format that
+        // existed and silently half a row for the one that arrived.
+        self.format.payload_bytes(self.width, 1)
     }
 }
 
