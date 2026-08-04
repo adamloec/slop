@@ -15,8 +15,8 @@ use std::sync::Arc;
 
 use slop_rhi::{
     Allocator, Buffer, BufferConfig, BufferState, BufferUsage, CommandPool, DEPTH_CLEAR, Extent2D,
-    Format, Image, ImageAspect, ImageConfig, ImageState, ImageUsage, MemoryLocation, Offset2D,
-    Rect2D, vk,
+    Format, Image, ImageAspect, ImageConfig, ImageKind, ImageState, ImageUsage, MemoryLocation,
+    Offset2D, Rect2D, vk,
 };
 
 /// Upload a byte pattern to device-local memory and read it back.
@@ -202,7 +202,7 @@ fn a_texture_uploads_and_reads_back_unchanged() {
             format: Format::Rgba8Unorm,
             usage: ImageUsage::TRANSFER_DST | ImageUsage::TRANSFER_SRC,
             mip_levels: 1,
-            array_layers: 1,
+            kind: ImageKind::Flat,
         },
     )
     .expect("texture creation");
@@ -316,7 +316,7 @@ fn a_depth_image_clears_to_the_far_plane_at_zero() {
             format,
             usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::TRANSFER_SRC,
             mip_levels: 1,
-            array_layers: 1,
+            kind: ImageKind::Flat,
         },
     )
     .expect("depth image creation");

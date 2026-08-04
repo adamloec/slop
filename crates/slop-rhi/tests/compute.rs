@@ -16,7 +16,7 @@ use std::sync::Arc;
 use slop_asset::Vfs;
 use slop_rhi::{
     BindlessHeap, BindlessHeapConfig, Buffer, BufferConfig, BufferState, ComputePipeline, Extent2D,
-    Format, Image, ImageConfig, ImageState, ImageUsage, MemoryLocation, PipelineLayout,
+    Format, Image, ImageConfig, ImageKind, ImageState, ImageUsage, MemoryLocation, PipelineLayout,
     PipelineLayoutConfig, ShaderModule, ShaderStage,
 };
 
@@ -109,7 +109,7 @@ fn a_compute_shader_writes_every_texel_it_was_dispatched_for() {
             // back out. Neither implies the other.
             usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
             mip_levels: 1,
-            array_layers: 1,
+            kind: ImageKind::Flat,
         },
     )
     .expect("a storage image must be creatable");
@@ -271,7 +271,7 @@ fn a_format_that_cannot_be_stored_to_is_refused() {
             format: Format::Bc7Unorm,
             usage: ImageUsage::STORAGE,
             mip_levels: 1,
-            array_layers: 1,
+            kind: ImageKind::Flat,
         },
     )
     .expect_err("a block-compressed storage image must be refused");

@@ -49,8 +49,8 @@ use slop_core::Handle;
 use slop_math::{Mat4, Vec3, Vec4};
 use slop_rhi::{
     Allocator, BindlessHeap, Buffer, BufferConfig, BufferUsage, Format, Image, ImageConfig,
-    ImageState, ImageUsage, MemoryLocation, SampledImage, Sampler, SamplerConfig, StorageBuffer,
-    TextureSampler,
+    ImageKind, ImageState, ImageUsage, MemoryLocation, SampledImage, Sampler, SamplerConfig,
+    StorageBuffer, TextureSampler,
 };
 
 use crate::{DirectionalLight, RenderError, View};
@@ -560,7 +560,7 @@ impl ShadowSlot {
                 format: Format::D32Float,
                 usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED,
                 mip_levels: 1,
-                array_layers: CASCADES as u32,
+                kind: ImageKind::Array(CASCADES as u32),
             },
         )?;
 

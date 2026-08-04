@@ -41,9 +41,9 @@ use std::sync::Arc;
 use slop_asset::Reflection;
 use slop_rhi::{
     Attachments, Blend, Buffer, BufferConfig, BufferUsage, ColorAttachment, Device, Extent2D,
-    Format, GraphicsPipeline, GraphicsPipelineConfig, Image, ImageConfig, ImageState, ImageUsage,
-    Load, MemoryLocation, Offset2D, PipelineLayout, PipelineLayoutConfig, Rect2D, SampledImage,
-    Sampler, SamplerConfig, ShaderModule, ShaderStage, TextureSampler, VertexLayout,
+    Format, GraphicsPipeline, GraphicsPipelineConfig, Image, ImageConfig, ImageKind, ImageState,
+    ImageUsage, Load, MemoryLocation, Offset2D, PipelineLayout, PipelineLayoutConfig, Rect2D,
+    SampledImage, Sampler, SamplerConfig, ShaderModule, ShaderStage, TextureSampler, VertexLayout,
 };
 
 use crate::EditorError;
@@ -580,7 +580,7 @@ fn upload_image(
             // it never samples below level zero — and the font atlas would blur
             // rather than sharpen if it did.
             mip_levels: 1,
-            array_layers: 1,
+            kind: ImageKind::Flat,
         },
     )?;
 

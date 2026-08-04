@@ -12,10 +12,10 @@ use crate::{
 
 /// What an image is, and what it is for.
 ///
-/// One mip, one array layer, colour aspect, optimal tiling. Mip chains, cube
-/// maps and depth formats are all coming, and each will arrive as a field here
-/// rather than as a parallel constructor — `docs/CONVENTIONS.md` §5.1's rule
-/// that configuration is a struct, so adding a knob does not fork a call graph.
+/// Optimal tiling always; everything else is a field. Mip chains, array layers,
+/// cube maps and depth formats each arrived that way rather than as a parallel
+/// constructor — `docs/CONVENTIONS.md` §5.1's rule that configuration is a
+/// struct, so adding a knob does not fork a call graph.
 #[derive(Debug, Clone)]
 pub struct ImageConfig<'a> {
     /// A name for validation messages and allocator reports.
@@ -34,18 +34,72 @@ pub struct ImageConfig<'a> {
     /// one — that shimmer on a distant floor is undersampling, and mips are the
     /// prefiltered answer to it.
     pub mip_levels: u32,
-    /// How many array layers to allocate.
+    /// What this image is, and how many layers that implies.
+    pub kind: ImageKind,
+}
+
+/// How an image's layers are meant to be read.
+///
+/// **An enum rather than a layer count and a flag**, because a cube is not "six
+/// layers plus a bit set" — it is six layers *and* that bit, and the two being
+/// separate fields makes "six layers without the flag" and "the flag with four
+/// layers" both expressible and both wrong. Vulkan will reject the second and
+/// silently accept the first, giving an image that cannot be viewed as a cube for
+/// a reason nothing reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageKind {
+    /// One layer. Render targets, depth buffers, ordinary textures.
+    Flat,
+
+    /// Several same-sized images a shader indexes with a third coordinate.
     ///
-    /// One for an ordinary image. More makes this a **texture array** — several
-    /// same-sized images a shader indexes with a third coordinate, which is what
-    /// `docs/PLAN.md` §9.4's four shadow cascades are. An array rather than four
-    /// separate images because the shader picks a cascade at runtime: one handle
-    /// and a layer index, instead of four handles and a branch.
+    /// What `docs/PLAN.md` §9.4's four shadow cascades are — an array rather
+    /// than four separate images because the shader picks a cascade at runtime:
+    /// one handle and a layer index, instead of four handles and a branch.
     ///
     /// Not a 3D image, which is a different thing: layers do not filter into one
     /// another, and a shadow cascade blended with its neighbour would be
     /// nonsense.
-    pub array_layers: u32,
+    Array(u32),
+
+    /// Six layers, sampled by direction rather than by coordinate.
+    ///
+    /// `docs/PLAN.md` §9.7's environment map. The layer order is fixed by the
+    /// API — `+X, -X, +Y, -Y, +Z, -Z` — and `slop-cook`'s `cube.rs` writes them
+    /// in that order, because the CPU and the hardware sampler disagreeing about
+    /// which texel a direction lands on is not a thing that can be debugged from
+    /// an image.
+    ///
+    /// What this buys over [`Array`](ImageKind::Array) is **seamless filtering**:
+    /// a sample near a face edge blends with the neighbouring face, in hardware.
+    /// That is the whole reason §9.7 chose a cube over an octahedral map, whose
+    /// edges would need a hand-maintained border on every level.
+    Cube,
+}
+
+impl ImageKind {
+    /// How many array layers this needs.
+    #[must_use]
+    pub const fn layers(self) -> u32 {
+        match self {
+            Self::Flat => 1,
+            // Floored at one: zero is meaningless to Vulkan and would be
+            // rejected with a message about the image rather than the caller.
+            Self::Array(layers) => {
+                if layers > 1 {
+                    layers
+                } else {
+                    1
+                }
+            }
+            Self::Cube => 6,
+        }
+    }
+
+    /// Whether the whole-image view is a cube.
+    const fn is_cube(self) -> bool {
+        matches!(self, Self::Cube)
+    }
 }
 
 impl ImageConfig<'_> {
@@ -57,9 +111,9 @@ impl ImageConfig<'_> {
         self.mip_levels.max(1)
     }
 
-    /// Layers, floored at one, for the same reason.
+    /// Layers, from the kind.
     fn layers(&self) -> u32 {
-        self.array_layers.max(1)
+        self.kind.layers()
     }
 }
 
@@ -109,7 +163,18 @@ impl Image {
 
         let device = allocator.device().raw();
 
+        // `CUBE_COMPATIBLE` has to be set at *creation*, not at view time: it
+        // tells the driver the six layers may be sampled as one directional
+        // image, which can change how they are laid out. Asking for a cube view
+        // of an image created without it is a validation error.
+        let flags = if config.kind.is_cube() {
+            vk::ImageCreateFlags::CUBE_COMPATIBLE
+        } else {
+            vk::ImageCreateFlags::empty()
+        };
+
         let create_info = vk::ImageCreateInfo::default()
+            .flags(flags)
             .image_type(vk::ImageType::TYPE_2D)
             .format(config.format.to_vk())
             .extent(vk::Extent3D {
@@ -167,15 +232,17 @@ impl Image {
             return Err(error.into());
         }
 
-        // The whole image. `TYPE_2D_ARRAY` when there are layers, because that
-        // is what a shader samples with a third coordinate — a `TYPE_2D` view of
-        // a multi-layer image would see only the first.
+        // The whole image, viewed as whatever the kind says it is. A `TYPE_2D`
+        // view of a multi-layer image would see only the first layer, and a
+        // `TYPE_2D_ARRAY` view of a cube is samplable but only by coordinate —
+        // the directional lookup and the seamless filtering both come from the
+        // view type rather than from the image.
         let view_info = vk::ImageViewCreateInfo::default()
             .image(handle)
-            .view_type(if config.layers() > 1 {
-                vk::ImageViewType::TYPE_2D_ARRAY
-            } else {
-                vk::ImageViewType::TYPE_2D
+            .view_type(match config.kind {
+                ImageKind::Flat => vk::ImageViewType::TYPE_2D,
+                ImageKind::Array(_) => vk::ImageViewType::TYPE_2D_ARRAY,
+                ImageKind::Cube => vk::ImageViewType::CUBE,
             })
             .format(config.format.to_vk())
             .subresource_range(vk::ImageSubresourceRange {

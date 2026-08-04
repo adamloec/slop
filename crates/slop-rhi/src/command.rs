@@ -544,6 +544,25 @@ impl std::fmt::Debug for CommandPool {
     }
 }
 
+/// Which part of an image an operation addresses.
+///
+/// **A struct rather than two more `u32` arguments**, and not for tidiness:
+/// `level` and `layer` are the same type, differ by one letter, and mean
+/// completely different things — a mip of a cube face against a face of a mip.
+/// Passing them positionally means a swap compiles, passes validation for a
+/// square image whose level count and layer count happen to both be large
+/// enough, and renders as an environment with its faces shuffled.
+///
+/// [`Default`] is level zero of layer zero, which is the whole of an ordinary
+/// image.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Subresource {
+    /// Which mip level. Zero is the full-size one.
+    pub level: u32,
+    /// Which array layer. Zero for a flat image; a cube face's index for a cube.
+    pub layer: u32,
+}
+
 /// A primary command buffer.
 ///
 /// Owned by its pool: dropping this does not free anything, because
@@ -728,27 +747,28 @@ impl CommandBuffer {
         aspect: ImageAspect,
         extent: Extent2D,
     ) {
-        self.copy_buffer_to_image_level(buffer, 0, image, aspect, extent, 0);
+        self.copy_buffer_to_image_part(buffer, 0, image, aspect, extent, Subresource::default());
     }
 
-    /// Copy one mip level out of a buffer holding a whole chain.
+    /// Copy one part of an image out of a buffer holding several.
     ///
-    /// `buffer_offset` is where this level's bytes start, and `extent` is *this
+    /// `buffer_offset` is where this part's bytes start, and `extent` is *this
     /// level's* size rather than level zero's — Vulkan validates the copy
     /// against the level's real dimensions, so passing the base extent for level
     /// three is rejected rather than silently scaled.
     ///
-    /// The whole chain is one buffer and one copy per level, rather than a
+    /// The whole chain is one buffer and one copy per part, rather than a
     /// staging buffer each. Levels are tiny after the first two: a full chain is
-    /// only a third larger than level zero alone.
-    pub fn copy_buffer_to_image_level(
+    /// only a third larger than level zero alone, and a cube's six faces of it
+    /// are still one allocation.
+    pub fn copy_buffer_to_image_part(
         &self,
         buffer: BufferHandle,
         buffer_offset: u64,
         image: ImageHandle,
         aspect: ImageAspect,
         extent: Extent2D,
-        level: u32,
+        subresource: Subresource,
     ) {
         let regions = [vk::BufferImageCopy::default()
             .buffer_offset(buffer_offset)
@@ -756,8 +776,8 @@ impl CommandBuffer {
             .buffer_image_height(0)
             .image_subresource(vk::ImageSubresourceLayers {
                 aspect_mask: aspect.to_vk(),
-                mip_level: level,
-                base_array_layer: 0,
+                mip_level: subresource.level,
+                base_array_layer: subresource.layer,
                 layer_count: 1,
             })
             .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })

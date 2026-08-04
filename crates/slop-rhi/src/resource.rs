@@ -37,4 +37,4 @@ mod image;
 
 pub use allocator::{Allocator, AllocatorStats, MemoryLocation};
 pub use buffer::{Buffer, BufferConfig};
-pub use image::{Image, ImageConfig, preferred_depth_format};
+pub use image::{Image, ImageConfig, ImageKind, preferred_depth_format};

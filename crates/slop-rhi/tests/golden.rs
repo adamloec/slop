@@ -42,8 +42,8 @@ use std::sync::Arc;
 use slop_asset::Vfs;
 use slop_rhi::{
     Allocator, Buffer, BufferConfig, BufferUsage, CommandPool, Device, Extent2D, Format,
-    GraphicsPipeline, GraphicsPipelineConfig, Image, ImageConfig, ImageState, ImageUsage,
-    MemoryLocation, Offset2D, PipelineLayout, Rect2D, ShaderModule, ShaderStage, vk,
+    GraphicsPipeline, GraphicsPipelineConfig, Image, ImageConfig, ImageKind, ImageState,
+    ImageUsage, MemoryLocation, Offset2D, PipelineLayout, Rect2D, ShaderModule, ShaderStage, vk,
 };
 use slop_verify::{Golden, Mode, Rgba8, Tolerance};
 
@@ -344,7 +344,7 @@ fn colour_target(allocator: &Arc<Allocator>) -> Image {
             // validation error rather than a wrong result.
             usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
             mip_levels: 1,
-            array_layers: 1,
+            kind: ImageKind::Flat,
         },
     )
     .expect("the colour target must be creatable")

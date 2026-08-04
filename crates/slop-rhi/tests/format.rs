@@ -10,7 +10,7 @@
 
 mod support;
 
-use slop_rhi::{Extent2D, Format, Image, ImageConfig, ImageUsage, RhiError};
+use slop_rhi::{Extent2D, Format, Image, ImageConfig, ImageKind, ImageUsage, RhiError};
 
 /// What §9.4 chose, used the way E2 will use it.
 ///
@@ -35,7 +35,7 @@ fn the_hdr_target_format_can_be_rendered_into_and_sampled() {
             format: Format::Rgba16Float,
             usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED,
             mip_levels: 1,
-            array_layers: 1,
+            kind: ImageKind::Flat,
         },
     );
 
@@ -68,7 +68,7 @@ fn the_packed_hdr_format_is_also_a_usable_colour_attachment() {
             format: Format::R11G11B10Float,
             usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED,
             mip_levels: 1,
-            array_layers: 1,
+            kind: ImageKind::Flat,
         },
     );
 
@@ -107,7 +107,7 @@ fn an_impossible_usage_is_refused_by_name_before_the_driver_sees_it() {
             format: Format::Bc7Unorm,
             usage: ImageUsage::COLOR_ATTACHMENT,
             mip_levels: 1,
-            array_layers: 1,
+            kind: ImageKind::Flat,
         },
     )
     .expect_err("a block-compressed colour attachment must be refused");
@@ -146,7 +146,7 @@ fn a_block_compressed_format_is_still_fine_for_sampling() {
             format: Format::Bc7Unorm,
             usage: ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
             mip_levels: 1,
-            array_layers: 1,
+            kind: ImageKind::Flat,
         },
     );
 

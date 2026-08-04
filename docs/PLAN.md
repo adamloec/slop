@@ -1401,7 +1401,7 @@ Five steps, at E5's granularity, each landing on `main` on its own.
 |---|---|---|---|
 | **E6a** | `.hdr` decode, equirect → cube, the cooked format, `fetch` an environment | `slop-cook`, `slop-asset` | **Landed.** RGBE against known bytes in all three encodings — flat, adaptive and the old run-length one, which is decoded rather than refused because ignoring it produces garbage with no error; the two encodings of the same pixels compared against each other; the cube's face table round-tripped in both directions; the format round-tripped with truncation, version, face count and an unusable pixel format each refused by name. `helipad.hdr` cooks to a 4.2 MB artifact in under a second. See below for what it cost |
 | **E6b** | SH projection at cook time; `ambient` becomes nine coefficients; the shader evaluates it | `slop-math`, `slop-cook`, `slop-render`, `model.slang` | **Landed.** A constant environment reconstructs to that constant in every direction, at three levels — the basis alone, the cube's solid angles driving it, and the cooker end to end. A light from one side is brightest facing it and dimmest facing away, on all six axes, by equal amounts. **Every reference image is unchanged**, which is the claim `default_irradiance` exists to make: a uniform sky is the same one code path in its degenerate case, so a caller that binds no environment renders bit-identically to how it did before spherical harmonics existed. Two new tests cover what the references cannot — see below |
-| **E6c** | The prefiltered chain; cube images in the RHI; layers in the upload path; the heap's cube alias | `slop-rhi`, `slop-render`, `slop-cook` | **Cook half landed.** A uniform sky survives every roughness level — one assertion catching a weight that does not sum to one, a lobe leaking below the horizon, and a mip selection reading off the end of the chain. Variance falls monotonically with roughness, a reflection does not move as it blurs, and neighbouring texels stay within 6× of each other, which is what a firefly is not |
+| **E6c** | The prefiltered chain; cube images in the RHI; layers in the upload path; the heap's cube alias | `slop-rhi`, `slop-render`, `slop-cook` | **Landed.** Cook side: a uniform sky survives every roughness level — one assertion catching a weight that does not sum to one, a lobe leaking below the horizon, and a mip selection reading off the end of the chain. Variance falls monotonically with roughness, a reflection does not move as it blurs, and neighbouring texels stay within 6× of each other, which is what a firefly is not. GPU side: `slop-rhi/tests/cube.rs` uploads six differently-coloured faces and samples along the six axes, which is **the only thing that can check the engine's face order against the hardware's** — see below |
 | **E6d** | GGX direct specular and IBL specular; metallic and roughness finally read | `model.slang`, `shaders/lib/` | White furnace: a constant environment with no direct light leaves an unlit surface at its albedo, within tolerance. **All references re-approved here, deliberately** |
 | **E6e** | The skybox pass | `slop-render`, `examples/model` | The reference now shows the environment it is lit by, so the two are checkable against each other |
 
@@ -1515,3 +1515,41 @@ makes the number a measurement rather than a stopwatch held over a build system.
 The work is partitioned **by row rather than by face**: six faces would cap the
 speedup at six however many cores exist, and would leave five idle at the small
 levels.
+
+#### The face table is the one thing no CPU test can check
+
+`slop-cook`'s `cube.rs` asserts its own table exhaustively: `direction_of` and
+`face_of` are inverses over all six faces at twenty-five points each. That is
+worth having and it cannot answer the question that matters, because **a
+self-consistent table can be rotated as a whole and still pass every one of
+those assertions.** What it has to agree with is the hardware's ordering, which
+is fixed by the API and lives on the other side of a driver.
+
+The disagreement is also invisible where it lands: an environment with two faces
+transposed reads as an odd source panorama, not as a bug, and no reference image
+distinguishes it from a correct one.
+
+So `slop-rhi/tests/cube.rs` writes a different colour into each of the six
+layers, dispatches a compute shader that samples along each of the six axes, and
+compares the pairs. It covers three things at once, each of which fails silently
+on its own:
+
+| | |
+|---|---|
+| `ImageKind::Cube` | `CUBE_COMPATIBLE` at creation *and* a `TYPE_CUBE` view. An image made without the flag cannot be viewed as a cube; the view type is what makes the lookup directional |
+| `Subresource::layer` | Before this the copy could name a mip and not a layer — so all six faces would have landed on layer zero |
+| `TextureCube` on binding 0 | A third alias of the sampled-image binding, legal because the descriptor type says nothing about view type. If the descriptor and the declaration disagreed, the sample reads rubbish and nothing reports it |
+
+It passed first run with validation on, so the ordering was right — but that is
+only worth stating because the test was then broken on purpose. Pinning every
+copy to layer zero gives `[220, 0, 0, 0, 0, 0]`: the last face written wins and
+the other five are undefined, which is exactly what the missing-layer bug would
+have produced silently.
+
+**`ImageKind` replaced `array_layers: u32`** to make this expressible at all. A
+cube is not "six layers plus a flag" — it is six layers *and* that flag, and as
+two fields both "six layers without the flag" and "the flag with four layers"
+are constructible. Vulkan rejects the second and silently accepts the first,
+leaving an image that cannot be viewed as a cube for a reason nothing reports.
+`Subresource` exists for the same kind of reason: `level` and `layer` are both
+`u32`, differ by one letter, and mean a mip of a face against a face of a mip.

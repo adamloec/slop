@@ -31,8 +31,8 @@ use slop_editor::{Overlay, egui};
 use slop_render::Target;
 use slop_rhi::{
     Allocator, Buffer, BufferConfig, BufferUsage, CommandPool, Device, DeviceSelection, Extent2D,
-    Format, Image, ImageConfig, ImageState, ImageUsage, Instance, InstanceConfig, MemoryLocation,
-    RhiError, ShaderModule,
+    Format, Image, ImageConfig, ImageKind, ImageState, ImageUsage, Instance, InstanceConfig,
+    MemoryLocation, RhiError, ShaderModule,
 };
 use slop_verify::{Golden, Mode, Rgba8, Tolerance};
 
@@ -337,7 +337,7 @@ impl Headless {
                 format: FORMAT,
                 usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
                 mip_levels: 1,
-                array_layers: 1,
+                kind: ImageKind::Flat,
             },
         )
         .map_err(|error| error.to_string())?;

@@ -13,8 +13,8 @@ mod support;
 use std::sync::Arc;
 
 use slop_rhi::{
-    BindlessHeap, BindlessHeapConfig, Extent2D, Format, Image, ImageConfig, ImageState, ImageUsage,
-    PipelineLayout, PipelineLayoutConfig, vk,
+    BindlessHeap, BindlessHeapConfig, Extent2D, Format, Image, ImageConfig, ImageKind, ImageState,
+    ImageUsage, PipelineLayout, PipelineLayoutConfig, vk,
 };
 
 #[test]
@@ -276,7 +276,7 @@ fn texture(allocator: &Arc<slop_rhi::Allocator>) -> Image {
             format: Format::Rgba8Unorm,
             usage: ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
             mip_levels: 1,
-            array_layers: 1,
+            kind: ImageKind::Flat,
         },
     )
     .expect("the texture must be creatable")

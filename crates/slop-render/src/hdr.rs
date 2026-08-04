@@ -34,7 +34,7 @@ use slop_asset::Reflection;
 use slop_core::Handle;
 use slop_rhi::{
     Allocator, BindlessHeap, Blend, Device, Extent2D, Format, GraphicsPipeline,
-    GraphicsPipelineConfig, Image, ImageConfig, ImageState, ImageUsage, ImageViewHandle,
+    GraphicsPipelineConfig, Image, ImageConfig, ImageKind, ImageState, ImageUsage, ImageViewHandle,
     PipelineLayout, PipelineLayoutConfig, SampledImage, Sampler, SamplerConfig, ShaderModule,
     ShaderStage, TextureSampler,
 };
@@ -86,7 +86,7 @@ impl HdrTarget {
                 // No chain: nothing samples this at a distance, it is read
                 // one-to-one by the pass that resolves it.
                 mip_levels: 1,
-                array_layers: 1,
+                kind: ImageKind::Flat,
             },
         )?;
 

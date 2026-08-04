@@ -11,7 +11,7 @@ use slop_rhi::{
     Allocator, Attachments, BindlessHeap, BindlessHeapConfig, Blend, Buffer, BufferConfig,
     BufferState, BufferUsage, ClearValue, ColorAttachment, DEPTH_CLEAR, DepthAttachment, Device,
     Extent2D, Format, GraphicsPipeline, GraphicsPipelineConfig, Image, ImageAspect, ImageConfig,
-    ImageState, ImageUsage, Load, MemoryLocation, PipelineLayout, PipelineLayoutConfig,
+    ImageKind, ImageState, ImageUsage, Load, MemoryLocation, PipelineLayout, PipelineLayoutConfig,
     SampledImage, Sampler, SamplerConfig, ShaderModule, ShaderStage, TextureSampler,
 };
 
@@ -258,7 +258,7 @@ impl Scene {
                 format: depth_format,
                 usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT,
                 mip_levels: 1,
-                array_layers: 1,
+                kind: ImageKind::Flat,
             },
         )
         .map_err(|error| error.to_string())?;
@@ -430,7 +430,7 @@ impl Scene {
                 format: self.depth.format(),
                 usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT,
                 mip_levels: 1,
-                array_layers: 1,
+                kind: ImageKind::Flat,
             },
         )
         .map_err(|error| error.to_string())?;
@@ -713,7 +713,7 @@ fn upload_texture(
             format: vulkan_format(cooked.format),
             usage: ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
             mip_levels: cooked.mip_levels,
-            array_layers: 1,
+            kind: ImageKind::Flat,
         },
     )
     .map_err(|error| error.to_string())?;
@@ -728,7 +728,7 @@ fn upload_texture(
 
         // One copy per level, out of one staging buffer holding the chain.
         for (index, level) in cooked.levels().enumerate() {
-            command.copy_buffer_to_image_level(
+            command.copy_buffer_to_image_part(
                 staging.handle(),
                 level.offset as u64,
                 texture.handle(),
@@ -737,7 +737,10 @@ fn upload_texture(
                     width: level.width,
                     height: level.height,
                 },
-                u32::try_from(index).expect("a mip chain is far shorter than u32::MAX"),
+                slop_rhi::Subresource {
+                    level: u32::try_from(index).expect("a mip chain is far shorter than u32::MAX"),
+                    layer: 0,
+                },
             );
         }
         command.transition_image(

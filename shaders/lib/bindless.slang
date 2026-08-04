@@ -58,6 +58,20 @@
 // buffers. The cooker disables that warning by id.
 [[vk::binding(0, 0)]] Texture2DArray<float4> g_texture_arrays[];
 
+// And again as cube maps, for the same reason and by the same mechanism.
+//
+// An environment (docs/PLAN.md 9.7) is six layers created with
+// VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT and viewed as VK_IMAGE_VIEW_TYPE_CUBE.
+// The descriptor type is identical -- VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE says
+// nothing about view type -- so this is a third declaration of binding 0 rather
+// than a new binding, and adding it invalidates no pipeline.
+//
+// What the cube view buys over reading the same six layers through
+// g_texture_arrays is **seamless filtering**: a sample near a face edge blends
+// with the neighbouring face in hardware. Through the array view it would clamp,
+// and every cube edge in a reflection would show a visible seam.
+[[vk::binding(0, 0)]] TextureCube<float4> g_texture_cubes[];
+
 // Structured data a shader indexes: per-material parameters, per-instance
 // transforms, and the draw lists a GPU-driven pass builds (DESIGN.md 4.2).
 //
@@ -166,6 +180,19 @@ float4 sampleTextureLevel(TextureHandle texture, SamplerHandle sampler, float2 u
 {
     return g_textures[NonUniformResourceIndex(texture.index)]
         .SampleLevel(g_samplers[NonUniformResourceIndex(sampler.index)], uv, level);
+}
+
+// Sample a cube map by direction, at an explicit mip level.
+//
+// `direction` need not be normalised -- the hardware divides by the major axis
+// either way -- and the level is explicit because every caller has one: a
+// prefiltered environment picks its level from a material's roughness, and a
+// skybox wants level zero. There is no case here where an implicit derivative
+// would be the right answer, and inside a branch there would be no derivative.
+float4 sampleCubeLevel(TextureHandle texture, SamplerHandle sampler, float3 direction, float level)
+{
+    return g_texture_cubes[NonUniformResourceIndex(texture.index)]
+        .SampleLevel(g_samplers[NonUniformResourceIndex(sampler.index)], direction, level);
 }
 
 // Read a texel directly, with no filtering.

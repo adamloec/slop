@@ -41,8 +41,9 @@ use slop_math::Mat4;
 use slop_rhi::{
     Allocator, BindlessHeap, Blend, Buffer, BufferConfig, BufferState, BufferUsage, CommandBuffer,
     CommandPool, Device, Extent2D, Format, GraphicsPipeline, GraphicsPipelineConfig, Image,
-    ImageConfig, ImageState, ImageUsage, MemoryLocation, PipelineLayout, PipelineLayoutConfig,
-    SampledImage, Sampler, SamplerConfig, ShaderModule, ShaderStage, StorageBuffer, TextureSampler,
+    ImageConfig, ImageKind, ImageState, ImageUsage, MemoryLocation, PipelineLayout,
+    PipelineLayoutConfig, SampledImage, Sampler, SamplerConfig, ShaderModule, ShaderStage,
+    StorageBuffer, Subresource, TextureSampler,
 };
 
 use crate::{RenderError, VertexBinding, View};
@@ -685,7 +686,7 @@ impl MeshRenderer {
                 usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT,
                 // No chain: nothing samples a depth buffer at a distance.
                 mip_levels: 1,
-                array_layers: 1,
+                kind: ImageKind::Flat,
             },
         )?);
 
@@ -1052,7 +1053,7 @@ fn upload_texture(
             format: vulkan_format(texture.format),
             usage: ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
             mip_levels: texture.mip_levels,
-            array_layers: 1,
+            kind: ImageKind::Flat,
         },
     )?;
 
@@ -1069,7 +1070,7 @@ fn upload_texture(
 
     // One copy per level, all out of the same staging buffer.
     for (index, level) in texture.levels().enumerate() {
-        uploads.command.copy_buffer_to_image_level(
+        uploads.command.copy_buffer_to_image_part(
             staging,
             level.offset as u64,
             image.handle(),
@@ -1078,7 +1079,10 @@ fn upload_texture(
                 width: level.width,
                 height: level.height,
             },
-            u32::try_from(index).expect("a mip chain is far shorter than u32::MAX"),
+            Subresource {
+                level: u32::try_from(index).expect("a mip chain is far shorter than u32::MAX"),
+                layer: 0,
+            },
         );
     }
 

@@ -53,7 +53,7 @@ mod sync;
 mod usage;
 
 pub use command::{
-    BufferState, CommandBuffer, CommandPool, ImageState, Stage, Submission, WaitStage,
+    BufferState, CommandBuffer, CommandPool, ImageState, Stage, Submission, Subresource, WaitStage,
     submit_and_wait, submit_recorded_and_wait,
 };
 pub use compute::{Compute, ComputePipeline};
@@ -79,7 +79,7 @@ pub use pipeline::{
     PipelineLayoutConfig, ShaderStage, VertexLayout,
 };
 pub use resource::{
-    Allocator, AllocatorStats, Buffer, BufferConfig, Image, ImageConfig, MemoryLocation,
+    Allocator, AllocatorStats, Buffer, BufferConfig, Image, ImageConfig, ImageKind, MemoryLocation,
     preferred_depth_format,
 };
 pub use sampler::{Filter, SamplerConfig, TextureSampler, Wrap};
